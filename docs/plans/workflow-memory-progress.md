@@ -1,0 +1,33 @@
+# Progress: workflow-memory
+
+- T0 done (executor): worktree ../pi-house-workflow-memory on feat/workflow-memory from 24b52f5; npm install --ignore-scripts; baseline check clean, 284/284 tests pass; main git status unchanged.
+- ASSUMED: the plan and this ledger live in the main checkout's untracked docs/plans/ (the plan is not in HEAD, so the worktree has no copy); agents get the absolute plan path. Adding the ledger does not change `git status --short` there (docs/plans/ was already untracked).
+- Models resolved: openai-codex/gpt-6-luna, claude-bridge/claude-sonnet-5-5 (exact ids exist).
+- T1 dispatched: researcher, pihouse, openai-codex/gpt-6-luna, skills spec-driven-development, cwd worktree; told to commit the report as docs: research for workflow memory.
+- T1 result: ISSUES (56b8c96). Report has 21 links and verdicts (improve 8, 10, 13) but no runnable trials: yt-dlp/whisper missing, rotation unverified.
+- T1 retry 1/1 sent: verify ctx.newSession rotation + agent-link addressing, runnable size prototype for 1/5/20 runs, dependency-free YouTube caption fetch via Node fetch against a real video.
+- T1 retry result: ISSUES->accepted as PASS (50d21d3). Validation re-run by executor: `grep -c http` = 22. Trials committed (keeper-context.ts, youtube-captions.ts). Rotation verified (ctx.newSession command-only; agent-link name follows the process env). YouTube fetch hit a CAPTCHA page on this network: recorded as the real result, not a gap in the research. Researcher cancelled.
+- T2 started (executor). Decisions taken from research + pi docs: digest via nested model calls (ctx.modelRegistry.complete), purge via pi `context` event boundary + `/keeper new` (ctx.newSession), keeper fixed name via optional `name` on agent-link root register.
+- T2 done (executor): e654351 docs: spec and ADR for workflow memory. Validation: both files non-empty, git log -1 = e654351.
+- Fix (executor): b09e83d docs: format the research trials (T1's trial .ts files broke biome; check + 284 tests pass after).
+- ASSUMED: keeper fixed name needs an optional `name` on agent-link's root register (agent-link-core hub.ts, agent-link open.ts) and `pih keeper` (cli.ts, launcher.ts): added to T6's files (ADR-001 D2).
+- ASSUMED: ask stays in the asking session (not routed through the keeper); spec "/workflow ask".
+- Worktree ../pi-house-wm-sources on pihouse/wm-sources from b09e83d for T5.
+- T3 dispatched: store, pihouse, claude-bridge/claude-sonnet-5-5, skills spec-driven-development + git-workflow-and-versioning, cwd ../pi-house-workflow-memory.
+- T5 dispatched: sources, pihouse, claude-bridge/claude-sonnet-5-5, same skills, cwd ../pi-house-wm-sources (pihouse/wm-sources).
+- T5 result: PASS 690f780 on pihouse/wm-sources. Executor re-ran: check clean, 294/294 tests. 10 tests cover captions, CAPTCHA->yt-dlp, no tools, network error, whisper, web link; fakes only. sources cancelled. Merge after T4.
+- T3 result: PASS d0d3eba. Executor re-ran: check clean, 302/302 tests; 18 store tests incl. processed-never-pending, rejected-blocked, indexSlice reads only the index. store cancelled. (Merge: built directly on feat/workflow-memory.)
+- T4 dispatched: capture, pihouse, claude-bridge/claude-sonnet-5-5, skills spec-driven-development + git-workflow-and-versioning, cwd main worktree.
+- T4 result: PASS b0058bd. Executor re-ran: check clean, 309/309; 7 capture tests (3-level tree, unflagged ignored, save on plain chat, no model, title<=80). Concerns accepted: sweep flags by agent-link name/executor/flags.json (not pi session names); review path via recordReview. capture cancelled.
+- Merge T5 into feat/workflow-memory: 03cc9d9, check clean, 319/319. Worktree ../pi-house-wm-sources removed, branch deleted.
+- T6 dispatched: keeper, pihouse, claude-bridge/claude-sonnet-5-5, skills spec-driven-development + git-workflow-and-versioning, main worktree; files extended per ADR D2 (agent-link root name, pih keeper).
+- T6 result: PASS c9de72f. Executor re-ran npm run skills (no diff) + check clean + 345/345; 20 keeper tests incl. batch of 3 -> 0 pending, second batch never reads first's transcripts, approve/reject, 90-day archive, sizes at 1/5/20 runs, context boundary, plain-words routing. Concerns accepted: boundary is a custom message; raw copies in archive/raw/<id>; agent-link client.ts + server.ts also touched to pass the root name. keeper cancelled.
+- T7 dispatched: ask, pihouse, claude-bridge/claude-sonnet-5-5, same skills, main worktree.
+- T7 result: PASS 724f5d9. Executor re-ran: check clean, 348/348; tests: memory+index+digests and no transcript, YouTube -> consulted/, failed fetch fallback, <= LIMITS.ask with 20 runs. Gap: model-written ideas/ files are not indexed. Retry 1/1 sent: store adoptIdeas() called by ask and keeper.
+- T7 retry result: PASS 697a39a (adoptIdeas in store, called by ask and keeper). Executor re-ran: check clean, 349/349. ask cancelled.
+- T8 started (executor): docs.
+- T8 done (executor): 88bca8d docs: workflow memory, the keeper and the new commands. Final validation in worktree: npm run skills (no diff), npm run check clean, npm test 349/349 (the one 'warn' match is a test title); git log main..feat/workflow-memory = 12 commits; main git status unchanged since T0; no remote contains the branch (not pushed). Worktree ../pi-house-workflow-memory kept: it holds the branch for the user to merge.
+- Follow-up (user present, approved): yt-fix dispatched (pihouse, claude-sonnet-5-5, git-workflow) for (1) YouTube captions via innertube player endpoint, proven by executor on DNDYYHsypZg (40,673 chars en) and a TED talk; (2) isExecutor false positive (capture classified as executor). Found: user's pihouse-8 (main code, old ask) spawned opencode yt-research that spent 685k tokens and ended with no answer. Note: pih points at main checkout; keeper end-to-end needs the merge or PIHOUSE_NO_LINK=1 with the worktree CLI.
+- yt-fix result: PASS cc80076 + e43b77a. Executor re-ran: check clean, 353/353; real fetchSource on https://youtu.be/DNDYYHsypZg -> captions-fetch, en, 40,673 chars, title/author/duration. yt-fix cancelled.
+- Fix after user's first real keeper run: bootstrap moved from system prompt (dropped by pi-claude-bridge) to a hidden context message; plain words ignore quotes. Executor did it directly (user present).
+- Follow-up (user present, approved): durable-research dispatched (pihouse, claude-sonnet-5-5, source-driven-development): should the keeper build on Pi durable (pi 1.4.0; installed 1.3.0)? Video transcript copied to worktree docs/research/pi-durable-video.txt (not to be committed).
