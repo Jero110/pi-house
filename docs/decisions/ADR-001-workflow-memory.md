@@ -31,8 +31,11 @@ Decision:
   (`agent-link-core/src/types.ts:221`, `src/pi-extension/index.ts:119-120,170-174`; research, "Verified pi rotation
   capability").
 - Purge after each job: the keeper extension writes a boundary entry and its `context` handler sends the model only
-  the messages after it, plus a bounded bootstrap from files (`before_agent_start`). pi documents `context` as the
-  event that transforms conversation messages per request (`docs/extensions.md:116`).
+  the messages after it, preceded by a bounded bootstrap from files as a hidden message. pi documents `context` as
+  the event that transforms conversation messages per request (`docs/extensions.md:116`). The bootstrap was first
+  appended to the system prompt in `before_agent_start`; in the first real run the Claude bridge
+  (`pi-claude-bridge`, which rebuilds the system prompt from pi's known sections) dropped it and the keeper could not
+  see the pending count, so it moved into the request's messages, which every provider forwards.
 - Rotation: `/keeper new`, and the start of every digest, call `ctx.newSession`. pi allows session replacement only
   from command handlers, since lifecycle handlers can deadlock (`docs/extensions.md:214-220`), so rotation cannot be
   the automatic purge after every answer; the boundary is.

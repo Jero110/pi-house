@@ -242,10 +242,11 @@ plain web link stripped to text with its title; no real network in any test.
 
 1. **Start** (`session_start`): sweep, then show "N runs pending" in the status bar (`ctx.ui.setStatus`) and as a
    notice. Code only.
-2. **Steady context**: every model request of the keeper sees, through `before_agent_start`, a bootstrap of the
-   keeper instructions + `workflow-memory.md` + `indexSlice({ limit: 30, maxChars: 6000 })` + the pending count; and
-   through the `context` event, only the messages after the last **boundary** (an `appendEntry("keeper-boundary")`
-   written after every job). Older messages stay in the session file but never reach the model, so the cost of a
+2. **Steady context**: through the `context` event, every model request of the keeper starts with a bootstrap
+   message (a hidden custom message, request-local, never saved) holding the keeper instructions +
+   `workflow-memory.md` + `indexSlice({ limit: 30, maxChars: 6000 })` + the pending count, followed by only the
+   messages after the last **boundary** (a hidden custom message written after every job). Not the system prompt:
+   the Claude bridge rebuilds it from pi's known sections and drops added text (found in the first real run). Older messages stay in the session file but never reach the model, so the cost of a
    turn does not grow with the keeper's age. `/keeper new` additionally rotates to a fresh pi session
    (`ctx.newSession`, command-only per pi's docs) and names it `keeper · <date>`. Compaction is only a safety net.
 3. **Digest** (`/keeper summarize` or the plain words): command handler, so it first rotates to a fresh session

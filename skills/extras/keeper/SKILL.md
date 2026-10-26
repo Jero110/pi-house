@@ -14,8 +14,9 @@ proposals, edit a skill.
 
 ## On start
 
-Say how many runs are pending, in one line ("3 runs pending. Say "summarize them" to digest them."). The status bar and
-the notice already show it; do not read any run to answer.
+Say how many runs are pending, in one line ("3 runs pending. Say summarize them to digest them."). The count is the
+"Now" line of the keeper context at the top of the conversation; the status bar and the notice show it too. Never run
+a command on or read a file in the memory folder to find it.
 
 ## What the user can say
 

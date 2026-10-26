@@ -33,7 +33,11 @@ export const USAGE =
 /** "summarize", "summarize them", "digest": the plain words that mean `/keeper summarize`. */
 const PLAIN_SUMMARIZE = /^\s*(?:summari[sz]e|digest)(?:\s+(?:them|it|all|the\s+(?:runs|batch)))?\s*[.!]?\s*$/i;
 
-export const isSummarizeWords = (text: string): boolean => PLAIN_SUMMARIZE.test(text);
+/**
+ * Problem: the user typed `summarize them"` (a stray quote from copying the hint) and the words reached the model,
+ * which could not run the digest. Solution: quotes and backticks around the words are ignored.
+ */
+export const isSummarizeWords = (text: string): boolean => PLAIN_SUMMARIZE.test(text.replace(/["'`\u201c\u201d]/g, ""));
 
 export const pendingText = (n: number): string => `${n} run${n === 1 ? "" : "s"} pending`;
 
@@ -44,7 +48,11 @@ const INSTRUCTIONS = [
 	"- Digests come from /keeper summarize (also the words 'summarize them'). Proposals are listed with /keeper proposals;",
 	"  /keeper approve <id> and /keeper reject <id> decide them. Never apply a change that is not approved.",
 	"- Never delete anything: unused memory is archived, and only an approved delete-raw proposal removes raw copies.",
+	"- Never run commands on or read files in the memory folder: the pending count is the 'Now' line below, and the",
+	"  user can type /keeper for it.",
 ].join("\n");
+
+export const CONTEXT_TYPE = "keeper-context";
 
 /**
  * What every model request of the keeper sees besides the conversation: instructions, the workflow memory, a slice
@@ -84,6 +92,25 @@ const isBoundary = (m: AgentMessage): boolean => m.role === "custom" && m.custom
 export function afterBoundary(messages: AgentMessage[]): AgentMessage[] {
 	const i = messages.findLastIndex(isBoundary);
 	return i < 0 ? messages : messages.slice(i + 1);
+}
+
+/**
+ * What the model sees on every request: the bootstrap as the first message, then the messages after the last boundary.
+ * Problem: the bootstrap was appended to the system prompt in before_agent_start, and the Claude bridge rebuilds the
+ * system prompt from pi's known sections, so the text never reached the model. Example: the keeper said it could not
+ * tell how many runs were pending and counted files with bash. Solution: a message in the request itself, which every
+ * provider forwards; the context event is request-local, so it is never saved in the session.
+ */
+export function keeperContext(messages: AgentMessage[], bootstrap: string): AgentMessage[] {
+	const rest = afterBoundary(messages);
+	const head: AgentMessage = {
+		role: "custom",
+		customType: CONTEXT_TYPE,
+		content: bootstrap,
+		display: false,
+		timestamp: rest[0]?.timestamp ?? 0,
+	};
+	return [head, ...rest];
 }
 
 /** The batch summary and the proposals it made, as the keeper shows them. */
@@ -187,11 +214,7 @@ export function registerKeeper(pi: ExtensionAPI, deps: KeeperDeps): void {
 		}
 	});
 
-	pi.on("before_agent_start", (event) => ({
-		systemPrompt: `${event.systemPrompt}\n\n${keeperBootstrap(deps.store())}`,
-	}));
-
-	pi.on("context", (event) => ({ messages: afterBoundary(event.messages) }));
+	pi.on("context", (event) => ({ messages: keeperContext(event.messages, keeperBootstrap(deps.store())) }));
 
 	pi.on("agent_end", (_event, ctx) => {
 		if (applying.size) {

@@ -9,6 +9,7 @@ import type { ContextEvent, ExtensionAPI } from "@earendil-works/pi-coding-agent
 import {
 	afterBoundary,
 	BOUNDARY,
+	CONTEXT_TYPE,
 	isSummarizeWords,
 	type KeeperDeps,
 	keeperBootstrap,
@@ -530,7 +531,7 @@ test("the context handler drops the messages before the last boundary", () => {
 	const messages = [msg("old 1", 1), boundary(2), msg("middle", 3), boundary(4), msg("new 1", 5), msg("new 2", 6)];
 	const out = k.fire("context", { messages }, k.ctx)?.[0] as { messages: AgentMessage[] };
 	assert.deepEqual(
-		out.messages.map((m) => (m.role === "user" ? m.content : "?")),
+		out.messages.slice(1).map((m) => (m.role === "user" ? m.content : "?")),
 		["new 1", "new 2"],
 	);
 	// With no boundary yet, everything goes through.
@@ -538,22 +539,35 @@ test("the context handler drops the messages before the last boundary", () => {
 	assert.equal(afterBoundary(messages.slice(0, 2)).length, 0, "a boundary last leaves nothing before it");
 });
 
-test("before each request the model gets the bootstrap, and it does not grow with the conversation", () => {
+test("every request starts with the bootstrap as a message, not in the system prompt, and it does not grow", () => {
 	const f = fixture();
 	addRun(f.store, "r1");
 	const k = keeperOf(f, fakeModel());
-	const out = k.fire("before_agent_start", { systemPrompt: "BASE", messageType: "user", prompt: "hi" }, k.ctx)?.[0] as {
-		systemPrompt: string;
-	};
-	assert.ok(out.systemPrompt.startsWith("BASE\n\n"));
-	assert.match(out.systemPrompt, /1 run pending/);
-	assert.ok(out.systemPrompt.length - 6 <= LIMITS.keeperBootstrap);
+	// The Claude bridge rebuilds the system prompt from pi's sections, so nothing may depend on changing it.
+	assert.equal(
+		k.fire("before_agent_start", { systemPrompt: "BASE", messageType: "user", prompt: "hi" }, k.ctx)?.[0],
+		undefined,
+	);
+	const user = (text: string, t: number): AgentMessage => ({ role: "user", content: text, timestamp: t });
+	const run = (messages: AgentMessage[]) =>
+		(k.fire("context", { messages }, k.ctx)?.[0] as { messages: AgentMessage[] } | undefined)?.messages ?? [];
+	const short = run([user("how many?", 1)]);
+	const head = short[0];
+	assert.ok(head && head.role === "custom" && head.customType === CONTEXT_TYPE && head.display === false);
+	const text = typeof head.content === "string" ? head.content : "";
+	assert.match(text, /## Now: 1 run pending/);
+	assert.ok(text.length <= LIMITS.keeperBootstrap);
+	const long = run(Array.from({ length: 50 }, (_, i) => user(`message ${i}`, i)));
+	assert.equal(long.length, 51, "one bootstrap, then the conversation");
+	assert.deepEqual(long[0], { ...head, timestamp: 0 });
 });
 
 test('plain words ("summarize them", "digest") run the digest through the command; other text goes through', async () => {
 	assert.equal(isSummarizeWords("summarize"), true);
 	assert.equal(isSummarizeWords("Summarize them."), true);
 	assert.equal(isSummarizeWords("digest"), true);
+	assert.equal(isSummarizeWords('summarize them"'), true, "a stray quote from copying the hint");
+	assert.equal(isSummarizeWords("`summarize`"), true);
 	assert.equal(isSummarizeWords("summarize the docs for me"), false);
 	assert.equal(isSummarizeWords("what did you digest?"), false);
 
