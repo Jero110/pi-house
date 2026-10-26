@@ -1,4 +1,5 @@
-// pihouse's status bar, laid out like Claude Code's: `user@host  ~/folder  Model  ctx: 32%  ◷ 5h: 23% (2h15m → 16:00)`.
+// pihouse's status bar, laid out like Claude Code's: the model and context on the left, `user@host  ~/folder  ⎇ branch  account` on the right,
+// then `◷ claude  5h: 23% (2h15m → 16:00)` for each account.
 //
 // Problem: a usage meter for one provider is wrong the moment the user is logged in to two.
 // Example: a Claude login and a ChatGPT login are both active; the bar must show both windows side by side, and the
@@ -9,6 +10,7 @@ import { hostname, userInfo } from "node:os";
 import { basename } from "node:path";
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { chatgptEmail, claudeEmail, gitBranch } from "../identity.ts";
 import {
 	CLAUDE_CODE_RATE_LIMITS,
 	chatgptAccountId,
@@ -40,6 +42,10 @@ export interface StatusInput {
 	cwd: string;
 	user: string;
 	host: string;
+	/** The git branch of the folder, undefined outside a repo. */
+	branch?: string;
+	/** The login the model in use runs on: its email, or the provider's name when the email is unknown. */
+	login?: string;
 	/** The model as people read it: "Sonnet 5.5". */
 	model?: string;
 	/** The thinking effort: "off", "low", "medium", "high"... */
@@ -75,32 +81,44 @@ interface Segment {
 	order: number;
 	/** What goes first when the line does not fit: higher goes first. */
 	drop: number;
+	/** The model's side of the line (left) or the place's (right: host, folder, branch, account). */
+	side: "left" | "right";
 	text: string;
 }
 
 /**
- * The status block: first the session (folder, model, effort, context), then one line per account with its windows
- * and resets. The accounts never share a line, so one can never push another out.
+ * The status block: first the session, with the model, effort and context on the left and where you are (host,
+ * folder, branch, account) on the right, then one line per account with its windows and resets. The accounts never share a line, so one can never push another out.
  */
 export function statusLine(theme: Palette, s: StatusInput): string[] {
 	const heat = (percent: number) => (percent >= 90 ? "error" : percent >= 70 ? "warning" : "text");
 	const segments: Segment[] = [];
-	const add = (order: number, drop: number, text: string) => segments.push({ order, drop, text });
+	const add = (side: Segment["side"], order: number, drop: number, text: string) =>
+		segments.push({ order, drop, side, text });
 
-	add(0, 5, theme.bold(theme.fg("text", `${s.user}@${s.host}`)));
-	add(1, 0, theme.bold(theme.fg("text", shortCwd(s.cwd))));
-	if (s.model) add(2, 2, theme.fg("accent", s.model));
-	if (s.effort) add(3, 4, theme.fg("muted", `effort: ${s.effort}`));
-	if (s.contextPercent === null) add(4, 3, theme.fg("dim", "ctx: --"));
+	if (s.model) add("left", 0, 2, theme.fg("accent", s.model));
+	if (s.effort) add("left", 1, 4, theme.fg("muted", `effort: ${s.effort}`));
+	if (s.contextPercent === null) add("left", 2, 3, theme.fg("dim", "ctx: --"));
 	else {
 		const p = Math.round(s.contextPercent);
-		add(4, 3, theme.fg(p >= 90 ? "error" : p >= 70 ? "warning" : "muted", `ctx: ${p}%`));
+		add("left", 2, 3, theme.fg(p >= 90 ? "error" : p >= 70 ? "warning" : "muted", `ctx: ${p}%`));
 	}
-	const compose = () =>
-		[...segments]
+	add("right", 0, 5, theme.bold(theme.fg("text", `${s.user}@${s.host}`)));
+	add("right", 1, 0, theme.bold(theme.fg("text", shortCwd(s.cwd))));
+	if (s.branch) add("right", 2, 1, theme.fg("accent", `⎇ ${s.branch}`));
+	if (s.login) add("right", 3, 6, theme.fg("muted", s.login));
+	const side = (which: Segment["side"]) =>
+		segments
+			.filter((x) => x.side === which)
 			.sort((a, b) => a.order - b.order)
 			.map((x) => x.text)
 			.join("  ");
+	/** Left and right with the gap between them filled, so the right part ends at the edge. */
+	const compose = () => {
+		const [left, right] = [side("left"), side("right")];
+		const gap = s.width - visibleWidth(left) - visibleWidth(right);
+		return left && right ? `${left}${" ".repeat(Math.max(2, gap))}${right}` : left || right;
+	};
 	while (segments.length > 1 && visibleWidth(compose()) > s.width) {
 		const last = segments.reduce((a, b) => (b.drop > a.drop ? b : a));
 		segments.splice(segments.indexOf(last), 1);
@@ -110,7 +128,8 @@ export function statusLine(theme: Palette, s: StatusInput): string[] {
 	const live = s.accounts.filter((a) => a.windows.length);
 	const nameWidth = Math.max(0, ...live.map((a) => a.name.length));
 	for (const a of live) {
-		const name = theme.fg(a.active ? "accent" : "muted", `◷ ${a.name.padEnd(nameWidth)}`);
+		// The account in use is lilac and the others white, so the one the model runs on stands out at a glance.
+		const name = theme.fg(a.active ? "accent" : "text", `◷ ${a.name.padEnd(nameWidth)}`);
 		const windows = a.windows.map((w) => {
 			const reset = w.resetsAt ? theme.fg("muted", ` (${formatLeft(w.resetsAt, s.now)})`) : "";
 			return `${theme.fg(heat(w.percent), `${w.label}: ${w.percent}%`)}${reset}`;
@@ -167,6 +186,7 @@ export default function statusbar(pi: ExtensionAPI): void {
 	const known = new Map<string, { windows: readonly UsageWindow[]; at: number }>();
 	let redraw: (() => void) | undefined;
 	let lastCodex = 0;
+	let openaiEmail: string | undefined;
 
 	const learn = (name: string, windows: readonly UsageWindow[], at = Date.now()) => {
 		const before = known.get(name);
@@ -181,7 +201,10 @@ export default function statusbar(pi: ExtensionAPI): void {
 			lastCodex = Date.now();
 			try {
 				const token = await ctx.modelRegistry.getApiKeyForProvider("openai-codex");
-				if (token) learn("openai", await fetchCodexWindows(token, Date.now()));
+				if (token) {
+					openaiEmail = chatgptEmail(token);
+					learn("openai", await fetchCodexWindows(token, Date.now()));
+				}
 			} catch {
 				// The bar is never worth an error: without windows it shows tokens and cost.
 			}
@@ -218,10 +241,13 @@ export default function statusbar(pi: ExtensionAPI): void {
 						.map(([name, v]) => ({ name, active: name === provider, windows: live(v.windows, now) }))
 						.filter((a) => a.windows.length)
 						.sort((a, b) => a.name.localeCompare(b.name));
+					const emails: Record<string, string | undefined> = { claude: claudeEmail(), openai: openaiEmail };
 					const lines = statusLine(theme, {
 						width,
 						cwd: ctx.cwd,
 						...who,
+						branch: gitBranch(ctx.cwd),
+						login: provider ? (emails[provider] ?? provider) : undefined,
 						model: ctx.model && ctx.model.id !== "unknown" ? (ctx.model.name ?? ctx.model.id) : undefined,
 						effort: ctx.thinkingLevel,
 						contextPercent: ctx.getContextUsage()?.percent ?? null,

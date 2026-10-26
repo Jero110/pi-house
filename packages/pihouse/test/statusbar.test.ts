@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { fetchCodexWindows, providerLabel, sessionTotals, shortCwd, statusLine } from "../src/extensions/statusbar.ts";
+import { chatgptEmail, claudeEmail, gitBranch } from "../src/identity.ts";
 import { THEME } from "../src/paths.ts";
 import {
 	chatgptAccountId,
@@ -159,8 +160,9 @@ const win = (label: string, percent: number, resetsAt?: number) => ({
 });
 
 test("the first line is the session: user@host, folder, model, effort and context", () => {
-	const [head, ...rest] = statusLine(plain, { ...base, effort: "high" });
-	assert.equal(head, "me@mac  ~/project  Sonnet 5.5  effort: high  ctx: 32%");
+	const [head, ...rest] = statusLine(plain, { ...base, width: 80, effort: "high" });
+	assert.match(head ?? "", /^Sonnet 5\.5 {2}effort: high {2}ctx: 32% {2,}me@mac {2}~\/project$/);
+	assert.equal(visibleWidth(head ?? ""), 80, "the place ends at the right edge");
 	assert.deepEqual(rest, [], "no account has a window, so nothing else");
 });
 
@@ -194,27 +196,29 @@ test("account names are padded to one width so the limits line up", () => {
 	assert.equal(lines[2], "◷ copilot-x  5h: 5%");
 });
 
-test("the active account is named in the accent color and the others in muted", () => {
-	const tag = { fg: (c: string, t: string) => `<${c}>${t}</${c}>`, bold: (t: string) => t } as Parameters<
+test("the account in use is named in lilac (accent) and the others in white (text)", () => {
+	const tag = { fg: (c: string, t: string) => `<${c}>${t}</${c}>`, bold: (t: string) => `<b>${t}</b>` } as Parameters<
 		typeof statusLine
 	>[0];
 	const lines = statusLine(tag, {
 		...base,
 		width: 5000,
+		branch: "main",
 		accounts: [
 			{ name: "claude", active: true, windows: [win("5h", 10)] },
 			{ name: "openai", active: false, windows: [win("5h", 10)] },
 		],
 	});
 	assert.match(lines[1] ?? "", /^<accent>◷ claude<\/accent>/);
-	assert.match(lines[2] ?? "", /^<muted>◷ openai<\/muted>/);
+	assert.match(lines[0] ?? "", /<accent>⎇ main<\/accent>/);
+	assert.match(lines[2] ?? "", /^<text>◷ openai<\/text>/);
 });
 
 test("with no windows the session's tokens and cost take the line below; with no model the line says so", () => {
 	const spent = statusLine(plain, { ...base, input: 12_345, output: 800, cost: 0.0421 });
 	assert.equal(spent[1], "↑12.3k ↓800  $0.042");
 	const none = statusLine(plain, { ...base, model: undefined, contextPercent: null });
-	assert.deepEqual(none, ["me@mac  ~/project  ctx: --"]);
+	assert.match(none[0] ?? "", /^ctx: -- {2,}me@mac {2}~\/project$/);
 });
 
 test("a narrow first line drops the least important parts first and never overflows; account lines never merge", () => {
@@ -231,6 +235,7 @@ test("a narrow first line drops the least important parts first and never overfl
 	assert.match(medium, /~\/project/);
 	assert.match(medium, /Sonnet 5\.5/);
 	assert.doesNotMatch(medium, /me@mac|effort/, "user@host and effort go before the folder and the model");
+	assert.ok(medium.endsWith("~/project"));
 });
 
 test("context and usage are colored by how close the limit is", () => {
@@ -293,4 +298,39 @@ test("the theme has exactly the colors pi's schema asks for", () => {
 		schema.properties.colors.required.filter((k) => !have.includes(k)),
 		[],
 	);
+});
+
+test("the first line names the git branch and the login when they are known, and drops the login first", () => {
+	const [head] = statusLine(plain, { ...base, width: 100, branch: "main", login: "me@mail.com" });
+	assert.match(head ?? "", /^Sonnet 5\.5 {2}ctx: 32% {2,}me@mac {2}~\/project {2}⎇ main {2}me@mail\.com$/);
+	const [narrow] = statusLine(plain, { ...base, width: 45, branch: "main", login: "me@mail.com" });
+	assert.doesNotMatch(narrow ?? "", /me@mail\.com/);
+	assert.match(narrow ?? "", /⎇ main/);
+});
+
+test("the branch is read from HEAD, through worktrees and detached heads, and is absent outside a repo", () => {
+	const root = mkdtempSync(join(tmpdir(), "git-"));
+	mkdirSync(join(root, "repo", ".git"), { recursive: true });
+	mkdirSync(join(root, "repo", "src", "deep"), { recursive: true });
+	writeFileSync(join(root, "repo", ".git", "HEAD"), "ref: refs/heads/feature/x\n");
+	assert.equal(gitBranch(join(root, "repo", "src", "deep")), "feature/x");
+	writeFileSync(join(root, "repo", ".git", "HEAD"), "1a2b3c4d5e6f7a8b9c0d\n");
+	assert.equal(gitBranch(join(root, "repo")), "HEAD@1a2b3c4");
+	mkdirSync(join(root, "wt"), { recursive: true });
+	mkdirSync(join(root, "wtgit"), { recursive: true });
+	writeFileSync(join(root, "wt", ".git"), `gitdir: ${join(root, "wtgit")}\n`);
+	writeFileSync(join(root, "wtgit", "HEAD"), "ref: refs/heads/wt-branch\n");
+	assert.equal(gitBranch(join(root, "wt")), "wt-branch");
+	assert.equal(gitBranch(join(root, "plain")), undefined, "a folder with no .git above it (the temp dir has none)");
+});
+
+test("account emails come from Claude Code's config and the ChatGPT token, and are undefined when missing", () => {
+	const dir = mkdtempSync(join(tmpdir(), "id-"));
+	const file = join(dir, "claude.json");
+	writeFileSync(file, JSON.stringify({ oauthAccount: { emailAddress: "a@b.co" } }));
+	assert.equal(claudeEmail(file), "a@b.co");
+	assert.equal(claudeEmail(join(dir, "missing.json")), undefined);
+	const token = `x.${Buffer.from(JSON.stringify({ "https://api.openai.com/profile": { email: "c@d.co" } })).toString("base64url")}.y`;
+	assert.equal(chatgptEmail(token), "c@d.co");
+	assert.equal(chatgptEmail("nope"), undefined);
 });

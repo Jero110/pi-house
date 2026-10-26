@@ -3,11 +3,12 @@
 //
 // Problem: pi prints every tool's whole output into the transcript. Example: a `write` of a 400 line report fills
 // the screen with 400 green lines, and a `bash` call prints everything it wrote to stdout.
-// Solution: collapsed, a call is `● Bash(npm test)` and `⎿ 12 passed … +30 lines (ctrl+o to expand)`; edits and
-// writes also keep a short preview. Expanded, the whole output shows, with diffs colored. The describing is pure
+// Solution: collapsed, a command, read, search or listing is one gray line, `Ran 1 shell command`, like Claude Code's;
+// an edit or write keeps `● Update(file)` and a short colored preview, and any other tool (a skill, agent-link) keeps
+// `● spawn(claude)` and its first line. Expanded (ctrl+o), every call is `● Bash(npm test)` with its whole output. The describing is pure
 // (describeCall, describeResult) so it is tested without pi.
 import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
+import { type Component, Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
 /** The tools pi ships, drawn by pihouse whatever their own renderer is. */
 const BUILT_IN = new Set(["read", "bash", "edit", "write", "grep", "find", "ls"]);
@@ -181,6 +182,61 @@ function colorDiff(theme: Palette, line: string): string {
 	return theme.fg("toolDiffContext", line);
 }
 
+/** The tools whose collapsed view is one gray line, with that line while they run and after. */
+const QUIET: Record<string, readonly [string, string]> = {
+	bash: ["Running 1 shell command…", "Ran 1 shell command"],
+	read: ["Reading 1 file…", "Read 1 file"],
+	grep: ["Searching for 1 pattern…", "Searched for 1 pattern"],
+	find: ["Searching for 1 pattern…", "Searched for 1 pattern"],
+	ls: ["Listing 1 directory…", "Listed 1 directory"],
+};
+
+/** The one line a collapsed, successful quiet call leaves, or undefined for a tool that draws more. */
+export function quietLine(tool: string, running: boolean): string | undefined {
+	return QUIET[tool]?.[running ? 0 : 1];
+}
+
+/** Backgrounds of added and removed lines, drawn verbatim like the spinner's glyphs: pi's theme has no diff backgrounds. */
+const ADDED_BG = "\x1b[48;2;27;58;40m";
+const REMOVED_BG = "\x1b[48;2;70;30;40m";
+const BG_OFF = "\x1b[49m";
+
+/**
+ * One line of pi's diff (`+36 text`, `-35 text`, ` 34 text`) as Claude Code draws it: the line number, the sign and the
+ * text, with added and removed lines on a colored background that runs to the edge.
+ */
+export function diffRow(theme: Palette, line: string, width: number): string {
+	const m = /^([+\- ])(\s*\d*) (.*)$/.exec(line);
+	if (!m) return truncateToWidth(theme.fg("dim", `     ${line.trim()}`), width);
+	const [, sign = " ", num = "", text = ""] = m;
+	const gutter = `     ${theme.fg("dim", num)} `;
+	if (sign === " ") return truncateToWidth(`${gutter} ${theme.fg("muted", text)}`, width);
+	const body = truncateToWidth(
+		`${gutter}${theme.fg(sign === "+" ? "toolDiffAdded" : "toolDiffRemoved", sign)} ${theme.fg("text", text)}`,
+		width,
+	);
+	const bg = sign === "+" ? ADDED_BG : REMOVED_BG;
+	return `${bg}${body}${" ".repeat(Math.max(0, width - visibleWidth(body)))}${BG_OFF}`;
+}
+
+/** An edit's result: what changed in one line, then its diff, a few lines when collapsed and all of it on ctrl+o. */
+export function diffBlock(theme: Palette, diff: string, expanded: boolean): Component {
+	const lines = linesOf(diff);
+	const { added, removed } = diffStats(diff);
+	const shown = expanded ? lines : lines.slice(0, DIFF_PREVIEW);
+	const hidden = lines.length - shown.length;
+	const head = `${theme.fg("dim", "  ⎿  ")}${theme.fg("muted", `Added ${plural(added, "line")}, removed ${plural(removed, "line")}`)}`;
+	return {
+		invalidate() {},
+		render(width: number): string[] {
+			const out = [truncateToWidth(head, width), ...shown.map((l) => diffRow(theme, l, width))];
+			if (hidden > 0)
+				out.push(truncateToWidth(theme.fg("dim", `     … +${plural(hidden, "line")} (ctrl+o to expand)`), width));
+			return out;
+		},
+	};
+}
+
 /** `● Title(subject)`: the dot says whether it ran, failed or still runs. */
 export function callText(theme: Palette, label: CallLabel, state: "running" | "done" | "failed"): string {
 	const dot =
@@ -230,9 +286,14 @@ export default function compactTools(pi: ExtensionAPI): void {
 		return {
 			renderCall(args, theme, context) {
 				const state = context.isError ? "failed" : context.isPartial || !context.executionStarted ? "running" : "done";
+				const quiet = !context.expanded && state !== "failed" ? quietLine(toolName, state === "running") : undefined;
+				if (quiet) return new Text(theme.fg("muted", quiet), 0, 0);
 				return new Text(callText(theme, describeCall(toolName, (args ?? {}) as Args), state), 0, 0);
 			},
 			renderResult(result, options, theme, context) {
+				if (!options.expanded && !context.isError && quietLine(toolName, false)) return new Text("", 0, 0);
+				const diff = toolName === "edit" && !context.isError && !options.isPartial ? diffOf(result) : undefined;
+				if (diff) return diffBlock(theme, diff, options.expanded);
 				if (options.isPartial) return new Text(`${theme.fg("dim", "  ⎿  ")}${theme.fg("dim", "Running…")}`, 0, 0);
 				const lines = resultLines(theme, toolName, (context.args ?? {}) as Args, result, {
 					expanded: options.expanded,

@@ -1,12 +1,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { visibleWidth } from "@earendil-works/pi-tui";
 import brand, { sessionTitle } from "../src/extensions/brand.ts";
 import compactTools, {
 	callText,
 	describeCall,
 	describeResult,
+	diffBlock,
+	diffRow,
 	diffStats,
+	quietLine,
 	resultLines,
 	tilde,
 } from "../src/extensions/compact-tools.ts";
@@ -117,22 +121,56 @@ test("pi's own tools are always drawn here, and a tool with a renderer of its ow
 	assert.ok(generic?.renderCall && generic.renderResult, "a tool with no renderer gets the compact one");
 });
 
-test("the renderers return components that draw the call and the result", () => {
+test("collapsed, a command is one gray line; with ctrl+o it is the call and its whole output", () => {
 	let resolver: Resolver | undefined;
 	compactTools({ registerToolRenderer: (r: Resolver) => (resolver = r) } as unknown as ExtensionAPI);
 	const r = resolver?.("bash", () => undefined);
-	const context = { args: { command: "npm test" }, isError: false, isPartial: false, executionStarted: true } as never;
-	const call = r?.renderCall?.({ command: "npm test" } as never, theme as never, context);
-	assert.match(call?.render(80).join("\n") ?? "", /● Bash\(npm test\)/);
+	const context = (expanded: boolean) =>
+		({ args: { command: "npm test" }, isError: false, isPartial: false, executionStarted: true, expanded }) as never;
+	const draw = (c: { render(w: number): string[] } | undefined) => (c?.render(80).join("\n") ?? "").trimEnd();
+
+	const call = r?.renderCall?.({ command: "npm test" } as never, theme as never, context(false));
+	assert.equal(draw(call), "Ran 1 shell command");
 	const done = r?.renderResult?.(
 		out("ok\nmore") as never,
 		{ expanded: false, isPartial: false },
 		theme as never,
-		context,
+		context(false),
 	);
-	assert.match(done?.render(80).join("\n") ?? "", /⎿ {2}ok … \+1 line \(ctrl\+o to expand\)/);
-	const running = r?.renderResult?.(out("") as never, { expanded: false, isPartial: true }, theme as never, context);
-	assert.match(running?.render(80).join("\n") ?? "", /Running…/);
+	assert.equal(draw(done), "", "nothing under the gray line");
+
+	const openCall = r?.renderCall?.({ command: "npm test" } as never, theme as never, context(true));
+	assert.match(draw(openCall), /● Bash\(npm test\)/);
+	const open = r?.renderResult?.(
+		out("ok\nmore") as never,
+		{ expanded: true, isPartial: false },
+		theme as never,
+		context(true),
+	);
+	assert.match(draw(open), /⎿ {2}ok +\n {5}more/);
+
+	const running = r?.renderResult?.(
+		out("") as never,
+		{ expanded: false, isPartial: true },
+		theme as never,
+		context(false),
+	);
+	assert.equal(draw(running), "", "while it runs the line above says so");
+});
+
+test("an edit keeps its call, its summary and its preview even when collapsed", () => {
+	let resolver: Resolver | undefined;
+	compactTools({ registerToolRenderer: (r: Resolver) => (resolver = r) } as unknown as ExtensionAPI);
+	const r = resolver?.("edit", () => undefined);
+	const context = {
+		args: { path: "a.ts" },
+		isError: false,
+		isPartial: false,
+		executionStarted: true,
+		expanded: false,
+	} as never;
+	const call = r?.renderCall?.({ path: "a.ts" } as never, theme as never, context);
+	assert.match(call?.render(80).join("\n") ?? "", /● Update\(a\.ts\)/);
 });
 
 test("a tab is named from the first prompt: a short sentence, a command giving way to what follows it", () => {
@@ -187,4 +225,39 @@ test("before any prompt the tab is the folder, not the product name", () => {
 		{ hasUI: true, cwd: "/Users/me/vs", ui: { setTitle: (t: string) => titles.push(t) } } as never,
 	);
 	assert.deepEqual(titles, ["vs"]);
+});
+
+test("a collapsed command, read, search or listing is one gray line; an edit or an unknown tool is not", () => {
+	assert.equal(quietLine("bash", false), "Ran 1 shell command");
+	assert.equal(quietLine("bash", true), "Running 1 shell command…");
+	assert.equal(quietLine("read", false), "Read 1 file");
+	assert.equal(quietLine("grep", false), "Searched for 1 pattern");
+	assert.equal(quietLine("ls", false), "Listed 1 directory");
+	assert.equal(quietLine("edit", false), undefined);
+	assert.equal(quietLine("spawn", false), undefined, "agent-link and skills keep their own line");
+});
+
+test("an edit's diff has line numbers and a background on added and removed lines, to the edge", () => {
+	const bgTheme = { fg: (_c: string, t: string) => t, bold: (t: string) => t };
+	const ESC = String.fromCharCode(27);
+	const plainOf = (row: string) =>
+		row
+			.split(ESC)
+			.map((p) => p.replace(/^\[[\d;]*m/, ""))
+			.join("");
+	const added = diffRow(bgTheme, "+36 const a = 1;", 40);
+	assert.ok(added.startsWith(`${ESC}[48;2;27;58;40m`));
+	assert.ok(added.endsWith(`${ESC}[49m`));
+	assert.equal(plainOf(added), `     36 + const a = 1;${" ".repeat(40 - 22)}`);
+	assert.equal(visibleWidth(plainOf(added)), 40);
+	assert.ok(diffRow(bgTheme, "-35 const a = 0;", 40).startsWith(`${ESC}[48;2;70;30;40m`));
+	assert.equal(diffRow(bgTheme, " 34 context", 40), "     34  context");
+	assert.equal(diffRow(bgTheme, " ...", 40).trim(), "...");
+
+	const diff = ["-1 old", "+1 new", ...Array.from({ length: 30 }, (_, i) => ` ${i + 2} same`)].join("\n");
+	const collapsed = diffBlock(bgTheme, diff, false).render(60);
+	assert.match(collapsed[0] ?? "", /^ {2}⎿ {2}Added 1 line, removed 1 line$/);
+	assert.equal(collapsed.length, 1 + 14 + 1);
+	assert.match(collapsed.at(-1) ?? "", /… \+18 lines \(ctrl\+o to expand\)/);
+	assert.equal(diffBlock(bgTheme, diff, true).render(60).length, 1 + 32);
 });
