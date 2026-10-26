@@ -57,7 +57,8 @@ git, and tmux if you choose it (with Homebrew on macOS, which is installed too i
 and WSL). `--no-deps` skips that step. cmux comes from [cmux.com](https://cmux.com) (macOS).
 
 The Claude bridge is opt-in: add `--claude-bridge` (`bash -s -- --claude-bridge`) and, when Claude Code is installed,
-setup adds it so pi-house can run Claude models on your Claude login. They show up in `/model`; they are never the default.
+setup adds it so pi-house can run Claude models on your Claude login. They show up in `/model`, and Sonnet 5.5 through the
+bridge becomes the default model.
 
 > **Claude through your subscription is a gray area. Read this first.** The bridge runs Claude through the Claude
 > Agent SDK on your Claude Code login, so it spends your subscription limits instead of an API key.
@@ -71,8 +72,10 @@ setup adds it so pi-house can run Claude models on your Claude login. They show 
 > - One user [reported a suspended account](https://github.com/elidickinson/pi-claude-bridge/issues/118) after using
 >   the bridge. It is a single unverified report and the cause is unknown.
 >
-> This is not legal advice. Use an account you can afford to lose, or use an API key. The bridge is never the default
-> model.
+> This is not legal advice. Use an account you can afford to lose, or use an API key.
+
+The default model is Sonnet 5.5: through the bridge when it is installed, through an Anthropic API key otherwise. If you
+have neither, pi starts on whichever provider you are logged in to. Change it any time with `/model`.
 `--with-harnesses` installs Claude Code, Codex and opencode first (into `~/.local`):
 
 ```bash
@@ -154,7 +157,8 @@ you@host  ~/project  Sonnet 5.5  effort: high  ctx: 32%
 - Narrow terminals drop the least important parts of the first line first; an account line never merges with another.
 
 It lives in `packages/pihouse` (`themes/pihouse.json`, `src/extensions/statusbar.ts`). One known limit: pi itself shows its
-original footer for a moment while it reloads, so `/reload` flashes before pi-house's comes back; starting `pih` does not.
+footer for a moment (well under a second) while it reloads, so `/reload` flashes before pi-house's comes back; starting
+`pih` does not.
 
 ## The workflow
 

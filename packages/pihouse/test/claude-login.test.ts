@@ -55,7 +55,7 @@ test("Claude sub in /login: without claude on PATH it says so and installs nothi
 	assert.equal(runs.length, 0);
 });
 
-test("Claude sub in /login installs the bridge, never makes it the default, and returns a credential", async (t) => {
+test("Claude sub in /login installs the bridge, makes Sonnet 5.5 through it the default, and returns a credential", async (t) => {
 	const { home, env } = setupHome(t, true);
 	const paths = pihousePaths(env, home);
 	const settingsFile = join(paths.agentDir, "settings.json");
@@ -79,7 +79,8 @@ test("Claude sub in /login installs the bridge, never makes it the default, and 
 	assert.ok(credential.expires > Date.now());
 	const settings = JSON.parse(readFileSync(settingsFile, "utf8"));
 	assert.deepEqual(settings.packages, [BRIDGE_SOURCE]);
-	assert.equal(settings.defaultProvider, undefined, "available, not the default");
+	assert.equal(settings.defaultProvider, "claude-bridge");
+	assert.equal(settings.defaultModel, "claude-sonnet-5-5");
 	assert.match(progress.join("\n"), /reload/i);
 });
 

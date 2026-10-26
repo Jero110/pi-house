@@ -12,9 +12,24 @@ import { agentLinkHome, type BackendName, hubPaths, PLACE_ENV, stableNode } from
 import { PI_CLI, PIHOUSE_CLI, type PihousePaths, SKILL_GROUP_DIRS, SKILLS_DIR } from "./paths.ts";
 
 /** The mark pihouse puts in settings.json, so it never rewrites settings it did not write. */
-export const SETTINGS_VERSION = 1;
+export const SETTINGS_VERSION = 2;
 /** The pi package that serves Claude models through the Claude Code login, when the user has it. */
 export const BRIDGE_PACKAGE = "pi-claude-bridge";
+
+/** The provider the bridge registers, and the model pihouse starts on when the user has Claude. */
+export const BRIDGE_PROVIDER = "claude-bridge";
+export const DEFAULT_MODEL = "claude-sonnet-5-5";
+
+/**
+ * The model pihouse starts on: Sonnet 5.5, through the bridge when that is how Claude is set up and through an
+ * Anthropic API key otherwise. Someone with neither is not stuck: pi starts on whatever provider they are logged in to.
+ */
+export function defaultModelFor(piSettings: unknown): { defaultProvider: string; defaultModel: string } {
+	return {
+		defaultProvider: bridgeEntry(piSettings) === undefined ? "anthropic" : BRIDGE_PROVIDER,
+		defaultModel: DEFAULT_MODEL,
+	};
+}
 
 /** The bridge version setup installs when pi does not have it, pinned like every other dependency. */
 export const BRIDGE_SOURCE = `npm:${BRIDGE_PACKAGE}@0.9.3`;
@@ -46,11 +61,10 @@ export function bridgeEntry(piSettings: unknown): unknown {
 }
 
 /**
- * The settings pihouse writes once: its mark, the skills of this checkout and the bridge package when pi has it.
- * No default provider or model: pi starts on whichever provider the user is logged in to, and the bridge's Claude
- * models are one /model away.
- * Problem: the bridge was the default provider whenever it was installed. Example: a user who logged in with
- * ChatGPT still started on Sonnet through the Claude Code login. Solution: the bridge is available, never the default.
+ * The settings pihouse writes once: its mark, the skills of this checkout, the bridge package when pi has it and the
+ * default model (see defaultModelFor).
+ * Problem: a default Claude model also applies to someone who only logged in with ChatGPT. Example: pi cannot start
+ * on a provider without a login, so it falls back to the next one available; the default never forces a login.
  * Problem: pi loads every file in <agentDir>/extensions. Solution: "!extensions/**" keeps that folder out;
  * pihouse's own extensions come in with -e.
  */
@@ -59,9 +73,11 @@ export function pihouseSettings(piSettings: unknown): Obj {
 	return {
 		pihouse: { version: SETTINGS_VERSION },
 		packages: bridge === undefined ? [] : [bridge],
+		...defaultModelFor(piSettings),
 		skills: [...SKILL_GROUP_DIRS],
-		// The header stays; the long list of loaded skills and extensions at startup goes.
-		quietStartup: "header",
+		// pi's own header and the list of loaded skills and extensions stay hidden: pihouse draws its header itself, and
+		// pi's flashes back for a moment on /reload.
+		quietStartup: true,
 		// The theme file itself is loaded with --theme on every run (see launcher.ts); this only selects it.
 		theme: "pihouse",
 		extensions: ["!extensions/**"],
@@ -77,7 +93,9 @@ export interface AgentDirReport {
 export function ensureAgentDir(paths: PihousePaths): AgentDirReport {
 	const file = join(paths.agentDir, "settings.json");
 	const current = readJson(file);
-	if (isObj(current) && isObj(current.pihouse) && current.pihouse.version === SETTINGS_VERSION) {
+	const version = isObj(current) && isObj(current.pihouse) ? current.pihouse.version : undefined;
+	if (isObj(current) && typeof version === "number" && version <= SETTINGS_VERSION) {
+		let changed = false;
 		const skills = Array.isArray(current.skills)
 			? current.skills.filter((x): x is string => typeof x === "string")
 			: [];
@@ -87,8 +105,17 @@ export function ensureAgentDir(paths: PihousePaths): AgentDirReport {
 				(x) => !x.startsWith(dirname(SKILLS_DIR)) && !x.endsWith("/skills") && !/\/skills\/[\w-]+$/.test(x),
 			);
 			current.skills = [...SKILL_GROUP_DIRS, ...own];
-			writeJson(file, current);
+			changed = true;
 		}
+		if (version < SETTINGS_VERSION) {
+			// Settings from before the default model: add it, but never replace a choice the user made.
+			for (const [key, value] of Object.entries(defaultModelFor(current)))
+				if (current[key] === undefined) current[key] = value;
+			if (current.quietStartup === "header") current.quietStartup = true; // the value pihouse wrote before
+			(current.pihouse as Obj).version = SETTINGS_VERSION;
+			changed = true;
+		}
+		if (changed) writeJson(file, current);
 		return { wrote: false, copied: [] };
 	}
 	mkdirSync(paths.agentDir, { recursive: true });
@@ -111,6 +138,21 @@ export function ensureAgentDir(paths: PihousePaths): AgentDirReport {
 	}
 	writeJson(file, pihouseSettings(readJson(join(paths.piAgentDir, "settings.json"))));
 	return report;
+}
+
+/**
+ * Once the bridge is installed, Sonnet 5.5 through it is the default, unless the user picked a model of their own.
+ * Problem: settings made before the bridge point the default at an Anthropic API key. Example: a user who then
+ * chooses "Claude sub" in /login would still start on a provider they never set up. Solution: only the default that
+ * pihouse itself wrote (absent, or "anthropic") moves to the bridge.
+ */
+function preferBridge(file: string): void {
+	const settings = readJson(file);
+	if (!isObj(settings)) return;
+	if (settings.defaultProvider !== undefined && settings.defaultProvider !== "anthropic") return;
+	settings.defaultProvider = BRIDGE_PROVIDER;
+	settings.defaultModel = DEFAULT_MODEL;
+	writeJson(file, settings);
 }
 
 /** Runs a command with the user's terminal (pi install prints npm's progress); returns its exit status. */
@@ -150,6 +192,7 @@ export function ensureBridge(
 		out(`pih: could not install the Claude bridge (pi install exited ${status}); run \`pih setup\` again later`);
 		return "failed";
 	}
+	preferBridge(file);
 	return "installed";
 }
 

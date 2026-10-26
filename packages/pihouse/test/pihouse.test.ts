@@ -21,7 +21,15 @@ import { headerLines } from "../src/extensions/brand.ts";
 import { askContext, latestReport, reviewFileName, reviewInstructions } from "../src/extensions/workflow.ts";
 import { piCommand, runPihouse, withSkillsDir } from "../src/launcher.ts";
 import { EXTENSIONS, PI_CLI, pihousePaths, SKILL_GROUP_DIRS, SKILLS_DIR, THEME } from "../src/paths.ts";
-import { BRIDGE_SOURCE, ensureAgentDir, ensureBridge, readConfig, setup, writePihouseProfile } from "../src/setup.ts";
+import {
+	BRIDGE_SOURCE,
+	ensureAgentDir,
+	ensureBridge,
+	readConfig,
+	SETTINGS_VERSION,
+	setup,
+	writePihouseProfile,
+} from "../src/setup.ts";
 import { catalogReadme, readCatalog, skillPath } from "../src/workflow/catalog.ts";
 import { renderReport } from "../src/workflow/report.ts";
 import { briefOf, buildRun, pickRoot } from "../src/workflow/run.ts";
@@ -58,7 +66,7 @@ test("the header is plain text, laid out like Claude Code's: name, model, folder
 		for (const l of headerLines(theme, width, info)) assert.ok(visibleWidth(l) <= width);
 });
 
-test("the agent dir is made once from pi's login, with no default model, this checkout's skills and no stray extensions", (t) => {
+test("the agent dir is made once from pi's login, with Sonnet 5.5 through the bridge as the default, this checkout's skills and no stray extensions", (t) => {
 	const { home, env } = tempHome(t);
 	const pi = join(home, ".pi", "agent");
 	mkdirSync(join(pi, "npm"), { recursive: true });
@@ -67,8 +75,8 @@ test("the agent dir is made once from pi's login, with no default model, this ch
 	const paths = pihousePaths(env, home);
 	assert.deepEqual(ensureAgentDir(paths), { wrote: true, copied: ["auth.json", "npm"] });
 	const settings = JSON.parse(readFileSync(join(paths.agentDir, "settings.json"), "utf8"));
-	assert.equal(settings.defaultProvider, undefined, "the bridge is available, never the default");
-	assert.equal(settings.defaultModel, undefined);
+	assert.equal(settings.defaultProvider, "claude-bridge", "Claude is set up through the bridge");
+	assert.equal(settings.defaultModel, "claude-sonnet-5-5");
 	assert.deepEqual(settings.packages, ["npm:pi-claude-bridge"]);
 	assert.deepEqual(settings.skills, SKILL_GROUP_DIRS);
 	assert.deepEqual(settings.extensions, ["!extensions/**"]);
@@ -82,14 +90,50 @@ test("the agent dir is made once from pi's login, with no default model, this ch
 	assert.deepEqual(again.skills, [...SKILL_GROUP_DIRS, "/home/me/my-skills"], "skills follow the checkout");
 });
 
-test("without pi's bridge pihouse still sets no default provider", (t) => {
+test("without pi's bridge the default is Sonnet 5.5 through an Anthropic key, which pi skips when there is none", (t) => {
 	const { home, env } = tempHome(t);
 	const paths = pihousePaths(env, home);
 	ensureAgentDir(paths);
 	const settings = JSON.parse(readFileSync(join(paths.agentDir, "settings.json"), "utf8"));
-	assert.equal(settings.defaultProvider, undefined);
-	assert.equal(settings.defaultModel, undefined);
+	assert.equal(settings.defaultProvider, "anthropic");
+	assert.equal(settings.defaultModel, "claude-sonnet-5-5");
 	assert.deepEqual(settings.packages, []);
+});
+
+test("settings from before the default model get it, and a model the user chose is kept", (t) => {
+	const { home, env } = tempHome(t);
+	const paths = pihousePaths(env, home);
+	mkdirSync(paths.agentDir, { recursive: true });
+	const file = join(paths.agentDir, "settings.json");
+	writeFileSync(
+		file,
+		JSON.stringify({
+			pihouse: { version: 1 },
+			packages: ["npm:pi-claude-bridge@0.9.3"],
+			skills: SKILL_GROUP_DIRS,
+			quietStartup: "header",
+		}),
+	);
+	assert.equal(ensureAgentDir(paths).wrote, false);
+	const migrated = JSON.parse(readFileSync(file, "utf8"));
+	assert.equal(migrated.pihouse.version, SETTINGS_VERSION);
+	assert.equal(migrated.defaultProvider, "claude-bridge");
+	assert.equal(migrated.defaultModel, "claude-sonnet-5-5");
+	assert.equal(migrated.quietStartup, true, "pi's own header no longer flashes back on /reload");
+
+	writeFileSync(
+		file,
+		JSON.stringify({
+			pihouse: { version: 1 },
+			defaultProvider: "openai-codex",
+			defaultModel: "gpt-5.5",
+			skills: SKILL_GROUP_DIRS,
+		}),
+	);
+	ensureAgentDir(paths);
+	const kept = JSON.parse(readFileSync(file, "utf8"));
+	assert.equal(kept.defaultProvider, "openai-codex", "the user's choice stays");
+	assert.equal(kept.defaultModel, "gpt-5.5");
 });
 
 test("setup leaves the Claude bridge out unless it is asked for", (t) => {
@@ -151,7 +195,9 @@ test("setup installs the Claude bridge with pi install when Claude Code is there
 	);
 	assert.deepEqual(runs[0]?.argv.slice(2), ["install", BRIDGE_SOURCE]);
 	assert.equal(runs[0]?.dir, paths.agentDir, "into pihouse's agent dir, not pi's");
-	assert.equal(JSON.parse(readFileSync(settingsFile, "utf8")).defaultProvider, undefined, "installed, not the default");
+	const after = JSON.parse(readFileSync(settingsFile, "utf8"));
+	assert.equal(after.defaultProvider, "claude-bridge", "installed, and Sonnet 5.5 through it becomes the default");
+	assert.equal(after.defaultModel, "claude-sonnet-5-5");
 
 	assert.equal(
 		ensureBridge(paths, withClaude, () => {}, fakePi),
