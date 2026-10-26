@@ -44,6 +44,8 @@ export interface PihousePaths {
 	agentDir: string;
 	/** <home>/reports: /workflow review reports. */
 	reports: string;
+	/** <home>/memory: the workflow memory (runs, digests, proposals, ...), see workflow/memory.ts. */
+	memory: string;
 	/** <home>/config.json: what setup chose (backend). */
 	config: string;
 	/** ~/.pi/agent: plain pi's config, the source of the login and providers pihouse reuses. */
@@ -56,6 +58,7 @@ export function pihousePaths(env: NodeJS.ProcessEnv = process.env, home = env.HO
 		home: pihouseHome,
 		agentDir: join(pihouseHome, "agent"),
 		reports: join(pihouseHome, "reports"),
+		memory: join(pihouseHome, "memory"),
 		config: join(pihouseHome, "config.json"),
 		piAgentDir: join(home, ".pi", "agent"),
 	};
