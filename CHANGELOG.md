@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+- Workflow memory in `~/.pihouse/memory/`: planner and executor runs are flagged and captured by default (the executor
+  runs as `workflow-executor`), and `/workflow save [reason]` flags any conversation. A capture is the whole agent tree
+  with its metrics, the reason and a copy of every transcript, written by code.
+- `/workflow review --last` reviews the most recent flagged run; `/workflow review` still reviews the current session.
+  The executor offers a review when it finishes and never runs one itself.
+- The keeper (`pih keeper`, skill `keeper`): one agent under the fixed agent-link name `keeper` that says how many runs
+  are pending and, when you say "summarize them", digests the batch in a fresh session (each run read once), updates the
+  workflow memory and writes proposals you approve or reject (`/keeper approve|reject <id>`). Unused memory is archived
+  after 90 days, never deleted; rejected proposals are never made again. Its context per turn stays capped.
+- `/workflow ask` answers from the workflow memory, its index and the matching digests. Links and YouTube videos in the
+  question are transcribed by a tool (captions, `yt-dlp` or `whisper` when installed), saved to `consulted/` with a
+  summary, and ideas go to `ideas/`.
+- agent-link: a root can ask for a fixed name (`agent-link open` and the hub's register request take an optional `name`).
+
 ## 0.1.0
 
 First release as pi-house, started from Faro.

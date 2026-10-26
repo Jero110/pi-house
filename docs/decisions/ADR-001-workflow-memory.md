@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed
+Accepted (built on `feat/workflow-memory`, T3-T7)
 
 ## Date
 

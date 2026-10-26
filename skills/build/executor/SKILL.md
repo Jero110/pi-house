@@ -100,9 +100,9 @@ Your final answer, the only long message:
 - **Gaps:** what did not pass, and why.
 
 Your pane is the user's now (the planner closed), so the report is for them. Close every agent still open with
-`cancel`, end by offering a review: "Run `/workflow review` here to see what ran, with which skills, tokens and time?" Only offer it;
-never run it yourself. Then stop. Do
-not start post-build or extra skills; the user invokes those if they want them.
+`cancel`, end by offering a review: "Run `/workflow review` here to see what ran, with which skills, tokens and
+time?" Only offer it; never run it yourself. Then stop. Do not start post-build or extra skills; the user invokes those
+if they want them.
 
 ## Red flags
 
