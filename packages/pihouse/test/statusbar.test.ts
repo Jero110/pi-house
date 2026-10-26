@@ -138,72 +138,99 @@ test("the Claude usage is read from the newest file Claude Code's status line le
 	write("notes.txt", "ignored", 1);
 	assert.deepEqual(readClaudeCodeUsage(dir, NOW), [{ label: "5h", percent: 24, resetsAt: NOW + 8_100_000 }]);
 	assert.deepEqual(readClaudeCodeUsage(dir, NOW + 9_000_000), [], "the window has reset");
+	write(
+		"new.json",
+		`{"used_percentage":23.6,"resets_at":${NOW / 1000 + 8100},"seven_day":{"used_percentage":31,"resets_at":${NOW / 1000 + 259200}}}`,
+		10,
+	);
+	assert.deepEqual(readClaudeCodeUsage(dir, NOW), [
+		{ label: "5h", percent: 24, resetsAt: NOW + 8_100_000 },
+		{ label: "7d", percent: 31, resetsAt: NOW + 259_200_000 },
+	]);
 	assert.deepEqual(readClaudeCodeUsage(join(dir, "missing"), NOW), []);
 	write("new.json", "not json", 1);
 	assert.deepEqual(readClaudeCodeUsage(dir, NOW), []);
 });
 
-test("the line is Claude Code's: user@host, folder, model, context and the 5h window", () => {
-	const claude = statusLine(plain, {
-		...base,
-		accounts: [{ name: "claude", windows: [{ label: "5h", percent: 23, resetsAt: NOW + (2 * 60 + 15) * 60_000 }] }],
-	});
-	assert.match(claude, /^me@mac {2}~\/project {2}Sonnet 5\.5 {2}ctx: 32% {2}◷ 5h: 23% \(2h15m → \d\d:\d\d\)$/);
-	assert.doesNotMatch(claude, /claude/, "one account is not named");
+const win = (label: string, percent: number, resetsAt?: number) => ({
+	label,
+	percent,
+	...(resetsAt ? { resetsAt } : {}),
 });
 
-test("two logged-in accounts are shown side by side, each with its name", () => {
-	const both = statusLine(plain, {
+test("the first line is the session: user@host, folder, model, effort and context", () => {
+	const [head, ...rest] = statusLine(plain, { ...base, effort: "high" });
+	assert.equal(head, "me@mac  ~/project  Sonnet 5.5  effort: high  ctx: 32%");
+	assert.deepEqual(rest, [], "no account has a window, so nothing else");
+});
+
+test("each account with a window gets its own line, with its limits and resets, aligned", () => {
+	const lines = statusLine(plain, {
 		...base,
 		accounts: [
-			{ name: "claude", windows: [{ label: "5h", percent: 23, resetsAt: NOW + 3_600_000 }] },
-			{ name: "openai", windows: [{ label: "5h", percent: 41 }] },
+			{
+				name: "claude",
+				active: true,
+				windows: [win("5h", 23, NOW + (2 * 60 + 15) * 60_000), win("7d", 31, NOW + 3 * 86_400_000)],
+			},
+			{ name: "openai", active: false, windows: [win("5h", 41, NOW + 3_600_000)] },
+			{ name: "gemini", active: false, windows: [] },
 		],
 	});
-	assert.match(both, /claude ◷ 5h: 23% \(1h0m → \d\d:\d\d\) {3}openai ◷ 5h: 41%$/);
+	assert.equal(lines.length, 3, "the session line and two accounts; an account without windows has no line");
+	assert.match(lines[1] ?? "", /^◷ claude {2}5h: 23% \(2h15m → \d\d:\d\d\) {3}7d: 31% \(3d0h\)$/);
+	assert.match(lines[2] ?? "", /^◷ openai {2}5h: 41% \(1h0m → \d\d:\d\d\)$/);
 });
 
-test("the weekly window appears only once it passes 50%", () => {
-	const week = (percent: number) =>
-		statusLine(plain, {
-			...base,
-			accounts: [
-				{
-					name: "claude",
-					windows: [
-						{ label: "5h", percent: 10 },
-						{ label: "7d", percent },
-					],
-				},
-			],
-		});
-	assert.doesNotMatch(week(30), /7d/);
-	assert.match(week(60), /5h: 10% {2}7d: 60%$/);
-});
-
-test("with no model the line says so, and with no windows it shows the session's tokens and cost", () => {
-	const none = statusLine(plain, { ...base, model: undefined, contextPercent: null });
-	assert.equal(none, "me@mac  ~/project  ctx: --");
-	const spent = statusLine(plain, { ...base, input: 12_345, output: 800, cost: 0.0421 });
-	assert.match(spent, /ctx: 32% {2}↑12\.3k ↓800 {2}\$0\.042$/);
-});
-
-test("a narrow line drops the least important parts first and never overflows", () => {
-	const input = {
+test("account names are padded to one width so the limits line up", () => {
+	const lines = statusLine(plain, {
 		...base,
-		accounts: [{ name: "claude", windows: [{ label: "5h", percent: 95, resetsAt: NOW + 3_600_000 }] }],
-	};
+		accounts: [
+			{ name: "openai", active: false, windows: [win("5h", 41)] },
+			{ name: "copilot-x", active: false, windows: [win("5h", 5)] },
+		],
+	});
+	assert.equal(lines[1], "◷ openai     5h: 41%");
+	assert.equal(lines[2], "◷ copilot-x  5h: 5%");
+});
+
+test("the active account is named in the accent color and the others in muted", () => {
+	const tag = { fg: (c: string, t: string) => `<${c}>${t}</${c}>`, bold: (t: string) => t } as Parameters<
+		typeof statusLine
+	>[0];
+	const lines = statusLine(tag, {
+		...base,
+		width: 5000,
+		accounts: [
+			{ name: "claude", active: true, windows: [win("5h", 10)] },
+			{ name: "openai", active: false, windows: [win("5h", 10)] },
+		],
+	});
+	assert.match(lines[1] ?? "", /^<accent>◷ claude<\/accent>/);
+	assert.match(lines[2] ?? "", /^<muted>◷ openai<\/muted>/);
+});
+
+test("with no windows the session's tokens and cost take the line below; with no model the line says so", () => {
+	const spent = statusLine(plain, { ...base, input: 12_345, output: 800, cost: 0.0421 });
+	assert.equal(spent[1], "↑12.3k ↓800  $0.042");
+	const none = statusLine(plain, { ...base, model: undefined, contextPercent: null });
+	assert.deepEqual(none, ["me@mac  ~/project  ctx: --"]);
+});
+
+test("a narrow first line drops the least important parts first and never overflows; account lines never merge", () => {
+	const input = { ...base, effort: "high", accounts: [{ name: "claude", active: true, windows: [win("5h", 95)] }] };
 	let previous = Number.POSITIVE_INFINITY;
 	for (const width of [120, 90, 70, 50, 30, 12]) {
-		const line = statusLine(plain, { ...input, width });
-		assert.ok(visibleWidth(line) <= width, `${width}: ${line}`);
-		assert.ok(visibleWidth(line) <= previous);
-		previous = visibleWidth(line);
+		const lines = statusLine(plain, { ...input, width });
+		for (const l of lines) assert.ok(visibleWidth(l) <= width, `${width}: ${l}`);
+		assert.ok(visibleWidth(lines[0] ?? "") <= previous);
+		previous = visibleWidth(lines[0] ?? "");
+		assert.equal(lines.length, 2, "the account keeps its own line at every width");
 	}
-	const medium = statusLine(plain, { ...input, width: 60 });
+	const medium = statusLine(plain, { ...input, width: 40 })[0] ?? "";
 	assert.match(medium, /~\/project/);
-	assert.match(medium, /5h: 95%/);
-	assert.doesNotMatch(medium, /me@mac/, "user@host goes before the folder and the usage");
+	assert.match(medium, /Sonnet 5\.5/);
+	assert.doesNotMatch(medium, /me@mac|effort/, "user@host and effort go before the folder and the model");
 });
 
 test("context and usage are colored by how close the limit is", () => {
@@ -215,12 +242,12 @@ test("context and usage are colored by how close the limit is", () => {
 			...base,
 			width: 5000,
 			contextPercent: percent,
-			accounts: [{ name: "claude", windows: [{ label: "5h", percent }] }],
-		});
+			accounts: [{ name: "claude", active: true, windows: [win("5h", percent)] }],
+		}).join("\n");
 	assert.match(at(10), /<muted>ctx: 10%<\/muted>/);
-	assert.match(at(10), /<text>◷ 5h: 10%<\/text>/);
+	assert.match(at(10), /<text>5h: 10%<\/text>/);
 	assert.match(at(75), /<warning>ctx: 75%<\/warning>/);
-	assert.match(at(95), /<error>◷ 5h: 95%<\/error>/);
+	assert.match(at(95), /<error>5h: 95%<\/error>/);
 });
 
 test("session totals add up only assistant messages", () => {

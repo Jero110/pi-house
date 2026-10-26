@@ -133,21 +133,28 @@ Every pi option and command works too (`pih --model ...`, `/model`, `/login`).
 
 ### The interface
 
-pi-house runs pi in a flat, quiet theme, close to Claude Code's: a gray bar for your message, a periwinkle accent and
-bright syntax colors. Pi's footer is replaced by one status line in the same layout as Claude Code's:
+pi-house runs pi in a flat, quiet theme, close to Claude Code's: a gray bar for your message, a periwinkle accent, and
+greens and golds that sit in the same family. Pi's footer is replaced by a status block in Claude Code's layout. The first
+line is the session; below it, each account you use gets its own line with its limits and resets:
 
 ```
-you@host  ~/project  Sonnet 5.5  ctx: 32%  ◷ 5h: 23% (2h15m → 16:00)
+you@host  ~/project  Sonnet 5.5  effort: high  ctx: 32%
+◷ claude  5h: 23% (2h15m → 16:00)   7d: 31% (3d2h)
+◷ openai  5h: 41% (1h20m → 14:35)   7d: 9% (5d1h)
 ```
 
-- **Claude:** pi-house reads the 5h usage that Claude Code's own status line leaves in `~/.claude/rate-limits/`, so you see
-  the limit you share with Claude Code. It is as fresh as the last Claude Code refresh, and hidden once its window has reset.
-- **ChatGPT:** with a ChatGPT login (`/login`, `openai-codex`) its usage windows are read from OpenAI's usage endpoint.
-- **Both logged in:** both accounts are drawn side by side, each with its name: `claude ◷ 5h: 23% (…)   openai ◷ 5h: 41%`.
-- **Other logins and API keys:** no windows, so the line shows the session's tokens and cost.
-- The 7 day window shows up once it passes 50%, and narrow terminals drop the least important parts first.
+- **Claude:** pi-house reads the usage that Claude Code's own status line leaves in `~/.claude/rate-limits/<session>.json`
+  (`used_percentage` and `resets_at`, plus an optional `seven_day` object with the same two fields), so you see the limit
+  you share with Claude Code. It is as fresh as the last Claude Code refresh and hidden once its window has reset. Claude
+  Code only writes that file if your status line script does; see
+  [Claude Code's status line docs](https://code.claude.com/docs/en/statusline) for the `rate_limits` it passes in.
+- **ChatGPT:** with a ChatGPT login (`/login`, `openai-codex`) the windows come from OpenAI's usage endpoint.
+- **Active account:** the one whose model you are using is named in the accent color.
+- **Other logins and API keys:** no windows, so the line below the session shows its tokens and cost.
+- Narrow terminals drop the least important parts of the first line first; an account line never merges with another.
 
-It lives in `packages/pihouse` (`themes/pihouse.json`, `src/extensions/statusbar.ts`).
+It lives in `packages/pihouse` (`themes/pihouse.json`, `src/extensions/statusbar.ts`). One known limit: pi itself shows its
+original footer for a moment while it reloads, so `/reload` flashes before pi-house's comes back; starting `pih` does not.
 
 ## The workflow
 

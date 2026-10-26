@@ -70,6 +70,12 @@ export interface HubOptions {
 	adapters: Record<string, AdapterFactory>;
 	backends: Partial<Record<BackendName, PaneBackend>>;
 	profiles: ReadonlyMap<string, Profile>;
+	/**
+	 * Reads the profiles again. Problem: a hub started before a harness was installed never knew it. Example: a hub
+	 * running since Faro cannot open "pihouse", whose profile was written later, until it is restarted, and
+	 * restarting closes the agents it runs. Solution: when a harness is not known, the hub reads the profiles once more.
+	 */
+	reloadProfiles?: () => ReadonlyMap<string, Profile>;
 	mcp?: McpCommands;
 	guard?: (command: string, depth: number) => GuardVerdict;
 	startup?: { timeoutMs?: number; pollMs?: number };
@@ -127,14 +133,30 @@ export class Hub {
 	private readonly pidTimer: ReturnType<typeof setInterval>;
 	private closed = false;
 
+	/** The profiles in use: the ones the hub started with, plus any it learned of later. */
+	private readonly profiles: Map<string, Profile>;
+
 	constructor(opts: HubOptions) {
 		this.opts = opts;
+		this.profiles = new Map(opts.profiles);
 		this.pidTimer = setInterval(() => this.checkPids(), opts.pidPollMs ?? 1000);
 		this.pidTimer.unref();
 	}
 
 	get log(): EventLog {
 		return this.opts.log;
+	}
+
+	/** The profile of a harness; one the hub does not know sends it to read the profiles again first. */
+	private profileFor(harness: string): Profile | undefined {
+		if (!this.profiles.has(harness) && this.opts.reloadProfiles) {
+			try {
+				for (const [name, profile] of this.opts.reloadProfiles()) this.profiles.set(name, profile);
+			} catch {
+				// A broken profile file must not take registration down; the known profiles still work.
+			}
+		}
+		return this.profiles.get(harness);
 	}
 
 	// -------------------------------------------------------------------------------------------------
@@ -146,7 +168,7 @@ export class Hub {
 		if (this.closed) return { error: "the hub is shutting down" };
 		if (!req.harness) return { error: "register needs a harness" };
 		if (req.parent) return { error: "POST /agents registers roots only; workers come from spawn" };
-		const profile = this.opts.profiles.get(req.harness);
+		const profile = this.profileFor(req.harness);
 		const factory = req.adapter ? profile && this.opts.adapters[profile.adapter] : undefined;
 		if (req.adapter && !factory)
 			return { error: `no adapter for "${req.harness}" in this hub, so it cannot drive it; register with pull: true` };
@@ -210,9 +232,10 @@ export class Hub {
 		const caller = this.registry.get(req.from);
 		if (!caller) return { error: this.registry.unknownAgent(req.from, req.from) };
 		if (caller.record.state === "exited" || caller.closing) return { error: `${req.from} has exited` };
+		this.profileFor(req.harness);
 		const checked = checkSpawn(req, {
 			caller,
-			profiles: this.opts.profiles,
+			profiles: this.profiles,
 			adapters: this.opts.adapters,
 			backends: this.opts.backends,
 		});

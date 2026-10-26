@@ -176,7 +176,8 @@ export function formatLeft(resetsAt: number, now: number): string {
 export const CLAUDE_CODE_RATE_LIMITS = join(homedir(), ".claude", "rate-limits");
 
 /**
- * The 5h window of a Claude login, as the Claude Code on this machine last saw it.
+ * The 5h window (and the 7d one, when the script writes it as `seven_day`) of a Claude login, as the Claude Code on
+ * this machine last saw it.
  * Problem: pi-house talks to Claude through a subprocess, so no usage headers reach it, yet the account is the same
  * one Claude Code uses and they share the limit. Example: Claude Code's status line script writes
  * `{"used_percentage":23,"resets_at":1792701600}` to ~/.claude/rate-limits/<session>.json on every refresh.
@@ -194,10 +195,14 @@ export function readClaudeCodeUsage(dir: string, now: number): UsageWindow[] {
 		}
 		if (!newest) return [];
 		const data = JSON.parse(readFileSync(newest.file, "utf8")) as Record<string, unknown>;
-		const used = num(data.used_percentage);
-		const resetsAt = epochMs(data.resets_at);
-		if (used === undefined || (resetsAt !== undefined && resetsAt <= now)) return [];
-		return [{ label: "5h", percent: clampPercent(used), ...(resetsAt ? { resetsAt } : {}) }];
+		const window = (label: string, source: unknown): UsageWindow[] => {
+			const o = (typeof source === "object" && source !== null ? source : {}) as Record<string, unknown>;
+			const used = num(o.used_percentage);
+			const resetsAt = epochMs(o.resets_at);
+			if (used === undefined || (resetsAt !== undefined && resetsAt <= now)) return [];
+			return [{ label, percent: clampPercent(used), ...(resetsAt ? { resetsAt } : {}) }];
+		};
+		return [...window("5h", data), ...window("7d", data.seven_day)];
 	} catch {
 		return [];
 	}

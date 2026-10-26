@@ -18,6 +18,8 @@ export interface StartHubOptions {
 	adapters: Record<string, AdapterFactory>;
 	backends: Partial<Record<BackendName, PaneBackend>>;
 	profiles?: ReadonlyMap<string, Profile>;
+	/** Reads the profiles again when a harness is not known (see HubOptions). */
+	reloadProfiles?: () => ReadonlyMap<string, Profile>;
 	mcp?: McpCommands;
 	guard?: (command: string, depth: number) => GuardVerdict;
 	startup?: { timeoutMs?: number; pollMs?: number };
@@ -68,6 +70,7 @@ export async function startHub(opts: StartHubOptions): Promise<RunningHub> {
 		adapters: opts.adapters,
 		backends: opts.backends,
 		profiles: opts.profiles ?? loadProfiles(),
+		reloadProfiles: opts.reloadProfiles,
 		mcp: opts.mcp,
 		guard: opts.guard,
 		startup: opts.startup,

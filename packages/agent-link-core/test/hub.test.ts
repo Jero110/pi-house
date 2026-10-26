@@ -146,6 +146,26 @@ test("handoff from a root closes the root's own terminal, named by its registere
 		assert.notEqual(state(t, "executor"), "exited");
 	}));
 
+test("a harness installed after the hub started is learned on its first use, with no restart", async () => {
+	const late = fakeProfiles().get("pi");
+	assert.ok(late);
+	const installed = new Map<string, NonNullable<typeof late>>();
+	const withReload = {
+		profiles: fakeProfiles(),
+		reloadProfiles: () => new Map([...fakeProfiles(), ...installed]),
+	};
+	await withHub(async (t) => {
+		const before = await t.client.register({ harness: "newcomer", cwd: tmpdir(), pull: false, adapter: true });
+		assert.ok("error" in before && /no adapter for "newcomer"/.test(before.error), "unknown before it is installed");
+		installed.set("newcomer", { ...late, harness: "newcomer", label: "Newcomer" });
+		const after = await t.client.register({ harness: "newcomer", cwd: tmpdir(), pull: false, adapter: true });
+		assert.ok("name" in after, "known once its profile exists");
+		const worker = await pullRoot(t.client, "pi");
+		const spawnedAfter = await t.client.spawn({ from: worker, harness: "newcomer", task: "hello", backend: "cmux" });
+		assert.ok("name" in spawnedAfter, "and spawnable");
+	}, withReload);
+});
+
 test("without handoff a root's terminal is never closed", () =>
 	withHub(async (t) => {
 		const reg = await t.client.register({

@@ -14,6 +14,7 @@ export function hubOptions(home: string = agentLinkHome()): DaemonOptions & { ho
 		adapters: ADAPTERS,
 		backends: { cmux: createCmuxBackend(), tmux: createTmuxBackend() },
 		profiles: loadProfiles([PROFILES_DIR, join(home, "profiles")]),
+		reloadProfiles: () => loadProfiles([PROFILES_DIR, join(home, "profiles")]),
 		mcp: mcpCommands(),
 	};
 }

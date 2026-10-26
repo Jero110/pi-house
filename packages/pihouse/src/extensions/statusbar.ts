@@ -30,6 +30,8 @@ type Palette = Pick<Theme, "fg" | "bold">;
 /** The usage of one account: its windows, and a name for when there are several. */
 export interface Account {
 	name: string;
+	/** Whether the model in use belongs to this account. */
+	active: boolean;
 	windows: readonly UsageWindow[];
 }
 
@@ -40,6 +42,8 @@ export interface StatusInput {
 	host: string;
 	/** The model as people read it: "Sonnet 5.5". */
 	model?: string;
+	/** The thinking effort: "off", "low", "medium", "high"... */
+	effort?: string;
 	/** Share of the context window in use, or null when unknown. */
 	contextPercent: number | null;
 	accounts: readonly Account[];
@@ -74,51 +78,50 @@ interface Segment {
 	text: string;
 }
 
-/** One line: what Claude Code's own bar shows, plus every account with a live window. */
-export function statusLine(theme: Palette, s: StatusInput): string {
+/**
+ * The status block: first the session (folder, model, effort, context), then one line per account with its windows
+ * and resets. The accounts never share a line, so one can never push another out.
+ */
+export function statusLine(theme: Palette, s: StatusInput): string[] {
 	const heat = (percent: number) => (percent >= 90 ? "error" : percent >= 70 ? "warning" : "text");
 	const segments: Segment[] = [];
 	const add = (order: number, drop: number, text: string) => segments.push({ order, drop, text });
 
-	add(0, 4, theme.bold(theme.fg("text", `${s.user}@${s.host}`)));
+	add(0, 5, theme.bold(theme.fg("text", `${s.user}@${s.host}`)));
 	add(1, 0, theme.bold(theme.fg("text", shortCwd(s.cwd))));
 	if (s.model) add(2, 2, theme.fg("accent", s.model));
-	if (s.contextPercent === null) add(3, 3, theme.fg("dim", "ctx: --"));
+	if (s.effort) add(3, 4, theme.fg("muted", `effort: ${s.effort}`));
+	if (s.contextPercent === null) add(4, 3, theme.fg("dim", "ctx: --"));
 	else {
 		const p = Math.round(s.contextPercent);
-		add(3, 3, theme.fg(p >= 90 ? "error" : p >= 70 ? "warning" : "muted", `ctx: ${p}%`));
+		add(4, 3, theme.fg(p >= 90 ? "error" : p >= 70 ? "warning" : "muted", `ctx: ${p}%`));
 	}
-
-	const named = s.accounts.length > 1;
-	const live = s.accounts.filter((a) => a.windows.length);
-	if (live.length) {
-		const groups = live.map((a) => {
-			// The 5h window always; longer ones only once they matter, as in Claude Code's bar.
-			const shown = a.windows.filter((w, i) => i === 0 || w.percent >= 50);
-			const parts = shown.map((w) => {
-				const left = w.resetsAt ? ` (${formatLeft(w.resetsAt, s.now)})` : "";
-				const icon = w === shown[0] ? "◷ " : "";
-				return theme.fg(heat(w.percent), `${icon}${w.label}: ${w.percent}%${left}`);
-			});
-			return (named ? `${theme.fg("dim", a.name)} ` : "") + parts.join("  ");
-		});
-		add(4, 1, groups.join("   "));
-	} else if (s.input + s.output > 0) {
-		const cost = s.cost > 0 ? `  $${s.cost.toFixed(s.cost < 1 ? 3 : 2)}` : "";
-		add(4, 3, theme.fg("dim", `↑${compact(s.input)} ↓${compact(s.output)}${cost}`));
-	}
-
-	const sep = "  ";
 	const compose = () =>
 		[...segments]
 			.sort((a, b) => a.order - b.order)
 			.map((x) => x.text)
-			.join(sep);
+			.join("  ");
 	while (segments.length > 1 && visibleWidth(compose()) > s.width) {
 		const last = segments.reduce((a, b) => (b.drop > a.drop ? b : a));
 		segments.splice(segments.indexOf(last), 1);
 	}
-	return truncateToWidth(compose(), s.width);
+	const lines = [truncateToWidth(compose(), s.width)];
+
+	const live = s.accounts.filter((a) => a.windows.length);
+	const nameWidth = Math.max(0, ...live.map((a) => a.name.length));
+	for (const a of live) {
+		const name = theme.fg(a.active ? "accent" : "muted", `◷ ${a.name.padEnd(nameWidth)}`);
+		const windows = a.windows.map((w) => {
+			const reset = w.resetsAt ? theme.fg("muted", ` (${formatLeft(w.resetsAt, s.now)})`) : "";
+			return `${theme.fg(heat(w.percent), `${w.label}: ${w.percent}%`)}${reset}`;
+		});
+		lines.push(truncateToWidth(`${name}  ${windows.join("   ")}`, s.width));
+	}
+	if (!live.length && s.input + s.output > 0) {
+		const cost = s.cost > 0 ? `  $${s.cost.toFixed(s.cost < 1 ? 3 : 2)}` : "";
+		lines.push(truncateToWidth(theme.fg("dim", `↑${compact(s.input)} ↓${compact(s.output)}${cost}`), s.width));
+	}
+	return lines;
 }
 
 type Entry = {
@@ -210,27 +213,25 @@ export default function statusbar(pi: ExtensionAPI): void {
 				invalidate() {},
 				render(width: number): string[] {
 					const now = Date.now();
+					const provider = ctx.model && ctx.model.id !== "unknown" ? providerLabel(ctx.model.provider) : undefined;
 					const accounts: Account[] = [...known]
-						.map(([name, v]) => ({ name, windows: live(v.windows, now) }))
+						.map(([name, v]) => ({ name, active: name === provider, windows: live(v.windows, now) }))
 						.filter((a) => a.windows.length)
 						.sort((a, b) => a.name.localeCompare(b.name));
-					const line = statusLine(theme, {
+					const lines = statusLine(theme, {
 						width,
 						cwd: ctx.cwd,
 						...who,
 						model: ctx.model && ctx.model.id !== "unknown" ? (ctx.model.name ?? ctx.model.id) : undefined,
+						effort: ctx.thinkingLevel,
 						contextPercent: ctx.getContextUsage()?.percent ?? null,
 						accounts,
 						now,
 						...sessionTotals(ctx.sessionManager.getBranch()),
 					});
-					// The second line, like Claude Code's: the quiet extras, only when there are any.
-					const extras = [
-						...(ctx.thinkingLevel && ctx.thinkingLevel !== "off" ? [`think ${ctx.thinkingLevel}`] : []),
-						...footer.getExtensionStatuses().values(),
-					];
-					const second = extras.length ? [truncateToWidth(theme.fg("dim", extras.join(" · ")), width)] : [];
-					return [line, ...second];
+					// The quiet extras other extensions put in the footer (agent-link's), last and only when there are any.
+					const extras = [...footer.getExtensionStatuses().values()];
+					return extras.length ? [...lines, truncateToWidth(theme.fg("dim", extras.join(" · ")), width)] : lines;
 				},
 			};
 		});
