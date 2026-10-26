@@ -1,0 +1,33 @@
+{
+	"name": "pihouse",
+	"private": true,
+	"version": "0.1.0",
+	"description": "pihouse: a coding agent on pi that launches, links and reviews other coding agents.",
+	"license": "MIT",
+	"type": "module",
+	"workspaces": [
+		"packages/agent-link-core",
+		"packages/agent-link-cmux",
+		"packages/agent-link-tmux",
+		"packages/agent-link",
+		"packages/agent-transcripts",
+		"packages/cmux-mcp",
+		"packages/pihouse"
+	],
+	"engines": {
+		"node": ">=24.0.0"
+	},
+	"scripts": {
+		"check": "biome check . && tsc --noEmit -p tsconfig.json && node scripts/check-pinned-deps.mjs",
+		"test": "node --test packages/*/test/*.test.ts",
+		"sync-versions": "node scripts/sync-versions.mjs",
+		"prepare": "husky",
+		"skills": "node scripts/skills.mjs"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "2.5.15",
+		"@types/node": "26.6.5",
+		"husky": "9.1.7",
+		"typescript": "7.0.2"
+	}
+}

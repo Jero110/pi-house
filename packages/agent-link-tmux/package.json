@@ -1,0 +1,16 @@
+{
+	"name": "agent-link-tmux",
+	"version": "0.1.0",
+	"type": "module",
+	"license": "MIT",
+	"bin": {
+		"agent-link-tmux": "./src/mcp.ts"
+	},
+	"exports": {
+		".": "./src/index.ts",
+		"./mcp": "./src/mcp.ts"
+	},
+	"dependencies": {
+		"agent-link-core": "0.1.0"
+	}
+}

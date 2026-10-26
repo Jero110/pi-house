@@ -1,0 +1,27 @@
+cd /tmp/xl-v/trust1 && claude --model haiku
+Last login: Thu Oct 22 19:04:15 on ttys007
+ ~/De/xi/exp/v3-verify    main ?1  
+❯ cd /tmp/xl-v/trust1 && claude --model haiku
+
+──────────────────────────────────
+ Accessing workspace:
+
+ /private/tmp/xl-v/trust1
+
+ Quick safety check: Is this a
+ project you created or one you
+ trust? (Like your own code, a
+ well-known open source project,
+ or work from your team). If not,
+ take a moment to review what's
+ in this folder first.
+
+ Claude Code'll be able to read,
+ edit, and execute files here.
+
+ Security guide
+
+ ❯ No, exit
+   Yes, I trust this folder
+
+ Enter to confirm · Esc to cancel

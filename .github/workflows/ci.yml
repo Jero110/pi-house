@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5.0.0
+      - uses: actions/setup-node@v5.0.0
+        with:
+          node-version: 24
+      - run: npm ci --ignore-scripts
+      - run: npm run check
+      - run: npm test
+
+  # The path Windows users take inside WSL2: a fresh Ubuntu user installs system packages, pihouse and the harnesses.
+  install-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5.0.0
+      - name: Remove the runner's Node.js, as on a fresh Ubuntu
+        run: sudo rm -f "$(command -v node)" "$(command -v npm)" "$(command -v npx)"
+      - name: install.sh --deps --with-harnesses --claude-bridge in a fresh HOME
+        run: |
+          # A fresh user: its own HOME, and no XDG_CONFIG_HOME (the runner sets one under the real home).
+          export HOME="$RUNNER_TEMP/home" && mkdir -p "$HOME" && unset XDG_CONFIG_HOME
+          bash install.sh --backend tmux --deps --with-harnesses --claude-bridge
+          export PATH="$HOME/.local/bin:$PATH"
+          node --version
+          tmux -V
+          for bin in pihouse agent-link claude codex opencode; do command -v "$bin"; done
+          grep -q agent-link "$HOME/.codex/config.toml"
+          grep -q agent-link "$HOME/.config/opencode/opencode.json"
+          test -f "$HOME/.agent-link/profiles/pihouse.json"
+          # The bridge is installed because it was asked for, and is still not the default.
+          ! grep -q '"defaultProvider"' "$HOME/.pihouse/agent/settings.json"
+          test -d "$HOME/.pihouse/agent/npm/node_modules/pi-claude-bridge"
+
+  # macOS with no tmux: the installer installs it with Homebrew.
+  install-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5.0.0
+      - uses: actions/setup-node@v5.0.0
+        with:
+          node-version: 24
+      - name: install.sh --with-harnesses in a fresh HOME, tmux missing
+        run: |
+          brew list tmux >/dev/null 2>&1 && brew uninstall tmux || true
+          export HOME="$RUNNER_TEMP/home" && mkdir -p "$HOME"
+          bash install.sh --backend tmux --with-harnesses
+          export PATH="$HOME/.local/bin:$PATH"
+          tmux -V
+          for bin in pihouse agent-link claude codex opencode; do command -v "$bin"; done
+          # Claude Code is on PATH, and without --claude-bridge the bridge stays out.
+          ! grep -q '"defaultProvider"' "$HOME/.pihouse/agent/settings.json"
+          test ! -d "$HOME/.pihouse/agent/npm/node_modules/pi-claude-bridge"
+
+  install-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5.0.0
+      - name: install.ps1 parses in Windows PowerShell and PowerShell 7
+        shell: pwsh
+        run: |
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile("$PWD\install.ps1", [ref]$null, [ref]$errors) | Out-Null
+          if ($errors) { $errors | ForEach-Object { $_.ToString() }; exit 1 }
+          powershell.exe -NoProfile -Command "`$e = `$null; [System.Management.Automation.Language.Parser]::ParseFile('$PWD\install.ps1', [ref]`$null, [ref]`$e) | Out-Null; if (`$e) { `$e; exit 1 }"

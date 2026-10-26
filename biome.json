@@ -1,0 +1,6 @@
+{
+	"$schema": "https://biomejs.dev/schemas/2.5.15/schema.json",
+	"files": { "includes": ["**", "!**/node_modules", "!**/dist", "!.claude", "!skills/extras/impeccable"] },
+	"formatter": { "indentStyle": "tab", "lineWidth": 120 },
+	"linter": { "rules": { "preset": "recommended", "suspicious": { "noExplicitAny": "error" } } }
+}

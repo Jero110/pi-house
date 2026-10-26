@@ -1,0 +1,1 @@
+{ "harness": "pi", "adapter": "pi", "label": "pi", "defaultModel": "claude-bridge/claude-haiku-5-5", "dialogs": [] }

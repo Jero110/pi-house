@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img">
+<title>pihouse</title>
+<rect width="256" height="256" rx="58" fill="#0a0a0a"/>
+<g fill="none" stroke="#ffffff" stroke-width="12" stroke-linecap="round" stroke-linejoin="round">
+<path d="M48 126 128 58 208 126"/>
+<path d="M82 148H174"/>
+<path d="M104 148V204"/>
+<path d="M152 148V188Q152 204 168 204"/>
+</g>
+</svg>

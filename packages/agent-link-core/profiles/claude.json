@@ -1,0 +1,19 @@
+{
+	"harness": "claude",
+	"adapter": "claude",
+	"label": "Claude",
+	"defaultModel": "claude-haiku-5-5",
+	"dialogs": [
+		{
+			"name": "trust",
+			"match": ["Is this a project you created or one you trust?"],
+			"choose": "Yes, I trust this folder"
+		},
+		{ "name": "pre-approves", "match": ["pre-approves", "tool permission"], "choose": 1 },
+		{
+			"name": "dev-channels",
+			"match": ["WARNING: Loading development channels"],
+			"choose": "I am using this for local development"
+		}
+	]
+}

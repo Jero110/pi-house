@@ -1,0 +1,13 @@
+{
+	"harness": "codex",
+	"adapter": "codex",
+	"label": "Codex",
+	"defaultModel": null,
+	"dialogs": [
+		{
+			"name": "hooks-review",
+			"match": ["Hooks need review", "Continue without trusting"],
+			"choose": { "keys": ["escape"] }
+		}
+	]
+}

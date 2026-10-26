@@ -1,0 +1,17 @@
+{
+	"name": "cmux-mcp",
+	"version": "0.1.0",
+	"type": "module",
+	"license": "MIT",
+	"bin": {
+		"cmux-mcp": "./src/cli.ts"
+	},
+	"exports": {
+		".": "./src/index.ts",
+		"./cli": "./src/cli.ts"
+	},
+	"dependencies": {
+		"agent-link-core": "0.1.0",
+		"agent-transcripts": "0.1.0"
+	}
+}

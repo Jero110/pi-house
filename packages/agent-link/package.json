@@ -1,0 +1,19 @@
+{
+	"name": "agent-link",
+	"version": "0.1.0",
+	"type": "module",
+	"license": "MIT",
+	"bin": {
+		"agent-link": "./src/cli.ts"
+	},
+	"exports": {
+		".": "./src/index.ts",
+		"./hub": "./src/hub.ts"
+	},
+	"dependencies": {
+		"agent-link-cmux": "0.1.0",
+		"agent-link-core": "0.1.0",
+		"agent-link-tmux": "0.1.0",
+		"agent-transcripts": "0.1.0"
+	}
+}

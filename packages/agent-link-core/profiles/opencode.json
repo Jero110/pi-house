@@ -1,0 +1,7 @@
+{
+	"harness": "opencode",
+	"adapter": "opencode",
+	"label": "opencode",
+	"defaultModel": "opencode/glm-5.3-flash-free",
+	"dialogs": []
+}
