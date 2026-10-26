@@ -133,18 +133,21 @@ Every pi option and command works too (`pih --model ...`, `/model`, `/login`).
 
 ### The interface
 
-pi-house runs pi in a quiet black, white and gray theme with one lilac accent, and replaces pi's footer with a single status
-line:
+pi-house runs pi in a flat, quiet theme, close to Claude Code's: a gray bar for your message, a periwinkle accent and
+bright syntax colors. Pi's footer is replaced by one status line in the same layout as Claude Code's:
 
 ```
-~/project · main · claude sonnet-5-5 · ctx ▰▰▱▱▱▱▱▱ 23% · 5h 12% ↻4h16m  7d 3% ↻5d2h
+you@host  ~/project  Sonnet 5.5  ctx: 32%  ◷ 5h: 23% (2h15m → 16:00)
 ```
 
-It always shows the account you are on: folder, git branch, provider and model, the context window, and the usage windows
-of that login. Log in with Claude and it shows Claude's 5 hour and 7 day windows; switch to a ChatGPT model with `/model`
-and it shows that account's; on a login or key without windows it shows the session's tokens and cost instead. Narrow
-terminals drop the least important parts first. Both live in `packages/pihouse` (`themes/pihouse.json`,
-`src/extensions/statusbar.ts`).
+- **Claude:** pi-house reads the 5h usage that Claude Code's own status line leaves in `~/.claude/rate-limits/`, so you see
+  the limit you share with Claude Code. It is as fresh as the last Claude Code refresh, and hidden once its window has reset.
+- **ChatGPT:** with a ChatGPT login (`/login`, `openai-codex`) its usage windows are read from OpenAI's usage endpoint.
+- **Both logged in:** both accounts are drawn side by side, each with its name: `claude ◷ 5h: 23% (…)   openai ◷ 5h: 41%`.
+- **Other logins and API keys:** no windows, so the line shows the session's tokens and cost.
+- The 7 day window shows up once it passes 50%, and narrow terminals drop the least important parts first.
+
+It lives in `packages/pihouse` (`themes/pihouse.json`, `src/extensions/statusbar.ts`).
 
 ## The workflow
 

@@ -32,18 +32,30 @@ function tempHome(t: { after: (fn: () => void) => void }): { home: string; env: 
 	return { home, env: { HOME: home, PATH: "", AGENT_LINK_HOME: join(home, ".al") } };
 }
 
-test("the header is plain text: the name and the commands, with no logo and no slogan, and never wider than the terminal", () => {
-	const theme = { bold: (t: string) => t, fg: (_c: string, t: string) => t } as unknown as Parameters<
-		typeof headerLines
-	>[0];
-	const text = headerLines(theme, 120, true).join("\n");
+test("the header is plain text, laid out like Claude Code's: name, model, folder and the commands; no logo, no slogan", () => {
+	const theme = {
+		bold: (t: string) => t,
+		fg: (_c: string, t: string) => t,
+	} as unknown as Parameters<typeof headerLines>[0];
+	const info = {
+		linked: true,
+		cwd: "/Users/me/Desktop/vs",
+		home: "/Users/me",
+		model: "Sonnet 5.5",
+		provider: "anthropic",
+	};
+	const lines = headerLines(theme, 120, info);
+	const text = lines.join("\n");
 	assert.match(text, /pi-house v/);
+	assert.match(text, /Sonnet 5\.5 · claude/);
+	assert.match(text, /~\/Desktop\/vs/);
 	assert.match(text, /\/skill:planner/);
 	assert.match(text, /agent-link on/);
 	assert.doesNotMatch(text, /Bring light|[▀▄█]/);
-	assert.match(headerLines(theme, 120, false).join("\n"), /agent-link off/);
+	assert.match(headerLines(theme, 120, { ...info, linked: false }).join("\n"), /agent-link off/);
+	assert.match(headerLines(theme, 120, { ...info, model: undefined }).join("\n"), /no model · \/login/);
 	for (const width of [120, 60, 20])
-		for (const l of headerLines(theme, width, true)) assert.ok(visibleWidth(l) <= width);
+		for (const l of headerLines(theme, width, info)) assert.ok(visibleWidth(l) <= width);
 });
 
 test("the agent dir is made once from pi's login, with no default model, this checkout's skills and no stray extensions", (t) => {

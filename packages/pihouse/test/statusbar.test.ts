@@ -1,41 +1,35 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import {
-	fetchCodexWindows,
-	modelLabel,
-	providerLabel,
-	sessionTotals,
-	statusLine,
-	tildePath,
-} from "../src/extensions/statusbar.ts";
+import { fetchCodexWindows, providerLabel, sessionTotals, shortCwd, statusLine } from "../src/extensions/statusbar.ts";
 import { THEME } from "../src/paths.ts";
 import {
 	chatgptAccountId,
-	formatReset,
+	formatLeft,
 	parseDuration,
+	readClaudeCodeUsage,
 	windowLabel,
 	windowsFromHeaders,
 	windowsFromJson,
 } from "../src/usage.ts";
 
-const plain = { fg: (_c: string, t: string) => t } as Parameters<typeof statusLine>[0];
+const plain = { fg: (_c: string, t: string) => t, bold: (t: string) => t } as Parameters<typeof statusLine>[0];
 const NOW = Date.parse("2026-10-26T12:00:00Z");
 const base = {
-	width: 200,
+	width: 300,
 	cwd: "/Users/me/project",
-	home: "/Users/me",
-	branch: "main",
-	provider: "anthropic",
-	model: "claude-sonnet-5-5-20260301",
-	contextPercent: 23.4,
-	windows: [],
+	user: "me",
+	host: "mac",
+	model: "Sonnet 5.5",
+	contextPercent: 32.4,
+	accounts: [],
 	now: NOW,
 	cost: 0,
 	input: 0,
 	output: 0,
-	extras: [],
 };
 
 test("Claude headers become the 5h and 7d windows, shortest first, with their resets", () => {
@@ -59,7 +53,6 @@ test("Claude headers become the 5h and 7d windows, shortest first, with their re
 		],
 	);
 	assert.equal(windows[0]?.resetsAt, reset5 * 1000);
-	assert.equal(formatReset(reset5 * 1000, NOW), "4h16m");
 });
 
 test("ChatGPT headers and the usage endpoint give the same kind of window", () => {
@@ -95,7 +88,11 @@ test("ChatGPT headers and the usage endpoint give the same kind of window", () =
 test("an API key with only token limits shows a one-minute window; no limits show nothing", () => {
 	assert.deepEqual(
 		windowsFromHeaders(
-			{ "x-ratelimit-limit-tokens": "1000", "x-ratelimit-remaining-tokens": "750", "x-ratelimit-reset-tokens": "6m0s" },
+			{
+				"x-ratelimit-limit-tokens": "1000",
+				"x-ratelimit-remaining-tokens": "750",
+				"x-ratelimit-reset-tokens": "6m0s",
+			},
 			NOW,
 		),
 		[{ label: "1m", percent: 25, resetsAt: NOW + 360_000 }],
@@ -111,52 +108,91 @@ test("small helpers", () => {
 	assert.equal(parseDuration("6m0s"), 360);
 	assert.equal(parseDuration("20ms"), 0.02);
 	assert.equal(parseDuration("soon"), undefined);
-	assert.equal(formatReset(NOW + 12 * 60_000, NOW), "12m");
-	assert.equal(formatReset(NOW + (2 * 1440 + 180) * 60_000, NOW), "2d3h");
-	assert.equal(formatReset(NOW - 1000, NOW), "0m");
 	assert.equal(providerLabel("openai-codex"), "openai");
 	assert.equal(providerLabel("anthropic"), "claude");
-	assert.equal(modelLabel("claude-sonnet-5-5-20260301"), "sonnet-5-5");
-	assert.equal(tildePath("/Users/me/project", "/Users/me"), "~/project");
-	assert.equal(tildePath("/tmp/x", "/Users/me"), "/tmp/x");
+	assert.equal(shortCwd("/Users/me/project"), "~/project");
 	const token = `x.${Buffer.from(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "acct_1" } })).toString("base64url")}.y`;
 	assert.equal(chatgptAccountId(token), "acct_1");
 	assert.equal(chatgptAccountId("not a token"), undefined);
 });
 
-test("the line shows the account in use: windows when there are some, tokens and cost when there are none", () => {
-	const claude = statusLine(plain, {
-		...base,
-		windows: [{ label: "5h", percent: 12, resetsAt: NOW + (4 * 60 + 16) * 60_000 }],
-	});
-	assert.equal(claude, "~/project · main · claude sonnet-5-5 · ctx ▰▰▱▱▱▱▱▱ 23% · 5h 12% ↻4h16m");
-	const keyOnly = statusLine(plain, {
-		...base,
-		provider: "openai",
-		model: "gpt-5",
-		input: 12_345,
-		output: 800,
-		cost: 0.0421,
-	});
-	assert.match(keyOnly, /openai gpt-5 · .* · ↑12.3k ↓800 {2}\$0.042$/);
+test("the time left reads like Claude Code's bar: hours and minutes, then the clock time", () => {
+	assert.match(formatLeft(NOW + (4 * 60 + 16) * 60_000, NOW), /^4h16m → \d\d:\d\d$/);
+	assert.match(formatLeft(NOW + 125 * 60_000, NOW), /^2h5m → \d\d:\d\d$/);
+	assert.match(formatLeft(NOW + 12 * 60_000, NOW), /^12m → \d\d:\d\d$/);
+	assert.match(formatLeft(NOW - 1000, NOW), /^0m → /);
+	assert.equal(formatLeft(NOW + (2 * 1440 + 180) * 60_000, NOW), "2d3h");
 });
 
-test("with no login the line points at /login instead of naming a model", () => {
-	const line = statusLine(plain, {
+test("the Claude usage is read from the newest file Claude Code's status line left, and a past window gives nothing", () => {
+	const dir = mkdtempSync(join(tmpdir(), "rl-"));
+	mkdirSync(dir, { recursive: true });
+	const write = (name: string, body: string, ageSeconds: number) => {
+		const file = join(dir, name);
+		writeFileSync(file, body);
+		const t = (NOW - ageSeconds * 1000) / 1000;
+		utimesSync(file, t, t);
+	};
+	write("old.json", `{"used_percentage":94,"resets_at":${NOW / 1000 + 600}}`, 5000);
+	write("new.json", `{"used_percentage":23.6,"resets_at":${NOW / 1000 + 8100}}`, 10);
+	write("notes.txt", "ignored", 1);
+	assert.deepEqual(readClaudeCodeUsage(dir, NOW), [{ label: "5h", percent: 24, resetsAt: NOW + 8_100_000 }]);
+	assert.deepEqual(readClaudeCodeUsage(dir, NOW + 9_000_000), [], "the window has reset");
+	assert.deepEqual(readClaudeCodeUsage(join(dir, "missing"), NOW), []);
+	write("new.json", "not json", 1);
+	assert.deepEqual(readClaudeCodeUsage(dir, NOW), []);
+});
+
+test("the line is Claude Code's: user@host, folder, model, context and the 5h window", () => {
+	const claude = statusLine(plain, {
 		...base,
-		provider: undefined,
-		model: undefined,
-		contextPercent: null,
-		branch: null,
+		accounts: [{ name: "claude", windows: [{ label: "5h", percent: 23, resetsAt: NOW + (2 * 60 + 15) * 60_000 }] }],
 	});
-	assert.equal(line, "~/project · no model /login");
+	assert.match(claude, /^me@mac {2}~\/project {2}Sonnet 5\.5 {2}ctx: 32% {2}◷ 5h: 23% \(2h15m → \d\d:\d\d\)$/);
+	assert.doesNotMatch(claude, /claude/, "one account is not named");
+});
+
+test("two logged-in accounts are shown side by side, each with its name", () => {
+	const both = statusLine(plain, {
+		...base,
+		accounts: [
+			{ name: "claude", windows: [{ label: "5h", percent: 23, resetsAt: NOW + 3_600_000 }] },
+			{ name: "openai", windows: [{ label: "5h", percent: 41 }] },
+		],
+	});
+	assert.match(both, /claude ◷ 5h: 23% \(1h0m → \d\d:\d\d\) {3}openai ◷ 5h: 41%$/);
+});
+
+test("the weekly window appears only once it passes 50%", () => {
+	const week = (percent: number) =>
+		statusLine(plain, {
+			...base,
+			accounts: [
+				{
+					name: "claude",
+					windows: [
+						{ label: "5h", percent: 10 },
+						{ label: "7d", percent },
+					],
+				},
+			],
+		});
+	assert.doesNotMatch(week(30), /7d/);
+	assert.match(week(60), /5h: 10% {2}7d: 60%$/);
+});
+
+test("with no model the line says so, and with no windows it shows the session's tokens and cost", () => {
+	const none = statusLine(plain, { ...base, model: undefined, contextPercent: null });
+	assert.equal(none, "me@mac  ~/project  ctx: --");
+	const spent = statusLine(plain, { ...base, input: 12_345, output: 800, cost: 0.0421 });
+	assert.match(spent, /ctx: 32% {2}↑12\.3k ↓800 {2}\$0\.042$/);
 });
 
 test("a narrow line drops the least important parts first and never overflows", () => {
-	const input = { ...base, windows: [{ label: "5h", percent: 95 }], thinking: "high", extras: ["agent-link on"] };
-	const full = statusLine(plain, { ...input, width: 300 });
-	assert.match(full, /think high/);
-	assert.match(full, /agent-link on$/);
+	const input = {
+		...base,
+		accounts: [{ name: "claude", windows: [{ label: "5h", percent: 95, resetsAt: NOW + 3_600_000 }] }],
+	};
 	let previous = Number.POSITIVE_INFINITY;
 	for (const width of [120, 90, 70, 50, 30, 12]) {
 		const line = statusLine(plain, { ...input, width });
@@ -164,17 +200,27 @@ test("a narrow line drops the least important parts first and never overflows", 
 		assert.ok(visibleWidth(line) <= previous);
 		previous = visibleWidth(line);
 	}
-	const medium = statusLine(plain, { ...input, width: 70 });
+	const medium = statusLine(plain, { ...input, width: 60 });
 	assert.match(medium, /~\/project/);
-	assert.doesNotMatch(medium, /agent-link/);
+	assert.match(medium, /5h: 95%/);
+	assert.doesNotMatch(medium, /me@mac/, "user@host goes before the folder and the usage");
 });
 
-test("usage is colored by how close the limit is", () => {
-	const tag = { fg: (c: string, t: string) => `<${c}>${t}</${c}>` } as Parameters<typeof statusLine>[0];
-	const at = (percent: number) => statusLine(tag, { ...base, width: 5000, windows: [{ label: "5h", percent }] });
-	assert.match(at(10), /<text>10%<\/text>/);
-	assert.match(at(75), /<warning>75%<\/warning>/);
-	assert.match(at(95), /<error>95%<\/error>/);
+test("context and usage are colored by how close the limit is", () => {
+	const tag = { fg: (c: string, t: string) => `<${c}>${t}</${c}>`, bold: (t: string) => t } as Parameters<
+		typeof statusLine
+	>[0];
+	const at = (percent: number) =>
+		statusLine(tag, {
+			...base,
+			width: 5000,
+			contextPercent: percent,
+			accounts: [{ name: "claude", windows: [{ label: "5h", percent }] }],
+		});
+	assert.match(at(10), /<muted>ctx: 10%<\/muted>/);
+	assert.match(at(10), /<text>◷ 5h: 10%<\/text>/);
+	assert.match(at(75), /<warning>ctx: 75%<\/warning>/);
+	assert.match(at(95), /<error>◷ 5h: 95%<\/error>/);
 });
 
 test("session totals add up only assistant messages", () => {

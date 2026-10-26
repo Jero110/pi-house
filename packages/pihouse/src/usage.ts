@@ -3,7 +3,12 @@
 // Problem: every provider reports its limits differently, and the status bar must show the account in use.
 // Example: a Claude login answers each request with `anthropic-ratelimit-unified-5h-utilization: 0.12`, while a
 // ChatGPT login has no such header and exposes `used_percent` windows on its usage endpoint.
-// Solution: one small window type, one parser per source. Nothing here does I/O; the status bar feeds it.
+// Solution: one small window type, one parser per source. The status bar feeds the parsers; only readClaudeCodeUsage
+// reads a folder, because Claude Code is the one place the shared Claude usage is written to.
+
+import { readdirSync, readFileSync, statSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 
 export interface UsageWindow {
 	/** "5h", "7d", "1m": how long the window is. */
@@ -139,14 +144,6 @@ export function windowsFromJson(body: unknown, now: number): UsageWindow[] {
 	return out.sort(bySize);
 }
 
-/** "4h16m", "2d3h", "12m": the time left until a reset. */
-export function formatReset(resetsAt: number, now: number): string {
-	const minutes = Math.max(0, Math.round((resetsAt - now) / 60_000));
-	if (minutes < 60) return `${minutes}m`;
-	if (minutes < 1440) return `${Math.floor(minutes / 60)}h${String(minutes % 60).padStart(2, "0")}m`;
-	return `${Math.floor(minutes / 1440)}d${Math.floor((minutes % 1440) / 60)}h`;
-}
-
 /** The account id a ChatGPT token carries, which the usage endpoint wants as a header. */
 export function chatgptAccountId(token: string): string | undefined {
 	try {
@@ -160,5 +157,48 @@ export function chatgptAccountId(token: string): string | undefined {
 		return typeof id === "string" ? id : undefined;
 	} catch {
 		return undefined;
+	}
+}
+
+/**
+ * "2h15m → 16:00": the time left and the local clock time of the reset, as Claude Code's own status line shows it.
+ * Windows longer than a day read "5d2h" without a clock time.
+ */
+export function formatLeft(resetsAt: number, now: number): string {
+	const minutes = Math.max(0, Math.round((resetsAt - now) / 60_000));
+	if (minutes >= 1440) return `${Math.floor(minutes / 1440)}d${Math.floor((minutes % 1440) / 60)}h`;
+	const clock = new Date(resetsAt).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
+	const left = minutes >= 60 ? `${Math.floor(minutes / 60)}h${minutes % 60}m` : `${minutes}m`;
+	return `${left} → ${clock}`;
+}
+
+/** Where Claude Code's status line script leaves the 5h usage of each session. */
+export const CLAUDE_CODE_RATE_LIMITS = join(homedir(), ".claude", "rate-limits");
+
+/**
+ * The 5h window of a Claude login, as the Claude Code on this machine last saw it.
+ * Problem: pi-house talks to Claude through a subprocess, so no usage headers reach it, yet the account is the same
+ * one Claude Code uses and they share the limit. Example: Claude Code's status line script writes
+ * `{"used_percentage":23,"resets_at":1792701600}` to ~/.claude/rate-limits/<session>.json on every refresh.
+ * Solution: read the newest file. It is only as fresh as the last Claude Code refresh, and once its reset time has
+ * passed the number no longer describes the account, so a past window gives nothing.
+ */
+export function readClaudeCodeUsage(dir: string, now: number): UsageWindow[] {
+	let newest: { file: string; mtime: number } | undefined;
+	try {
+		for (const name of readdirSync(dir)) {
+			if (!name.endsWith(".json")) continue;
+			const file = join(dir, name);
+			const mtime = statSync(file).mtimeMs;
+			if (!newest || mtime > newest.mtime) newest = { file, mtime };
+		}
+		if (!newest) return [];
+		const data = JSON.parse(readFileSync(newest.file, "utf8")) as Record<string, unknown>;
+		const used = num(data.used_percentage);
+		const resetsAt = epochMs(data.resets_at);
+		if (used === undefined || (resetsAt !== undefined && resetsAt <= now)) return [];
+		return [{ label: "5h", percent: clampPercent(used), ...(resetsAt ? { resetsAt } : {}) }];
+	} catch {
+		return [];
 	}
 }
