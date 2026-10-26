@@ -54,7 +54,7 @@ ledger. Anything risky or outside the plan (deleting, pushing, the user's other 
 
 ```
 Task <T-id> of <absolute plan path>: <title>
-If the plan does not answer a question, ask `executor` with send, then keep going.
+If the plan does not answer a question, ask `workflow-executor` with send, then keep going.
 Skills: <name>, <name>
 Read and follow before you start: <absolute path of each skill's SKILL.md>
 Work in: <cwd> (branch <branch>)
@@ -100,7 +100,8 @@ Your final answer, the only long message:
 - **Gaps:** what did not pass, and why.
 
 Your pane is the user's now (the planner closed), so the report is for them. Close every agent still open with
-`cancel`, end with one line: "`/workflow review` shows what ran, with which skills, tokens and time." Then stop. Do
+`cancel`, end by offering a review: "Run `/workflow review` here to see what ran, with which skills, tokens and time?" Only offer it;
+never run it yourself. Then stop. Do
 not start post-build or extra skills; the user invokes those if they want them.
 
 ## Red flags

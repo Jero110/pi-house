@@ -59,7 +59,8 @@ const SKILLS_LINE = /^\s*(?:Skills?|Load the skills?|Skills to load)\s*:\s*(.+)$
 
 export function isExecutor(r: SessionRecord): boolean {
 	return (
-		/^executor\b/.test(r.name) || /\/skill:executor\b|\bexecutor skill\b|skills\/build\/executor\b/i.test(r.task ?? "")
+		/^(?:workflow-)?executor\b/.test(r.name) ||
+		/\/skill:executor\b|\bexecutor skill\b|skills\/build\/executor\b/i.test(r.task ?? "")
 	);
 }
 
