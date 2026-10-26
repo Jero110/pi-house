@@ -31,6 +31,7 @@ import {
 	writePihouseProfile,
 } from "../src/setup.ts";
 import { catalogReadme, readCatalog, skillPath } from "../src/workflow/catalog.ts";
+import { LIMITS, openMemory } from "../src/workflow/memory.ts";
 import { renderReport } from "../src/workflow/report.ts";
 import { briefOf, buildRun, pickRoot } from "../src/workflow/run.ts";
 
@@ -564,9 +565,9 @@ test("a run is rebuilt from the journal and transcripts: roles, plan, tasks, ski
 	);
 });
 
-test("/workflow ask carries the architecture, the catalog, this machine and the question", (t) => {
+test("/workflow ask carries the architecture, the catalog, this machine and the question", async (t) => {
 	const { home, env } = tempHome(t);
-	const text = askContext("how are my skills organized?", { ...env, PIHOUSE_HOME: join(home, ".pihouse") });
+	const text = await askContext("how are my skills organized?", { ...env, PIHOUSE_HOME: join(home, ".pihouse") });
 	assert.match(text, /## How pihouse works/);
 	assert.match(text, /## Extras \(manual\)/);
 	assert.match(text, /`grilling` \| Matt Pocock/);
@@ -574,6 +575,91 @@ test("/workflow ask carries the architecture, the catalog, this machine and the 
 	assert.match(text, /# Question\n\nhow are my skills organized\?/);
 	assert.match(text, /pi, which pihouse runs on: .*pi-coding-agent \(README\.md, docs\/, examples\/extensions\/\)/);
 	assert.match(text, /Search the pi package above for its name/);
+});
+
+function askFixture(t: { after: (fn: () => void) => void }) {
+	const { home, env } = tempHome(t);
+	const memoryDir = join(home, "memory");
+	const store = openMemory(memoryDir);
+	return { env: { ...env, PIHOUSE_HOME: join(home, ".pihouse") }, memoryDir, store };
+}
+
+test("/workflow ask reads the memory, the index and the matching digests, never a transcript", async (t) => {
+	const { env, memoryDir, store } = askFixture(t);
+	store.writeWorkflowMemory("The user prefers small commits.");
+	for (let i = 0; i < 20; i++) {
+		const id = `run-${i}`;
+		store.writeRun(
+			{
+				schema: 1,
+				id,
+				project: "/p",
+				projectSlug: "p",
+				flaggedBy: "save",
+				capturedAt: "2026-10-26T00:00:00Z",
+				title: `run ${i} about ${i === 7 ? "caching" : "misc"}`,
+				metrics: { newTokens: 1, cacheRead: 0, activeMs: 1, wallMs: 1, agents: 0, messages: 1 },
+				agents: [],
+			},
+			[{ agentId: "a", normalized: { secret: "TRANSCRIPT-SECRET" }, raw: "TRANSCRIPT-SECRET" }],
+		);
+		store.writeDigest(id, `Digest ${i}: ${"x".repeat(1_900)}${i === 7 ? " caching" : ""}`);
+	}
+	const text = await askContext("how did caching go?", env, { memoryDir });
+	assert.match(text, /The user prefers small commits\./);
+	assert.match(text, /run:run-7 · run/);
+	assert.match(text, /## digest:run-7/);
+	assert.doesNotMatch(text, /TRANSCRIPT-SECRET/);
+	assert.ok(text.length <= LIMITS.ask, `context is ${text.length} chars`);
+});
+
+test("a YouTube link in the question is transcribed and saved to consulted/", async (t) => {
+	const { env, memoryDir, store } = askFixture(t);
+	const asked: string[] = [];
+	const text = await askContext("what about https://youtu.be/abc123, is it useful?", env, {
+		memoryDir,
+		cwd: "/tmp/not-a-repo-xyz",
+		fetchSource: async (input) => {
+			asked.push(input);
+			return {
+				ok: true,
+				text: "FAKE TRANSCRIPT words",
+				meta: {
+					kind: "youtube",
+					url: input,
+					title: "A talk",
+					method: "captions-fetch",
+					fetchedAt: "2026-10-26T00:00:00Z",
+				},
+			};
+		},
+	});
+	assert.deepEqual(asked, ["https://youtu.be/abc123"]);
+	const entry = store.readIndex().find((e) => e.kind === "consulted");
+	assert.ok(entry, "a consulted entry exists");
+	assert.match(readFileSync(join(memoryDir, entry.path), "utf8"), /source: https:\/\/youtu\.be\/abc123/);
+	assert.match(readFileSync(join(memoryDir, entry.path.replace(/\.md$/, ".txt")), "utf8"), /FAKE TRANSCRIPT/);
+	assert.match(text, /FAKE TRANSCRIPT words/);
+	assert.match(text, /at most 1,500 chars/);
+	assert.match(text, /ideas\/<source id>/);
+	assert.match(text, /ask_user_question/);
+});
+
+test("a failed fetch adds the message and the cheap-agent fallback, and saves nothing", async (t) => {
+	const { env, memoryDir, store } = askFixture(t);
+	const text = await askContext("read https://example.com/x please", env, {
+		memoryDir,
+		fetchSource: async () => ({
+			ok: false,
+			tried: ["fetch"],
+			fallback: "agent",
+			message: "Could not get a transcript: boom.",
+		}),
+	});
+	assert.match(text, /Source not read: https:\/\/example\.com\/x/);
+	assert.match(text, /Could not get a transcript: boom\./);
+	assert.match(text, /cheap agent/);
+	assert.equal(store.readIndex().filter((e) => e.kind === "consulted").length, 0);
 });
 
 test("answers read as one line per question", () => {
