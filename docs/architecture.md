@@ -102,6 +102,6 @@ Design and alternatives: `docs/decisions/ADR-001-workflow-memory.md`; contract: 
   proposals (skills unused in the last 10 processed runs, raw copies archived over 90 days ago), marks the batch
   processed, archives the raw copies and prunes. Between jobs the `context` event drops every message before the last
   boundary and `before_agent_start` adds the capped bootstrap, so a turn costs the same however old the keeper is.
-- **Sources** (`workflow/sources.ts`): YouTube captions fetched directly, then `yt-dlp`, then `whisper` with `ffmpeg`,
+- **Sources** (`workflow/sources.ts`): YouTube captions fetched from the player endpoint (no key), then `yt-dlp`, then `whisper` with `ffmpeg`,
   detected on PATH, never installed; web pages are stripped to text by code. When nothing works the result names what
   to install and the cheap-agent fallback.

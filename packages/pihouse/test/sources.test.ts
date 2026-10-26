@@ -8,12 +8,20 @@ import { type FetchResponse, fetchSource, type SourceDeps, stripHtml, vttToText 
 const NOW = new Date("2026-10-26T12:00:00Z");
 const reply = (body: string, status = 200): FetchResponse => ({ ok: status < 400, status, text: async () => body });
 
-function watchPage(tracks: unknown[]): string {
-	const player = {
-		videoDetails: { title: "A talk", lengthSeconds: "125" },
-		captions: { playerCaptionsTracklistRenderer: { captionTracks: tracks } },
-	};
-	return `<html><script>var ytInitialPlayerResponse = ${JSON.stringify(player)};var x = 1;</script></html>`;
+const PLAYER = "https://www.youtube.com/youtubei/v1/player";
+
+function player(
+	tracks: unknown[],
+	audioTracks: unknown[] = [],
+	playability: unknown = { status: "OK" },
+): FetchResponse {
+	return reply(
+		JSON.stringify({
+			playabilityStatus: playability,
+			videoDetails: { title: "A talk", author: "Someone", lengthSeconds: "125" },
+			captions: { playerCaptionsTracklistRenderer: { captionTracks: tracks, audioTracks } },
+		}),
+	);
 }
 
 const CAPTCHA = "<html><form id='captcha-form'>Unusual traffic</form></html>";
@@ -42,42 +50,66 @@ function deps(over: Partial<SourceDeps> & { pages?: Record<string, FetchResponse
 
 const YT = "https://www.youtube.com/watch?v=abc123";
 
-test("youtube link with captions uses captions-fetch and prefers the manual track", async () => {
+test("youtube link with captions uses the player endpoint and picks the default track", async () => {
 	const d = deps({
 		pages: {
-			[YT]: reply(
-				watchPage([
-					{ baseUrl: "https://tt.example/auto?lang=en", languageCode: "en", kind: "asr" },
-					{ baseUrl: "https://tt.example/manual?lang=en", languageCode: "en" },
-				]),
+			[PLAYER]: player(
+				[
+					{ baseUrl: "https://tt.example/bn?lang=bn&fmt=srv3", languageCode: "bn", kind: "asr" },
+					{ baseUrl: "https://tt.example/en?lang=en&fmt=srv3", languageCode: "en" },
+				],
+				[{ captionTrackIndices: [0, 1], defaultCaptionTrackIndex: 1 }],
 			),
-			"https://tt.example/manual": reply(
-				JSON.stringify({ events: [{ segs: [{ utf8: "Hello " }, { utf8: "world" }] }, {}] }),
+			"https://tt.example/en": reply(
+				JSON.stringify({
+					events: [{ segs: [{ utf8: "Hello " }, { utf8: "world\n" }] }, {}, { segs: [{ utf8: "again" }] }],
+				}),
 			),
 		},
 	});
 	const r = await fetchSource(YT, d);
 	assert.ok(r.ok);
-	assert.equal(r.text, "Hello world");
+	assert.equal(r.text, "Hello world again");
 	assert.deepEqual(r.meta, {
 		kind: "youtube",
 		url: YT,
 		title: "A talk",
+		author: "Someone",
 		durationSec: 125,
 		language: "en",
 		method: "captions-fetch",
 		fetchedAt: NOW.toISOString(),
 	});
-	assert.ok(d.calls.some((c) => c.includes("fmt=json3")));
+	assert.ok(d.calls.includes("fetch https://tt.example/en?lang=en&fmt=json3"));
 });
 
-test("a CAPTCHA page falls through to yt-dlp subtitles", async () => {
-	let args: string[] = [];
+test("without a default track the original audio (id ending .4) picks the caption track", async () => {
 	const d = deps({
-		pages: { [YT]: reply(CAPTCHA) },
+		pages: {
+			[PLAYER]: player(
+				[
+					{ baseUrl: "https://tt.example/dub", languageCode: "hi" },
+					{ baseUrl: "https://tt.example/orig", languageCode: "en" },
+				],
+				[
+					{ audioTrackId: "hi.10", captionTrackIndices: [0] },
+					{ audioTrackId: "en.4", captionTrackIndices: [1] },
+				],
+			),
+			"https://tt.example/orig": reply(JSON.stringify({ events: [{ segs: [{ utf8: "original" }] }] })),
+		},
+	});
+	const r = await fetchSource(YT, d);
+	assert.ok(r.ok);
+	assert.equal(r.text, "original");
+	assert.equal(r.meta.language, "en");
+});
+
+test("a live stream (UNPLAYABLE) falls through to yt-dlp subtitles", async () => {
+	const d = deps({
+		pages: { [PLAYER]: player([], [], { status: "UNPLAYABLE", reason: "This live event will begin soon" }) },
 		which: (bin) => bin === "yt-dlp",
 		exec: async (_bin, a) => {
-			args = a;
 			const out = a[a.indexOf("-o") + 1] ?? "";
 			writeFileSync(`${out.replace("%(id)s", "abc123")}.en.vtt`, VTT);
 			return { stdout: "A talk\n125\n" };
@@ -87,14 +119,30 @@ test("a CAPTCHA page falls through to yt-dlp subtitles", async () => {
 	assert.ok(r.ok);
 	assert.equal(r.text, "hello there how are you");
 	assert.equal(r.meta.method, "yt-dlp");
-	assert.equal(r.meta.title, "A talk");
-	assert.equal(r.meta.durationSec, 125);
-	assert.equal(r.meta.language, "en");
-	assert.ok(args.includes("--skip-download"));
+});
+
+test("a CAPTCHA answer instead of JSON is reported and falls through", async () => {
+	const d = deps({ pages: { [PLAYER]: reply(CAPTCHA) } });
+	const r = await fetchSource(YT, d);
+	assert.ok(!r.ok);
+	assert.match(r.message, /did not answer JSON/);
+});
+
+test("the request is the Android client POST with the video id", async () => {
+	let seen: { method?: string; body?: string } = {};
+	const d = deps({ pages: { [PLAYER]: player([]) } });
+	const inner = d.fetch;
+	d.fetch = async (url, init) => {
+		if (url.startsWith(PLAYER)) seen = { method: init?.method, body: init?.body };
+		return inner(url, init);
+	};
+	await fetchSource(YT, d);
+	assert.equal(seen.method, "POST");
+	assert.equal(JSON.parse(seen.body ?? "{}").videoId, "abc123");
 });
 
 test("no captions and no tools: clear message naming yt-dlp and the agent fallback", async () => {
-	const d = deps({ pages: { [YT]: reply(watchPage([])) } });
+	const d = deps({ pages: { [PLAYER]: player([]) } });
 	const r = await fetchSource(YT, d);
 	assert.ok(!r.ok);
 	assert.deepEqual(r.tried, ["captions-fetch", "yt-dlp", "whisper"]);
@@ -114,7 +162,7 @@ test("a network error is reported, not thrown", async () => {
 test("whisper runs on audio from yt-dlp when both and ffmpeg exist", async () => {
 	const runs: string[] = [];
 	const d = deps({
-		pages: { [YT]: reply(CAPTCHA) },
+		pages: { [PLAYER]: reply(CAPTCHA) },
 		which: () => true,
 		exec: async (bin, a) => {
 			runs.push(bin);

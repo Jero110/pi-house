@@ -104,19 +104,26 @@ session died without an `agent_end` is still captured.
 
 The user proposed transcribing with an existing tool or API and falling back to a cheap agent only when no tool can.
 
-Evidence: on this machine `yt-dlp`, `whisper` and `ffmpeg` are not installed; a dependency-free Node `fetch` of the
-watch page of a public video (`youtube-captions.ts`) got Google's CAPTCHA page instead of `ytInitialPlayerResponse`
-(3,235 chars, `captcha-form`). The same caption-track method is what `youtube-transcript`
+Evidence: on this machine `yt-dlp`, `whisper` and `ffmpeg` are not installed. A dependency-free Node `fetch` of the
+watch page of a public video got Google's CAPTCHA page instead of `ytInitialPlayerResponse` (3,235 chars,
+`captcha-form`). The first conclusion, that captions cannot be fetched here, was wrong: the failure was the watch page,
+and the test video used for the other attempt was a live stream, which has no captions. A later run with real requests
+(all HTTP 200, no key, no CAPTCHA) POSTed to `https://www.youtube.com/youtubei/v1/player?prettyPrint=false` the way the
+YouTube Android app does (client `ANDROID` `20.10.38`), then fetched the chosen track's `baseUrl` with `fmt=json3`. For
+https://youtu.be/DNDYYHsypZg that gave the title "Pi Durable PROACTIVE Agents: Jev Triggers My ON-CALL Pi Agent",
+author IndyDevDan, 2116 s and 40,673 chars of English. The first track in the list was Bengali auto-translated, so the
+track is chosen from `audioTracks` (default index, else the original audio, whose id ends in `.4`). The official YouTube
+Data API is not used: `captions.download` needs OAuth and edit rights on the video. `youtube-transcript`
 (https://github.com/Kakulukian/youtube-transcript) and `youtube-transcript-api`
-(https://github.com/jdepoix/youtube-transcript-api) use, and it works where YouTube serves the page.
+(https://github.com/jdepoix/youtube-transcript-api) use related caption-track methods.
 
-Decision: try captions with `fetch` (free, no install), then `yt-dlp` subtitles when on PATH
+Decision: try captions with `fetch` through the player endpoint (free, no install), then `yt-dlp` subtitles when on PATH
 (https://github.com/yt-dlp/yt-dlp#subtitle-options), then local `whisper` with `ffmpeg` when on PATH
 (https://github.com/openai/whisper), then a clear message that names what to install and offers a cheap agent. Nothing
 is installed by pihouse. Hosted transcript or speech APIs (https://platform.openai.com/docs/guides/speech-to-text) are
 not used: a key, a cost and the user's data sent out, for what the free routes cover.
 
-Unverified: a successful caption fetch from this network; YouTube's terms for the caption endpoint.
+Unverified: YouTube's terms for the player endpoint, and how long it keeps answering without a key.
 
 ### D8 (assumptions confirmed)
 

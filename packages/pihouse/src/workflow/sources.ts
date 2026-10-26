@@ -17,6 +17,8 @@ export interface SourceMeta {
 	/** The file for file sources. */
 	path?: string;
 	title?: string;
+	/** The channel, for youtube sources. */
+	author?: string;
 	durationSec?: number;
 	language?: string;
 	method: Method;
@@ -34,7 +36,10 @@ export interface FetchResponse {
 }
 
 export interface SourceDeps {
-	fetch(url: string, init?: { headers?: Record<string, string> }): Promise<FetchResponse>;
+	fetch(
+		url: string,
+		init?: { method?: string; headers?: Record<string, string>; body?: string },
+	): Promise<FetchResponse>;
 	which(bin: string): boolean;
 	exec(bin: string, args: string[]): Promise<{ stdout: string }>;
 	now?: () => Date;
@@ -113,52 +118,49 @@ interface CaptionTrack {
 	languageCode: string;
 	kind?: string;
 }
+interface AudioTrack {
+	captionTrackIndices?: number[];
+	defaultCaptionTrackIndex?: number;
+	audioTrackId?: string;
+}
 interface PlayerResponse {
-	videoDetails?: { title?: string; lengthSeconds?: string };
-	captions?: { playerCaptionsTracklistRenderer?: { captionTracks?: CaptionTrack[] } };
+	playabilityStatus?: { status?: string; reason?: string };
+	videoDetails?: { title?: string; author?: string; lengthSeconds?: string };
+	captions?: { playerCaptionsTracklistRenderer?: { captionTracks?: CaptionTrack[]; audioTracks?: AudioTrack[] } };
 }
 
-/** Reads the JSON object after `ytInitialPlayerResponse = ` by matching braces outside strings (a regex cannot). */
-export function extractPlayerResponse(html: string): PlayerResponse | undefined {
-	const marker = "ytInitialPlayerResponse = ";
-	const start = html.indexOf(marker);
-	if (start < 0) return undefined;
-	const jsonStart = start + marker.length;
-	let depth = 0;
-	let quoted = false;
-	let escaped = false;
-	for (let i = jsonStart; i < html.length; i++) {
-		const c = html.charAt(i);
-		if (quoted) {
-			if (escaped) escaped = false;
-			else if (c === "\\") escaped = true;
-			else if (c === '"') quoted = false;
-		} else if (c === '"') quoted = true;
-		else if (c === "{") depth++;
-		else if (c === "}" && --depth === 0) {
-			try {
-				return JSON.parse(html.slice(jsonStart, i + 1)) as PlayerResponse;
-			} catch {
-				return undefined;
-			}
-		}
-	}
-	return undefined;
+// The YouTube Android app's own client. The watch page answers a CAPTCHA to servers; this endpoint answers JSON with
+// no key. The official Data API is not an option: captions.download needs OAuth and edit rights on the video.
+const INNERTUBE_URL = "https://www.youtube.com/youtubei/v1/player?prettyPrint=false";
+const ANDROID_VERSION = "20.10.38";
+const ANDROID_UA = `com.google.android.youtube/${ANDROID_VERSION} (Linux; U; Android 14)`;
+
+function videoId(link: string): string | undefined {
+	const u = new URL(link);
+	if (u.hostname.replace(/^(www|m)\./, "") === "youtu.be") return u.pathname.split("/")[1] || undefined;
+	if (u.pathname.startsWith("/shorts/")) return u.pathname.split("/")[2] || undefined;
+	return u.searchParams.get("v") ?? undefined;
 }
 
-/** Manual track in the user's language, else the auto track in it, else any manual track, else any track. */
-export function pickTrack(tracks: CaptionTrack[], language: string): CaptionTrack | undefined {
-	const inLang = tracks.filter((t) => t.languageCode.startsWith(language));
-	const manual = (t: CaptionTrack) => t.kind !== "asr";
-	return inLang.find(manual) ?? inLang[0] ?? tracks.find(manual) ?? tracks[0];
+/**
+ * Problem: the first track is often the wrong one. Example: an English video whose list starts with a Bengali
+ * auto-translation. Solution: trust the default of the first audio track; else the original audio (its id ends in
+ * ".4", dubbed ones in ".10"); else the first audio track; else a manual track, else the first track.
+ */
+export function pickTrack(tracks: CaptionTrack[], audioTracks: AudioTrack[] = []): CaptionTrack | undefined {
+	const first = audioTracks[0];
+	const original = audioTracks.find((a) => a.audioTrackId?.endsWith(".4"));
+	const index =
+		first?.defaultCaptionTrackIndex ?? original?.captionTrackIndices?.[0] ?? first?.captionTrackIndices?.[0];
+	return (index === undefined ? undefined : tracks[index]) ?? tracks.find((t) => t.kind !== "asr") ?? tracks[0];
 }
 
 function json3ToText(body: string): string {
 	const data = JSON.parse(body) as { events?: Array<{ segs?: Array<{ utf8?: string }> }> };
 	return (data.events ?? [])
-		.flatMap((e) => e.segs ?? [])
-		.map((s) => s.utf8 ?? "")
-		.join("")
+		.filter((e) => e.segs)
+		.map((e) => (e.segs ?? []).map((s) => s.utf8 ?? "").join(""))
+		.join(" ")
 		.replace(/\s+/g, " ")
 		.trim();
 }
@@ -169,20 +171,40 @@ type Attempt =
 
 async function viaCaptions(url: string, deps: SourceDeps, language: string): Promise<Attempt> {
 	try {
-		const page = await deps.fetch(url, { headers: { "User-Agent": "Mozilla/5.0", "Accept-Language": language } });
-		const html = await page.text();
-		if (!page.ok) return { ok: false, why: `watch page answered HTTP ${page.status}` };
-		const player = extractPlayerResponse(html);
-		if (!player) return { ok: false, why: "YouTube served a consent or CAPTCHA page instead of the video" };
-		const tracks = player.captions?.playerCaptionsTracklistRenderer?.captionTracks ?? [];
-		const track = pickTrack(tracks, language);
+		const id = videoId(url);
+		if (!id) return { ok: false, why: "no video id in the link" };
+		const page = await deps.fetch(INNERTUBE_URL, {
+			method: "POST",
+			headers: { "Content-Type": "application/json", "User-Agent": ANDROID_UA },
+			body: JSON.stringify({
+				context: {
+					client: { clientName: "ANDROID", clientVersion: ANDROID_VERSION, androidSdkVersion: 34, hl: language },
+				},
+				videoId: id,
+			}),
+		});
+		const raw = await page.text();
+		if (!page.ok) return { ok: false, why: `player endpoint answered HTTP ${page.status}` };
+		let player: PlayerResponse;
+		try {
+			player = JSON.parse(raw) as PlayerResponse;
+		} catch {
+			return { ok: false, why: "player endpoint did not answer JSON" };
+		}
+		const status = player.playabilityStatus?.status;
+		if (status !== "OK") {
+			const reason = player.playabilityStatus?.reason;
+			return { ok: false, why: `video is not playable (${status ?? "no status"}${reason ? `: ${reason}` : ""})` };
+		}
+		const renderer = player.captions?.playerCaptionsTracklistRenderer;
+		const track = pickTrack(renderer?.captionTracks ?? [], renderer?.audioTracks);
 		if (!track) return { ok: false, why: "the video has no caption track" };
 		const captionUrl = new URL(track.baseUrl);
 		captionUrl.searchParams.set("fmt", "json3");
-		const res = await deps.fetch(captionUrl.toString());
-		const body = await res.text();
+		const res = await deps.fetch(captionUrl.toString(), { headers: { "User-Agent": ANDROID_UA } });
+		const captions = await res.text();
 		if (!res.ok) return { ok: false, why: `caption download answered HTTP ${res.status}` };
-		const text = body.trimStart().startsWith("{") ? json3ToText(body) : stripHtml(body).text;
+		const text = json3ToText(captions);
 		if (!text) return { ok: false, why: "the caption track was empty" };
 		const seconds = Number(player.videoDetails?.lengthSeconds);
 		return {
@@ -191,6 +213,7 @@ async function viaCaptions(url: string, deps: SourceDeps, language: string): Pro
 			meta: {
 				method: "captions-fetch",
 				title: player.videoDetails?.title,
+				author: player.videoDetails?.author,
 				durationSec: Number.isFinite(seconds) ? seconds : undefined,
 				language: track.languageCode,
 			},

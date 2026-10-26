@@ -283,7 +283,7 @@ A memory of how you work, in `~/.pihouse/memory/` (or `$PIHOUSE_HOME/memory/`), 
 - **Flat cost.** After every job the keeper's older messages leave its context; each request sees a capped bootstrap
   (instructions, workflow memory, a slice of the index, the pending count). `/keeper new` starts a fresh session.
 - **Sources.** A link or video in `/workflow ask` is transcribed by a tool, never by a model reading it: YouTube
-  captions fetched directly, then `yt-dlp` subtitles, then local `whisper` (with `ffmpeg`), when they are on your PATH.
+  captions fetched from the YouTube player endpoint (no key), then `yt-dlp` subtitles, then local `whisper` (with `ffmpeg`), when they are on your PATH.
   pihouse installs none of them. The transcript is kept in `consulted/` with a summary, and ideas go to `ideas/`. When
   nothing works, it says what to install and offers a cheap agent instead.
 

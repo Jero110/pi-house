@@ -193,15 +193,21 @@ function); the package's `title` is at most 80 chars and nothing in `run.json` h
 
 `fetchSource(input, deps)`, where `deps` injects `fetch`, a `which(bin)` lookup and an `exec(bin, args)` runner (tests
 pass fakes; production uses `globalThis.fetch`, PATH and `execFile`). It returns
-`{ ok: true, meta: { kind, url|path, title?, durationSec?, language?, method, fetchedAt }, text }` or
+`{ ok: true, meta: { kind, url|path, title?, author?, durationSec?, language?, method, fetchedAt }, text }` or
 `{ ok: false, tried: Method[], message, fallback }`.
 
 Order, from the research's trials (ADR-001, D7):
 
 - **YouTube link** (`youtube.com/watch`, `youtu.be`, `/shorts/`):
-  1. `captions-fetch`: the watch page's `ytInitialPlayerResponse.captionTracks` (prefer the manual track in the
-     user's language, else the auto track), then the track's `baseUrl` with `fmt=json3`, flattened to text. A
-     CAPTCHA or consent page (no `ytInitialPlayerResponse`), no tracks, or a network error moves on.
+  1. `captions-fetch`: a POST to the YouTube app's player endpoint
+     (`https://www.youtube.com/youtubei/v1/player?prettyPrint=false`, Android client `20.10.38`, no key). Anything but
+     `playabilityStatus.status == "OK"` (a live stream is `UNPLAYABLE`), no tracks, a non-JSON answer or a network
+     error moves on, with the reason in `tried`. Track choice: the first audio track's `defaultCaptionTrackIndex`;
+     else the audio track whose `audioTrackId` ends in `.4` (the original audio; dubbed ones end in `.10`), its
+     first caption track; else the first audio track's first caption track; else a non-`asr` track, else the first
+     track (the first track in the list is often wrong). Then GET the track's `baseUrl` with `fmt=json3`; the text is
+     each event's segments joined, events joined by a space, whitespace collapsed. The watch page is not parsed (it
+     answers a CAPTCHA to servers).
   2. `yt-dlp` when on PATH: `yt-dlp --skip-download --write-subs --write-auto-subs --sub-format vtt --sub-langs
      "<lang>.*,en.*" -o <tmp>/%(id)s <url>` plus `--print title --print duration`, VTT stripped to text.
   3. `whisper` when `whisper` and `ffmpeg` and `yt-dlp` are on PATH: audio with `yt-dlp -x`, then
@@ -215,7 +221,7 @@ Order, from the research's trials (ADR-001, D7):
   spawn one cheap agent (opencode) with agent-link only if the user's question needs the source.
 
 Acceptance (`packages/pihouse/test/sources.test.ts`, fake HTTP server or fake fetch, fake CLIs): a YouTube link with
-captions (captions-fetch); one where the page is a CAPTCHA and `yt-dlp` (fake, on a temp PATH) supplies subtitles; one
+captions (captions-fetch); the default track and the original-audio (`.4`) track picked; a live stream (`UNPLAYABLE`) falling through to `yt-dlp` (fake, on a temp PATH) subtitles; json3 flattening; one
 with no captions and no tools (clear message naming yt-dlp and the agent fallback); a missing tool reported by name; a
 plain web link stripped to text with its title; no real network in any test.
 
