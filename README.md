@@ -61,11 +61,20 @@ and WSL). `--no-deps` skips that step. cmux comes from [cmux.com](https://cmux.c
 The Claude bridge is opt-in: add `--claude-bridge` (`bash -s -- --claude-bridge`) and, when Claude Code is installed,
 setup adds it so pi-house can run Claude models on your Claude login. They show up in `/model`; they are never the default.
 
-> **Check Anthropic's terms before you enable it.** The bridge runs Claude through your Claude Code subscription login.
-> Anthropic's [Consumer Terms](https://www.anthropic.com/legal/consumer-terms) (section 3) restrict automated access
-> "except when you are accessing our Services via an Anthropic API Key or where we otherwise explicitly permit it", and
-> its policy on third-party tools using Pro and Max logins has been changing in 2026. Use it only if you have checked
-> that it is allowed for you. An API key (`/login`, "API key") is the route that does not depend on that.
+> **Claude through your subscription is a gray area. Read this first.** The bridge runs Claude through the Claude
+> Agent SDK on your Claude Code login, so it spends your subscription limits instead of an API key.
+>
+> - Anthropic's [support article on the Agent SDK](https://support.claude.com/en/articles/15036540-use-the-claude-agent-sdk-with-your-claude-plan)
+>   says you "can still use the Claude Agent SDK, `claude -p`, and third-party apps with your subscription limits".
+>   It names Max and Team plans, not Pro, and Anthropic has changed this policy several times in 2026.
+> - Anthropic's [Consumer Terms](https://www.anthropic.com/legal/consumer-terms) (section 3) still restrict automated
+>   access "except when you are accessing our Services via an Anthropic API Key or where we otherwise explicitly permit
+>   it".
+> - One user [reported a suspended account](https://github.com/elidickinson/pi-claude-bridge/issues/118) after using
+>   the bridge. It is a single unverified report and the cause is unknown.
+>
+> This is not legal advice. Use an account you can afford to lose, or use an API key. The bridge is never the default
+> model.
 `--with-harnesses` installs Claude Code, Codex and opencode first (into `~/.local`):
 
 ```bash
@@ -113,6 +122,16 @@ Then ask for what you want, or start the workflow explicitly:
 | `/skill:<name>` | Runs any skill by hand, e.g. `/skill:code-review-and-quality`. |
 
 Every pi option and command works too (`pih --model ...`, `/model`, `/login`).
+
+### Paying less for models
+
+- **Max or Team plan:** Anthropic includes monthly API credits ($100 on Max 5x, $200 on Max 20x). Link a Console
+  organization in claude.ai under Settings, Billing, then create an API key in that organization and use it with
+  `/login`. Free, Pro and Enterprise are not eligible, and unused credits expire each month. See
+  [Anthropic's article](https://support.claude.com/en/articles/17154008-monthly-api-credits-for-max-and-team-plans).
+- **ChatGPT plan:** `/login` offers the `openai-codex` provider, which uses your ChatGPT login. The status bar shows
+  that account's usage windows.
+- **Cheaper models:** use a smaller model for routine work and keep the large one for planning.
 
 ### The interface
 
