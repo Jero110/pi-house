@@ -212,6 +212,7 @@ export async function askContext(
 	const paths = pihousePaths(env);
 	const config = readConfig(paths);
 	const store = openMemory(deps.memoryDir ?? paths.memory);
+	store.adoptIdeas();
 	const report = latestReport(paths.reports);
 	const reportHead = report ? readFileSync(report, "utf8").split("\n").slice(0, 40).join("\n") : undefined;
 	const sources = sourcesIn(question);

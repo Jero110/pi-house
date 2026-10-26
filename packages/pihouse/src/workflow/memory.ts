@@ -146,6 +146,8 @@ export interface MemoryStore {
 	finishBatch(batchId: string, summaryMarkdown: string): BatchRecord;
 	writeConsulted(meta: NoteMeta, text: string, summary: string): IndexEntry;
 	writeIdea(meta: NoteMeta, body: string, summary?: string): IndexEntry;
+	/** Indexes the ideas/*.md files written by hand (by a model) that index.json does not list yet; returns their ids. */
+	adoptIdeas(): string[];
 	propose(p: Proposal): ProposeResult;
 	decide(id: string, decision: "approved" | "rejected", why?: string): IndexEntry;
 	markApplied(id: string): IndexEntry;
@@ -463,6 +465,39 @@ export function openMemory(dir: string, opts: { now?: () => Date } = {}): Memory
 				),
 			);
 			return upsert(baseEntry("idea", id, { ...meta, summary: summary ?? body }, `ideas/${id}.md`, "active"));
+		},
+
+		/**
+		 * Problem: /workflow ask has the model write ideas/<id>.md itself, so they never reached index.json and no
+		 * slice or prune saw them. Example: ideas/src-ab12-cache.md exists, indexSlice does not list it.
+		 * Solution: index every file the index lacks, from its frontmatter; running it twice adds nothing.
+		 */
+		adoptIdeas() {
+			const folder = abs("ideas");
+			if (!existsSync(folder)) return [];
+			const known = new Set(load().entries.map((e) => e.id));
+			const adopted: string[] = [];
+			for (const name of readdirSync(folder).filter((n) => n.endsWith(".md"))) {
+				const { fields, body } = parseFrontmatter(readFileSync(join(folder, name), "utf8"));
+				const id = fields.id ?? name.replace(/\.md$/, "");
+				if (!SAFE_ID.test(id) || known.has(`idea:${id}`)) continue;
+				const entry = baseEntry(
+					"idea",
+					id,
+					{
+						project: fields.project ?? "",
+						projectSlug: fields.projectSlug ?? "",
+						title: fields.title ?? id,
+						summary: body.split("\n").find((l) => l.trim()) ?? "",
+					},
+					`ideas/${name}`,
+					"active",
+				);
+				if (fields.createdAt) entry.createdAt = fields.createdAt;
+				upsert(entry);
+				adopted.push(entry.id);
+			}
+			return adopted;
 		},
 
 		propose(p) {

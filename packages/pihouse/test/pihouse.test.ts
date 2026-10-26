@@ -645,6 +645,22 @@ test("a YouTube link in the question is transcribed and saved to consulted/", as
 	assert.match(text, /ask_user_question/);
 });
 
+test("adoptIdeas indexes an idea file written by hand, once", (t) => {
+	const { memoryDir, store } = askFixture(t);
+	mkdirSync(join(memoryDir, "ideas"), { recursive: true });
+	writeFileSync(
+		join(memoryDir, "ideas", "src-ab12-cache.md"),
+		"---\nid: src-ab12-cache\ntitle: Cache the catalog\nproject: /p\nprojectSlug: p\ncreatedAt: 2026-10-26T01:00:00.000Z\n---\n\nRead the catalog once per session.\nMore.\n",
+	);
+	assert.deepEqual(store.adoptIdeas(), ["idea:src-ab12-cache"]);
+	assert.match(
+		store.indexSlice({ limit: 10, maxChars: 1_000 }),
+		/idea:src-ab12-cache · idea · p · Cache the catalog · Read the catalog once per session\./,
+	);
+	assert.deepEqual(store.adoptIdeas(), []);
+	assert.equal(store.readIndex().length, 1);
+});
+
 test("a failed fetch adds the message and the cheap-agent fallback, and saves nothing", async (t) => {
 	const { env, memoryDir, store } = askFixture(t);
 	const text = await askContext("read https://example.com/x please", env, {

@@ -169,6 +169,7 @@ export function registerKeeper(pi: ExtensionAPI, deps: KeeperDeps): void {
 	const sweptCount = (): number => {
 		const store = deps.store();
 		sweepFlagged(deps.records(), store);
+		store.adoptIdeas();
 		return store.pendingCount();
 	};
 	const showPending = (ctx: Pick<ExtensionContext, "ui">, notice: boolean): void => {
@@ -244,6 +245,7 @@ export function registerKeeper(pi: ExtensionAPI, deps: KeeperDeps): void {
 		}
 		const store = deps.store();
 		sweepFlagged(deps.records(), store);
+		store.adoptIdeas();
 		if (store.pendingCount() === 0) {
 			ctx.ui.notify("No runs pending.", "info");
 			return;
