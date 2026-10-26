@@ -20,6 +20,7 @@ export const EXTENSIONS = [
 	"brand.ts",
 	"statusbar.ts",
 	"compact-tools.ts",
+	"working.ts",
 	"ask.ts",
 	"workflow.ts",
 	"claude-login.ts",

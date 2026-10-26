@@ -18,7 +18,7 @@ agents) and the **cmux MCP** (finding sessions and arranging cmux). pihouse itse
 
 - `PI_CODING_AGENT_DIR=~/.pihouse/agent`: pihouse's own settings, sessions and MCP servers; plain pi stays untouched. The first
   run copies pi's login (auth, model store, the Claude bridge package if you use it) so the same models work.
-- `-e` for its extensions: `brand.ts` (header and title), `statusbar.ts` (the footer: folder, model, context and the usage of the account in use; its theme is `packages/pihouse/themes/pihouse.json`), `ask.ts` (`ask_user_question`, and `pick_skills`: the skills picker built from the catalog), `workflow.ts` (`/workflow`).
+- `-e` for its extensions: `brand.ts` (header and title), `statusbar.ts` (the footer: folder, model, context and the usage of the account in use; its theme is `packages/pihouse/themes/pihouse.json`), `compact-tools.ts` (tool calls drawn like Claude Code's: one gray line each, detail on ctrl+o), `working.ts` (the spinner with its verb, time and tokens, and the `Worked for` line at the end of a run), `ask.ts` (`ask_user_question`, and `pick_skills`: the skills picker built from the catalog), `workflow.ts` (`/workflow`).
 - The four skill group folders as pi skill paths. Only `planner` and `executor` are visible to the model on their own;
   every other skill carries `disable-model-invocation: true` and loads when a plan or the user names it.
 
