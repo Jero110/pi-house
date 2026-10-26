@@ -220,6 +220,20 @@ test("a flag by name, by executor in the tree and by flags.json", () => {
 	const after = readFlags(f.store.dir);
 	assert.deepEqual(isFlagged(records, saved, after), { by: "save", reason: "good run" });
 	assert.ok(isExecutor({ ...saved, name: "workflow-executor" }));
+	assert.ok(isExecutor({ ...saved, name: "executor-2" }));
+	assert.ok(isExecutor({ ...saved, task: "/skill:executor docs/plans/x.md" }));
+	const handoff = "Read /w/skills/build/executor/SKILL.md (absolute path) and follow it.\nPlan: docs/plans/x.md";
+	assert.ok(isExecutor({ ...saved, task: handoff }));
+	const child = agent(f, "e", "worker", saved, { task: handoff });
+	assert.equal(isFlagged([saved, child], saved, flags)?.by, "executor");
+});
+
+test("a worker that only lists the executor skill among the files it edits is not an executor", () => {
+	const f = fixture();
+	const worker = agent(f, "c", "capture", null);
+	const brief = "Build the capture step.\n\nFiles:\n- skills/build/executor/SKILL.md\n- packages/pihouse/src/x.ts\n";
+	assert.ok(!isExecutor({ ...worker, task: brief }));
+	assert.ok(!isExecutor({ ...worker, task: `${brief}Edit the executor skill to mention it.` }));
 });
 
 test("save on a plain chat with no workers and no hub captures it with its reason", () => {
