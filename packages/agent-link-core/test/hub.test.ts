@@ -797,3 +797,15 @@ test("a root registered with a place spawns there when the spawn itself has none
 		await t.stop();
 	}
 });
+
+test("a root may ask for a name; the hub keeps it unique and falls back to the harness", () =>
+	withHub(async (t) => {
+		const first = await t.client.register({ harness: "codex", name: "keeper", cwd: tmpdir(), pull: true });
+		const second = await t.client.register({ harness: "codex", name: "keeper", cwd: tmpdir(), pull: true });
+		const plain = await t.client.register({ harness: "codex", cwd: tmpdir(), pull: true });
+		assert.ok("name" in first && "name" in second && "name" in plain);
+		if (!("name" in first && "name" in second && "name" in plain)) return;
+		assert.equal(first.name, "keeper");
+		assert.equal(second.name, "keeper-2");
+		assert.equal(plain.name, "codex");
+	}));

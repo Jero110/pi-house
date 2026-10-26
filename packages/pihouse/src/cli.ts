@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // pihouse: the pihouse agent. `pih setup --backend cmux|tmux` is what install.sh runs once the code is in place.
 import { homedir } from "node:os";
-import { runPihouse } from "./launcher.ts";
+import { runKeeper, runPihouse } from "./launcher.ts";
 import { PIHOUSE_VERSION, pihousePaths } from "./paths.ts";
 import { setup, teardown } from "./setup.ts";
 
@@ -9,6 +9,7 @@ export const USAGE = `usage: pih [pi options] [message]       start pihouse (all
        pih setup --backend cmux|tmux [--claude-bridge]
                                         register pihouse's MCP servers and profile (install.sh runs this);
                                         --claude-bridge also adds the Claude models on your Claude Code login
+       pih keeper                      start the keeper (workflow memory), or say where it already runs
        pih uninstall                   undo setup's registrations (keeps ~/.pihouse)
        pih --version`;
 
@@ -35,6 +36,7 @@ export async function main(argv: readonly string[], env: NodeJS.ProcessEnv = pro
 		setup({ paths: pihousePaths(env, home), backend, home, env, out, claudeBridge: rest.includes("--claude-bridge") });
 		return 0;
 	}
+	if (cmd === "keeper") return runKeeper({ argv: rest, env, home, err, out });
 	if (cmd === "uninstall") {
 		teardown({ paths: pihousePaths(env, home), home, env, out });
 		return 0;

@@ -22,6 +22,7 @@ export const EXTENSIONS = [
 	"compact-tools.ts",
 	"ask.ts",
 	"workflow.ts",
+	"keeper.ts",
 	"claude-login.ts",
 ].map((f) => fileURLToPath(new URL(`./extensions/${f}`, import.meta.url)));
 

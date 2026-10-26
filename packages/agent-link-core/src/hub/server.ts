@@ -175,6 +175,7 @@ async function handle(hub: Hub, token: string, req: IncomingMessage, res: Server
 				200,
 				await hub.register({
 					harness: str("harness"),
+					name: opt("name"),
 					model: opt("model") ?? null,
 					cwd: str("cwd") || process.cwd(),
 					parent: body.parent as RegisterRequest["parent"],
