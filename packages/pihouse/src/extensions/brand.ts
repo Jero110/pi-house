@@ -44,11 +44,38 @@ export function headerLines(theme: Theme, width: number, info: HeaderInfo): stri
 	return lines.map((l) => truncateToWidth(l, width));
 }
 
+/**
+ * A tab name from the first thing the user asks, like Claude Code's: "Add dark mode to the settings page" and not
+ * "pi-house · vs". A slash command gives way to what follows it, and a command with nothing after it names nothing.
+ */
+export function sessionTitle(prompt: string): string | undefined {
+	let text = prompt.replace(/```[\s\S]*?```/g, " ").trim();
+	if (/^\/[\w:.-]+/.test(text)) {
+		// A command names the tab only through what follows it, and only when that reads as a request.
+		text = text.replace(/^\/[\w:.-]+\s*/, "");
+		if (text.trim().split(/\s+/).length < 3) return undefined;
+	}
+	const line = (text.split("\n").find((l) => l.trim()) ?? "").replace(/\s+/g, " ").trim();
+	if (!line) return undefined;
+	const sentence = line.split(/(?<=[.!?])\s/)[0] ?? line;
+	if (sentence.length <= 48) return sentence;
+	const cut = sentence.slice(0, 48);
+	return `${cut.slice(0, Math.max(cut.lastIndexOf(" "), 24)).trimEnd()}…`;
+}
+
 export default function brand(pi: ExtensionAPI): void {
-	// pi sets its own title ("π - <folder>") after startup and on some events; pi-house sets it back.
+	// pi sets its own title ("π - <folder>") after startup and on some events; pi-house sets it back. The tab is named
+	// after the session, so several of them can be told apart; before the first prompt it is the folder.
 	const title = (ctx: ExtensionContext) => {
-		if (ctx.hasUI) ctx.ui.setTitle(`pi-house · ${ctx.cwd.split("/").pop() ?? ""}`);
+		if (ctx.hasUI) ctx.ui.setTitle(pi.getSessionName() ?? (ctx.cwd.split("/").pop() || "pi-house"));
 	};
+	pi.on("input", (event, ctx) => {
+		if (event.source === "extension" || pi.getSessionName()) return;
+		const name = sessionTitle(event.text);
+		if (!name) return;
+		pi.setSessionName(name);
+		title(ctx);
+	});
 	pi.on("agent_start", (_event, ctx) => title(ctx));
 	pi.on("agent_end", (_event, ctx) => title(ctx));
 	pi.on("session_start", (_event, ctx) => {

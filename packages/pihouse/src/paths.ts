@@ -16,9 +16,14 @@ export const SKILL_GROUP_DIRS = ["pre-build", "build", "post-build", "extras"].m
 /** This package's CLI, which agent-link runs to open a pihouse worker. */
 export const PIHOUSE_CLI = fileURLToPath(new URL("./cli.ts", import.meta.url));
 /** pihouse's pi extensions, loaded with -e on every run. */
-export const EXTENSIONS = ["brand.ts", "statusbar.ts", "ask.ts", "workflow.ts", "claude-login.ts"].map((f) =>
-	fileURLToPath(new URL(`./extensions/${f}`, import.meta.url)),
-);
+export const EXTENSIONS = [
+	"brand.ts",
+	"statusbar.ts",
+	"compact-tools.ts",
+	"ask.ts",
+	"workflow.ts",
+	"claude-login.ts",
+].map((f) => fileURLToPath(new URL(`./extensions/${f}`, import.meta.url)));
 
 /** The black, white and lilac theme pihouse runs pi with. */
 export const THEME = fileURLToPath(new URL("../themes/pihouse.json", import.meta.url));

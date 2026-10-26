@@ -156,6 +156,23 @@ you@host  ~/project  Sonnet 5.5  effort: high  ctx: 32%
 - **Other logins and API keys:** no windows, so the line below the session shows its tokens and cost.
 - Narrow terminals drop the least important parts of the first line first; an account line never merges with another.
 
+Tool calls are drawn the way Claude Code draws them: one line for the call and one for what it did, with the detail behind
+`ctrl+o`:
+
+```
+● Bash(npm test)
+  ⎿  12 passed … +30 lines (ctrl+o to expand)
+● Read(package.json:1-200)
+  ⎿  Read 53 lines
+● Update(src/app.ts)
+  ⎿  Added 4 lines, removed 1 line
+     (a short colored diff)
+```
+
+Edits keep a short diff and writes their first lines; everything else is a summary until you expand it. Tools that draw
+themselves, such as the question pickers, are left alone. The terminal tab takes the name of the session, made from your
+first request ("Add dark mode to the settings page"), instead of the product name; before that it is the folder.
+
 It lives in `packages/pihouse` (`themes/pihouse.json`, `src/extensions/statusbar.ts`). One known limit: pi itself shows its
 footer for a moment (well under a second) while it reloads, so `/reload` flashes before pi-house's comes back; starting
 `pih` does not.
