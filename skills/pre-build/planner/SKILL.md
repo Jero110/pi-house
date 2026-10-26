@@ -165,7 +165,7 @@ Do not hand off on "sounds good" or silence: wait for the explicit choice.
 
 Launch the executor with agent-link `spawn`:
 
-- `harness: "pihouse"`, `name: "executor"`, `handoff: true`, `model`: the exact `<provider>/<model-id>` resolved in Step 4
+- `harness: "pihouse"`, `name: "workflow-executor"` (the prefix flags the run for the workflow memory), `handoff: true`, `model`: the exact `<provider>/<model-id>` resolved in Step 4
   for the executor, else leave it unset. Never pass the user's words.
 - `task`:
 

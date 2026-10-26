@@ -21,6 +21,7 @@ export type ErrorOr<T> = T | { error: string };
 export interface HubClient {
 	register(body: {
 		harness: string;
+		name?: string;
 		model?: string | null;
 		cwd: string;
 		pull: boolean;

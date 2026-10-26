@@ -1,23 +1,44 @@
-// /workflow review and /workflow ask: pihouse looking at its own workflow.
+// /workflow review, save and ask: pihouse looking at its own workflow.
 //
+// save: flags the current session's run and captures it into the workflow memory now. Planner and executor sessions
+//   are flagged and captured by default (see workflow/capture.ts).
 // review: rebuilds the last run from disk (agent-link journal + transcripts), writes a report of what ran,
 //   with which skills, tokens and time by role, harness, agent and message, then asks the model in this
 //   session for recommendations grounded in that report.
 // ask: gives the model the architecture, the skills catalog and what is installed here, then the question.
 // The report is computed, never guessed: the model only writes the recommendations and the answers.
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { SessionRecord } from "agent-link-core";
 import { agentLinkHome, hubPaths, readJournal } from "agent-link-core";
 import { PI_PACKAGE, pihousePaths, REPO_ROOT, SKILLS_DIR } from "../paths.ts";
 import { readConfig } from "../setup.ts";
+import {
+	addFlag,
+	capTitle,
+	captureRun,
+	isFlagged,
+	lastFlagged,
+	localRecord,
+	ownRoot,
+	projectOf,
+	readFlags,
+	recordReview,
+	storedReport,
+	sweepFlagged,
+} from "../workflow/capture.ts";
 import { catalogMarkdown, readCatalog } from "../workflow/catalog.ts";
+import { type IndexEntry, LIMITS, type MemoryStore, openMemory } from "../workflow/memory.ts";
 import { renderReport } from "../workflow/report.ts";
-import { buildRun, pickRoot } from "../workflow/run.ts";
+import { buildRun, pickRoot, type WorkflowRun } from "../workflow/run.ts";
+import { fetchSource, type SourceResult } from "../workflow/sources.ts";
+import { sessionTitle } from "./brand.ts";
 
 export const MESSAGE_TYPE = "pihouse-workflow";
 
-export const USAGE = "usage: /workflow review [--last] | /workflow ask <question>";
+export const USAGE = "usage: /workflow review [--last] | /workflow save [reason] | /workflow ask <question>";
 
 export function reviewInstructions(reportFile: string, plan: string | undefined): string {
 	return [
@@ -83,11 +104,127 @@ export function reviewFileName(slug: string, when: Date): string {
 	return `workflow-review-${slug}-${date}-${p(when.getHours())}${p(when.getMinutes())}.md`;
 }
 
-export function askContext(question: string, env: NodeJS.ProcessEnv = process.env): string {
+export interface AskDeps {
+	/** Default: the memory dir under pihouse's home. */
+	memoryDir?: string;
+	/** Default: the real fetchSource (YouTube, web, media files). */
+	fetchSource?: (input: string) => Promise<SourceResult>;
+	/** The folder the question is asked from, for the project tag of saved sources. Default: process.cwd(). */
+	cwd?: string;
+}
+
+const MAX_SOURCES = 3;
+const SOURCE_CHARS = 4_000;
+const DIGESTS_SHOWN = 3;
+
+/**
+ * The links and media files named in a question, at most three.
+ * Problem: "see https://youtu.be/x, then compare." would hand fetchSource a link ending in a comma. Solution: trim
+ * trailing punctuation and closing brackets.
+ */
+export function sourcesIn(question: string): string[] {
+	const found =
+		question.match(
+			/https?:\/\/[^\s<>"']+|(?:~|\.{0,2})\/[^\s<>"']+\.(?:mp4|mkv|mov|webm|avi|m4v|mp3|m4a|wav|flac|ogg|opus|aac)\b/gi,
+		) ?? [];
+	const clean = found.map((f) => f.replace(/[.,;:!?)\]}]+$/, ""));
+	return [...new Set(clean)].slice(0, MAX_SOURCES);
+}
+
+/** Index entries whose title or summary share words with the question, best first; ties keep the newest first. */
+function relevantDigests(store: MemoryStore, question: string): IndexEntry[] {
+	const wordsOf = (text: string) => new Set(text.toLowerCase().match(/[\p{L}\p{N}]{3,}/gu) ?? []);
+	const asked = wordsOf(question);
+	return store
+		.readIndex()
+		.filter((e) => e.kind === "digest" && e.status !== "archived")
+		.map((e) => ({ e, score: [...wordsOf(`${e.title} ${e.summary}`)].filter((w) => asked.has(w)).length }))
+		.filter((x) => x.score > 0)
+		.sort((a, b) => b.score - a.score || b.e.createdAt.localeCompare(a.e.createdAt))
+		.slice(0, DIGESTS_SHOWN)
+		.map((x) => x.e);
+}
+
+/**
+ * Saves what each source gave and says what to do with it.
+ * Problem: a link in the question was left to the model to open, so the same video was read twice and never kept.
+ * Example: "what do you think of https://youtu.be/abc?" must leave consulted/<id>.md and .txt behind. Solution: code
+ * fetches and saves the text through the store; the model only writes the summary, the ideas and the question back.
+ */
+async function sourcesSection(
+	store: MemoryStore,
+	inputs: string[],
+	deps: AskDeps,
+	fetcher: (input: string) => Promise<SourceResult>,
+): Promise<string> {
+	const where = projectOf(deps.cwd ?? process.cwd());
+	const parts: string[] = [];
+	const saved: string[] = [];
+	for (const input of inputs) {
+		const got = await fetcher(input);
+		if (!got.ok) {
+			parts.push(`## Source not read: ${input}\n\n${got.message}\nFallback: ${FALLBACK_AGENT}`);
+			continue;
+		}
+		const id = `src-${createHash("sha256").update(input).digest("hex").slice(0, 10)}`;
+		const title = got.meta.title ?? input;
+		store.writeConsulted({ id, title, source: input, ...where }, got.text, "");
+		saved.push(id);
+		parts.push(
+			[
+				`## Source: ${title}`,
+				"",
+				`- Entry: ${join(store.dir, "consulted", `${id}.md`)} (text: ${join(store.dir, "consulted", `${id}.txt`)})`,
+				`- From: ${input} (${got.meta.kind}, ${got.meta.method})`,
+				"",
+				got.text.slice(0, SOURCE_CHARS),
+				got.text.length > SOURCE_CHARS ? "\n[... the rest is in the text file above]" : "",
+			].join("\n"),
+		);
+	}
+	const todo = saved.length
+		? [
+				"",
+				"For each source above:",
+				"1. Write a summary of at most 1,500 chars under `## Summary` in its entry file (edit only that section).",
+				"2. Relate it to the user's past runs, using the digests and the memory above; name the runs.",
+				`3. For each idea worth keeping, write ${join(store.dir, "ideas", "<source id>-<short-name>.md")} starting with`,
+				"   `---`, then lines `id: <source id>-<short-name>`, `title: <title>`, `project: <project>`, `projectSlug: <slug>`,",
+				"   `createdAt: <ISO time>`, then `---`, then the idea in a few lines.",
+				"4. Ask the user what they need from it to go on (use ask_user_question).",
+			].join("\n")
+		: "";
+	return `# Sources in the question\n\n${parts.join("\n\n")}\n${todo}\n`;
+}
+
+const FALLBACK_AGENT =
+	"offer to launch a cheap agent with agent-link spawn (an opencode or haiku worker) to read it and report the text back.";
+
+/**
+ * The context /workflow ask gives the model: how pihouse works, this machine, the catalog, the workflow memory, the
+ * index and the digests that match the question; never a transcript. Async because a link in the question is fetched.
+ */
+export async function askContext(
+	question: string,
+	env: NodeJS.ProcessEnv = process.env,
+	deps: AskDeps = {},
+): Promise<string> {
 	const paths = pihousePaths(env);
 	const config = readConfig(paths);
+	const store = openMemory(deps.memoryDir ?? paths.memory);
+	store.adoptIdeas();
 	const report = latestReport(paths.reports);
 	const reportHead = report ? readFileSync(report, "utf8").split("\n").slice(0, 40).join("\n") : undefined;
+	const sources = sourcesIn(question);
+	const sourcesText = sources.length ? await sourcesSection(store, sources, deps, deps.fetchSource ?? fetchSource) : "";
+	const memory = store.readWorkflowMemory().slice(0, LIMITS.workflowMemory);
+	const index = store.indexSlice({ limit: 40, maxChars: 8_000 });
+	const digests = relevantDigests(store, question).flatMap((e) => {
+		const runId = e.id.replace(/^digest:/, "");
+		const text = store.readDigest(runId);
+		return text ? [{ id: e.id, text: text.slice(0, LIMITS.digest) }] : [];
+	});
+	store.touch(digests.map((d) => d.id));
 	return [
 		"# pihouse workflow context",
 		"",
@@ -99,12 +236,25 @@ export function askContext(question: string, env: NodeJS.ProcessEnv = process.en
 		`- On PATH: ${harnessesOnPath(env).join(", ") || "none found"}`,
 		`- Repository: ${REPO_ROOT}`,
 		`- pi, which pihouse runs on: ${PI_PACKAGE} (README.md, docs/, examples/extensions/)`,
+		`- Workflow memory: ${store.dir}`,
 		report ? `- Last review report: ${report}` : "- No /workflow review report yet",
 		"",
 		"# Skills catalog",
 		"",
 		catalogMarkdown(readCatalog()),
+		"# Workflow memory (how the user works)",
+		"",
+		memory || "(empty: no run has been digested yet)",
+		"",
+		"# Memory index (newest first: id · kind · project · title · summary)",
+		"",
+		index || "(empty)",
+		"",
+		digests.length
+			? `# Relevant digests\n\n${digests.map((d) => `## ${d.id}\n\n${d.text}`).join("\n\n")}\n`
+			: "# Relevant digests\n\n(none match the question)\n",
 		reportHead ? `# Last review (first lines)\n\n${reportHead}\n` : "",
+		sourcesText,
 		"# Question",
 		"",
 		question,
@@ -115,45 +265,152 @@ export function askContext(question: string, env: NodeJS.ProcessEnv = process.en
 		"spawn to search the web, or fetch the link. Then give one verdict: we already have something better (name it, say",
 		"why), it is about the same as one of ours (name it), or it is worth trying (say exactly what to add or change, and on",
 		"which past task to test it).",
-	].join("\n");
+	]
+		.join("\n")
+		.slice(0, LIMITS.ask);
+}
+
+/**
+ * The name a session gets when it starts the planner or runs the executor: `workflow-planner · <title>`.
+ * Problem: the brand extension names a session from its first input and only when it has no name, so a name set here
+ * would lose the readable title, and `/skill:planner` alone gives it nothing to read. Example: "/skill:planner build a
+ * todo app" must show as "workflow-planner · build a todo app", not "workflow-planner" or "/skill:planner build…".
+ * Solution: the prefix says the role, the title is the plan's slug, else the request after the command.
+ */
+export function workflowSessionName(text: string): { name: string; by: "planner" | "executor" } | undefined {
+	const by = /^\/skill:planner\b|skills\/pre-build\/planner\b/i.test(text.trim())
+		? "planner"
+		: /^\/skill:executor\b|skills\/build\/executor\b|\bexecutor skill\b/i.test(text)
+			? "executor"
+			: undefined;
+	if (!by) return undefined;
+	const plan = /docs\/plans\/([\w.-]+?)\.md\b/.exec(text)?.[1];
+	const title = plan ?? sessionTitle(text) ?? "session";
+	return { name: `${WORKFLOW_PREFIX}${by} · ${title}`, by };
+}
+
+const WORKFLOW_PREFIX = "workflow-";
+
+/** The run of the session asking: its tree in the journal, else the session alone (no hub). */
+function ownRun(ctx: ExtensionContext): { records: SessionRecord[]; root: SessionRecord } {
+	const records = readJournal(hubPaths(agentLinkHome()).sessions);
+	const sessionId = ctx.sessionManager.getSessionId();
+	const root =
+		ownRoot(records, { sessionId, agent: process.env.AGENT_LINK_AGENT }) ??
+		localRecord(sessionId, ctx.cwd, ctx.sessionManager.getSessionFile());
+	return { records: records.some((r) => r.id === root.id) ? records : [...records, root], root };
+}
+
+function save(pi: ExtensionAPI, reason: string, ctx: ExtensionCommandContext): void {
+	const store = openMemory(pihousePaths().memory);
+	const { records, root } = ownRun(ctx);
+	addFlag(store.dir, root.id, { reason: reason || undefined, by: "save" });
+	const name = pi.getSessionName();
+	if (!name?.startsWith(WORKFLOW_PREFIX))
+		pi.setSessionName(`workflow-saved · ${name ?? (capTitle(reason, 48) || "chat")}`);
+	const result = captureRun(records, root, store, { by: "save", reason: reason || undefined });
+	ctx.ui.notify(
+		result === "processed"
+			? `Run ${root.id} was already digested; the flag is kept.`
+			: `Saved run ${root.id} to the workflow memory (${store.pendingCount()} pending).`,
+		"info",
+	);
 }
 
 async function review(pi: ExtensionAPI, args: string[], ctx: ExtensionCommandContext): Promise<void> {
 	const records = readJournal(hubPaths(agentLinkHome()).sessions);
-	const current = args.includes("--last")
-		? {}
-		: { sessionId: ctx.sessionManager.getSessionId(), agent: process.env.AGENT_LINK_AGENT };
-	const root = pickRoot(records, current);
-	if (!root) {
-		ctx.ui.notify("No workflow run found in the agent-link journal yet. Run the planner first.", "warning");
-		return;
+	const store = openMemory(pihousePaths().memory);
+	let runId: string;
+	let report: string;
+	let plan: string | undefined;
+	let slug: string;
+	if (args.includes("--last")) {
+		sweepFlagged(records, store);
+		const last = lastFlagged(records, store);
+		if (!last) {
+			ctx.ui.notify("No flagged run yet. Run the planner, or use /workflow save in a session.", "warning");
+			return;
+		}
+		if ("stored" in last) {
+			const stored = storedReport(store, last.stored);
+			if (!stored) {
+				ctx.ui.notify(`The captured run ${last.stored} has no report.`, "warning");
+				return;
+			}
+			runId = last.stored;
+			({ report, plan } = stored);
+			slug = last.stored;
+		} else {
+			const run = buildRun(records, last.root);
+			({ report, plan, slug } = { report: renderReport(run), plan: run.plan, slug: slugOf(run) });
+			runId = last.root.id;
+		}
+	} else {
+		const root = pickRoot(records, {
+			sessionId: ctx.sessionManager.getSessionId(),
+			agent: process.env.AGENT_LINK_AGENT,
+		});
+		if (!root) {
+			ctx.ui.notify("No workflow run found in the agent-link journal yet. Run the planner first.", "warning");
+			return;
+		}
+		const run = buildRun(records, root);
+		({ report, plan, slug } = { report: renderReport(run), plan: run.plan, slug: slugOf(run) });
+		runId = root.id;
 	}
-	const run = buildRun(records, root);
-	const report = renderReport(run);
 	const paths = pihousePaths();
 	mkdirSync(paths.reports, { recursive: true });
-	const slug = (run.plan?.split("/").pop()?.replace(/\.md$/, "") ?? root.name).replace(/[^\w-]+/g, "-");
 	const file = join(paths.reports, reviewFileName(slug, new Date()));
 	writeFileSync(file, `${report}\n`);
+	recordReview(store, runId, file);
 	// Problem: the report went into the session as a message, which filled the screen and spent tokens the model did not
 	// need. Solution: the report stays in its file; the model gets only the path and writes its recommendations there.
 	pi.sendMessage(
-		{ customType: MESSAGE_TYPE, content: reviewInstructions(file, run.plan), display: false },
+		{ customType: MESSAGE_TYPE, content: reviewInstructions(file, plan), display: false },
 		{ triggerTurn: true },
 	);
 }
 
+const slugOf = (run: WorkflowRun) =>
+	(run.plan?.split("/").pop()?.replace(/\.md$/, "") ?? run.root.name).replace(/[^\w-]+/g, "-");
+
 export default function workflow(pi: ExtensionAPI): void {
+	// Planner and executor sessions are flagged by name and captured by default (spec: Flags). The flag is written at
+	// the first input, when the run is surely in the journal; the capture follows each answer while the run is pending.
+	pi.on("input", (event, ctx) => {
+		if (event.source === "extension") return;
+		const named = workflowSessionName(event.text);
+		if (!named) return;
+		try {
+			if (!pi.getSessionName()?.startsWith(WORKFLOW_PREFIX)) pi.setSessionName(named.name);
+			addFlag(pihousePaths().memory, ownRun(ctx).root.id, { by: named.by });
+		} catch {
+			// Flagging must never block the user's prompt.
+		}
+	});
+	pi.on("agent_end", (_event, ctx) => {
+		try {
+			const store = openMemory(pihousePaths().memory);
+			const { records, root } = ownRun(ctx);
+			const flag = isFlagged(records, root, readFlags(store.dir));
+			if (flag) captureRun(records, root, store, flag);
+		} catch {
+			// A failed capture is retried by the sweep.
+		}
+	});
 	pi.registerCommand("workflow", {
 		description: "review: what the last run did and how to improve it · ask <question>: about your workflow and skills",
 		getArgumentCompletions: (prefix) =>
-			["review", "review --last", "ask "].filter((c) => c.startsWith(prefix)).map((c) => ({ value: c, label: c })),
+			["review", "review --last", "save ", "ask "]
+				.filter((c) => c.startsWith(prefix))
+				.map((c) => ({ value: c, label: c })),
 		handler: async (raw, ctx) => {
 			const [sub, ...rest] = raw.trim().split(/\s+/);
 			if (sub === "review") return review(pi, rest, ctx);
+			if (sub === "save") return save(pi, rest.join(" ").trim(), ctx);
 			if (sub === "ask" && rest.join(" ").trim()) {
 				pi.sendMessage(
-					{ customType: MESSAGE_TYPE, content: askContext(rest.join(" ").trim()), display: false },
+					{ customType: MESSAGE_TYPE, content: await askContext(rest.join(" ").trim()), display: false },
 					{ triggerTurn: true },
 				);
 				return;

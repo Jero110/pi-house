@@ -14,12 +14,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { Journal, readJournal } from "agent-link-core";
+import { Journal, readJournal, type SessionRecord } from "agent-link-core";
 import type { TranscriptRoots } from "agent-transcripts";
 import { answersText, pickedSkillsText, showPicker, skillPickerQuestion } from "../src/extensions/ask.ts";
 import { headerLines } from "../src/extensions/brand.ts";
 import { askContext, latestReport, reviewFileName, reviewInstructions } from "../src/extensions/workflow.ts";
-import { piCommand, runPihouse, withSkillsDir } from "../src/launcher.ts";
+import { liveKeeper, piCommand, runKeeper, runPihouse, whereRuns, withSkillsDir } from "../src/launcher.ts";
 import { EXTENSIONS, PI_CLI, pihousePaths, SKILL_GROUP_DIRS, SKILLS_DIR, THEME } from "../src/paths.ts";
 import {
 	BRIDGE_SOURCE,
@@ -31,6 +31,7 @@ import {
 	writePihouseProfile,
 } from "../src/setup.ts";
 import { catalogReadme, readCatalog, skillPath } from "../src/workflow/catalog.ts";
+import { LIMITS, openMemory } from "../src/workflow/memory.ts";
 import { renderReport } from "../src/workflow/report.ts";
 import { briefOf, buildRun, pickRoot } from "../src/workflow/run.ts";
 
@@ -373,6 +374,7 @@ test("the catalog and the skills on disk match, and skills/README.md is current"
 		"debugging-and-error-recovery (Addy)",
 		"code-simplification (Addy)",
 		"impeccable (Paul Bakaus)",
+		"keeper (pihouse)",
 	]);
 	assert.ok(catalog.groups.filter((g) => g.manual).every((g) => g.id === "post-build" || g.id === "extras"));
 });
@@ -563,9 +565,9 @@ test("a run is rebuilt from the journal and transcripts: roles, plan, tasks, ski
 	);
 });
 
-test("/workflow ask carries the architecture, the catalog, this machine and the question", (t) => {
+test("/workflow ask carries the architecture, the catalog, this machine and the question", async (t) => {
 	const { home, env } = tempHome(t);
-	const text = askContext("how are my skills organized?", { ...env, PIHOUSE_HOME: join(home, ".pihouse") });
+	const text = await askContext("how are my skills organized?", { ...env, PIHOUSE_HOME: join(home, ".pihouse") });
 	assert.match(text, /## How pihouse works/);
 	assert.match(text, /## Extras \(manual\)/);
 	assert.match(text, /`grilling` \| Matt Pocock/);
@@ -573,6 +575,107 @@ test("/workflow ask carries the architecture, the catalog, this machine and the 
 	assert.match(text, /# Question\n\nhow are my skills organized\?/);
 	assert.match(text, /pi, which pihouse runs on: .*pi-coding-agent \(README\.md, docs\/, examples\/extensions\/\)/);
 	assert.match(text, /Search the pi package above for its name/);
+});
+
+function askFixture(t: { after: (fn: () => void) => void }) {
+	const { home, env } = tempHome(t);
+	const memoryDir = join(home, "memory");
+	const store = openMemory(memoryDir);
+	return { env: { ...env, PIHOUSE_HOME: join(home, ".pihouse") }, memoryDir, store };
+}
+
+test("/workflow ask reads the memory, the index and the matching digests, never a transcript", async (t) => {
+	const { env, memoryDir, store } = askFixture(t);
+	store.writeWorkflowMemory("The user prefers small commits.");
+	for (let i = 0; i < 20; i++) {
+		const id = `run-${i}`;
+		store.writeRun(
+			{
+				schema: 1,
+				id,
+				project: "/p",
+				projectSlug: "p",
+				flaggedBy: "save",
+				capturedAt: "2026-10-26T00:00:00Z",
+				title: `run ${i} about ${i === 7 ? "caching" : "misc"}`,
+				metrics: { newTokens: 1, cacheRead: 0, activeMs: 1, wallMs: 1, agents: 0, messages: 1 },
+				agents: [],
+			},
+			[{ agentId: "a", normalized: { secret: "TRANSCRIPT-SECRET" }, raw: "TRANSCRIPT-SECRET" }],
+		);
+		store.writeDigest(id, `Digest ${i}: ${"x".repeat(1_900)}${i === 7 ? " caching" : ""}`);
+	}
+	const text = await askContext("how did caching go?", env, { memoryDir });
+	assert.match(text, /The user prefers small commits\./);
+	assert.match(text, /run:run-7 · run/);
+	assert.match(text, /## digest:run-7/);
+	assert.doesNotMatch(text, /TRANSCRIPT-SECRET/);
+	assert.ok(text.length <= LIMITS.ask, `context is ${text.length} chars`);
+});
+
+test("a YouTube link in the question is transcribed and saved to consulted/", async (t) => {
+	const { env, memoryDir, store } = askFixture(t);
+	const asked: string[] = [];
+	const text = await askContext("what about https://youtu.be/abc123, is it useful?", env, {
+		memoryDir,
+		cwd: "/tmp/not-a-repo-xyz",
+		fetchSource: async (input) => {
+			asked.push(input);
+			return {
+				ok: true,
+				text: "FAKE TRANSCRIPT words",
+				meta: {
+					kind: "youtube",
+					url: input,
+					title: "A talk",
+					method: "captions-fetch",
+					fetchedAt: "2026-10-26T00:00:00Z",
+				},
+			};
+		},
+	});
+	assert.deepEqual(asked, ["https://youtu.be/abc123"]);
+	const entry = store.readIndex().find((e) => e.kind === "consulted");
+	assert.ok(entry, "a consulted entry exists");
+	assert.match(readFileSync(join(memoryDir, entry.path), "utf8"), /source: https:\/\/youtu\.be\/abc123/);
+	assert.match(readFileSync(join(memoryDir, entry.path.replace(/\.md$/, ".txt")), "utf8"), /FAKE TRANSCRIPT/);
+	assert.match(text, /FAKE TRANSCRIPT words/);
+	assert.match(text, /at most 1,500 chars/);
+	assert.match(text, /ideas\/<source id>/);
+	assert.match(text, /ask_user_question/);
+});
+
+test("adoptIdeas indexes an idea file written by hand, once", (t) => {
+	const { memoryDir, store } = askFixture(t);
+	mkdirSync(join(memoryDir, "ideas"), { recursive: true });
+	writeFileSync(
+		join(memoryDir, "ideas", "src-ab12-cache.md"),
+		"---\nid: src-ab12-cache\ntitle: Cache the catalog\nproject: /p\nprojectSlug: p\ncreatedAt: 2026-10-26T01:00:00.000Z\n---\n\nRead the catalog once per session.\nMore.\n",
+	);
+	assert.deepEqual(store.adoptIdeas(), ["idea:src-ab12-cache"]);
+	assert.match(
+		store.indexSlice({ limit: 10, maxChars: 1_000 }),
+		/idea:src-ab12-cache · idea · p · Cache the catalog · Read the catalog once per session\./,
+	);
+	assert.deepEqual(store.adoptIdeas(), []);
+	assert.equal(store.readIndex().length, 1);
+});
+
+test("a failed fetch adds the message and the cheap-agent fallback, and saves nothing", async (t) => {
+	const { env, memoryDir, store } = askFixture(t);
+	const text = await askContext("read https://example.com/x please", env, {
+		memoryDir,
+		fetchSource: async () => ({
+			ok: false,
+			tried: ["fetch"],
+			fallback: "agent",
+			message: "Could not get a transcript: boom.",
+		}),
+	});
+	assert.match(text, /Source not read: https:\/\/example\.com\/x/);
+	assert.match(text, /Could not get a transcript: boom\./);
+	assert.match(text, /cheap agent/);
+	assert.equal(store.readIndex().filter((e) => e.kind === "consulted").length, 0);
 });
 
 test("answers read as one line per question", () => {
@@ -690,3 +793,95 @@ test("a review report is named for its plan and its date, and the newest one is 
 		utimesSync(join(dir, name), secs, secs);
 	assert.equal(latestReport(dir), join(dir, "workflow-review-aaa-2026-10-24-1000.md"));
 });
+
+function keeperRecord(extra: Partial<SessionRecord> = {}): SessionRecord {
+	return {
+		id: "20261026T100000Z-keeper",
+		name: "keeper",
+		parent: null,
+		parentName: null,
+		root: "20261026T100000Z-keeper",
+		harness: "pihouse",
+		model: null,
+		cwd: "/work",
+		state: "working",
+		depth: 0,
+		backend: "cmux",
+		place: { workspace: "workspace:2", surface: "surface:7" },
+		pid: process.pid,
+		startedAt: "2026-10-26T10:00:00.000Z",
+		updatedAt: "2026-10-26T10:00:00.000Z",
+		...extra,
+	};
+}
+
+test("pih keeper says where a live keeper runs and starts nothing", async (t) => {
+	const { home, env } = tempHome(t);
+	const out: string[] = [];
+	const code = await runKeeper({
+		argv: [],
+		env,
+		home,
+		cwd: home,
+		err: () => {},
+		out: (l) => out.push(l),
+		records: [keeperRecord()],
+		run: async () => assert.fail("no second keeper"),
+		root: async () => assert.fail("no second keeper"),
+	});
+	assert.equal(code, 0);
+	assert.equal(out.length, 1);
+	assert.match(out[0] ?? "", /already running: keeper at cmux workspace:2 surface:7 \(\/work\)/);
+});
+
+test("pih keeper starts a root named keeper with PIHOUSE_KEEPER=1 and the keeper skill when none is live", async (t) => {
+	const { home, env } = tempHome(t);
+	const seen: { name?: string; argv: string[] }[] = [];
+	const ran: { argv: string[]; env: Record<string, string> }[] = [];
+	const exited = keeperRecord({ state: "exited" });
+	const dead = keeperRecord({ id: "x", pid: 2 ** 22 + 7 });
+	const code = await runKeeper({
+		argv: [],
+		env,
+		home,
+		cwd: home,
+		err: () => {},
+		out: () => assert.fail("nothing to say"),
+		records: [exited, dead],
+		run: async (cmd) => {
+			ran.push({ argv: cmd.argv, env: cmd.env });
+			return 5;
+		},
+		root: async (o) => {
+			seen.push({ name: o.name, argv: [...o.argv] });
+			assert.equal(o.env?.PIHOUSE_KEEPER, "1", "the env reaches the harness the hub starts");
+			return (o.run ?? (async () => 1))({ argv: ["pihouse-from-hub"], env: { PIHOUSE_KEEPER: "1" }, cwd: home });
+		},
+	});
+	assert.equal(code, 5);
+	assert.deepEqual(seen, [{ name: "keeper", argv: ["pihouse", "/skill:keeper"] }]);
+	assert.equal(ran.length, 1, "the hub's command ran in this terminal");
+});
+
+test("a keeper is live only when it is a root named keeper, not exited, with its process still there", () => {
+	assert.ok(liveKeeper([keeperRecord()]));
+	assert.equal(liveKeeper([keeperRecord({ state: "exited" })]), undefined);
+	assert.equal(liveKeeper([keeperRecord({ name: "pihouse-6" })]), undefined);
+	assert.equal(liveKeeper([keeperRecord({ parent: "p", parentName: "x" })]), undefined);
+	assert.equal(
+		liveKeeper([keeperRecord()], () => false),
+		undefined,
+	);
+	assert.equal(whereRuns(keeperRecord({ place: undefined, backend: undefined })), "/work");
+});
+
+test("the keeper extension is loaded with the others and the keeper skill is in the catalog", () => {
+	assert.ok(EXTENSIONS.some((e) => e.endsWith("extensions/keeper.ts")));
+	const skill = readCatalog().skills.find((s) => s.name === "keeper");
+	assert.equal(skill?.group, "extras");
+	assert.ok(existsSync(skillPath(skill ?? fail())));
+});
+
+function fail(): never {
+	throw new Error("keeper skill missing");
+}

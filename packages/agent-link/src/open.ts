@@ -10,6 +10,8 @@ import { defaultBackend } from "./commands.ts";
 export interface RootOptions {
 	/** The harness, then arguments passed on to it. */
 	argv: readonly string[];
+	/** A fixed agent-link name for this root (the hub keeps it unique); default: the harness's name. */
+	name?: string;
 	env?: NodeJS.ProcessEnv;
 	cwd?: string;
 	/** agent-link home; default AGENT_LINK_HOME or ~/.agent-link. */
@@ -39,6 +41,7 @@ export async function runRoot(opts: RootOptions): Promise<number> {
 		client = createHubClient(await ensureHub({ home: opts.home, entry: opts.hubEntry, env }));
 		registered = await client.register({
 			harness,
+			name: opts.name,
 			cwd: opts.cwd ?? process.cwd(),
 			pull: false,
 			adapter: true,

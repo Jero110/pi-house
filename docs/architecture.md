@@ -1,7 +1,7 @@
 # Architecture
 
 pihouse is three things that stay separate: **pi** (the agent, unmodified), **agent-link** (agents launching and talking to
-agents) and the **cmux MCP** (finding sessions and arranging cmux). pihouse itself is a launcher and three pi extensions.
+agents) and the **cmux MCP** (finding sessions and arranging cmux). pihouse itself is a launcher and a few pi extensions.
 
 ```
  you ─► pihouse (pi + extensions) ── MCP stdio ─► agent-link MCP ── HTTP over a Unix socket ─► hub daemon
@@ -18,7 +18,8 @@ agents) and the **cmux MCP** (finding sessions and arranging cmux). pihouse itse
 
 - `PI_CODING_AGENT_DIR=~/.pihouse/agent`: pihouse's own settings, sessions and MCP servers; plain pi stays untouched. The first
   run copies pi's login (auth, model store, the Claude bridge package if you use it) so the same models work.
-- `-e` for its extensions: `brand.ts` (header and title), `statusbar.ts` (the footer: folder, model, context and the usage of the account in use; its theme is `packages/pihouse/themes/pihouse.json`), `compact-tools.ts` (tool calls drawn like Claude Code's: one gray line each, detail on ctrl+o), `working.ts` (the spinner with its verb, time and tokens, and the `Worked for` line at the end of a run), `ask.ts` (`ask_user_question`, and `pick_skills`: the skills picker built from the catalog), `workflow.ts` (`/workflow`).
+- `-e` for its extensions: `brand.ts` (header and title), `statusbar.ts` (the footer: folder, model, context and the usage of the account in use; its theme is `packages/pihouse/themes/pihouse.json`), `compact-tools.ts` (tool calls drawn like Claude Code's: one gray line each, detail on ctrl+o), `working.ts` (the spinner with its verb, time and tokens, and the `Worked for` line at the end of a run, an entry the model never sees), `ask.ts` (`ask_user_question`, and `pick_skills`: the skills picker built from the catalog), `workflow.ts` (`/workflow`), `claude-login.ts`, and `keeper.ts`
+  (`/keeper`, inert unless `PIHOUSE_KEEPER=1`).
 - The four skill group folders as pi skill paths. Only `planner` and `executor` are visible to the model on their own;
   every other skill carries `disable-model-invocation: true` and loads when a plan or the user names it.
 
@@ -71,8 +72,37 @@ JSONL) into one shape: messages with role, text, model, token usage, time per an
 
 ## /workflow
 
-- `review` picks the run of the current session (or `--last`), rebuilds its tree from the journal, assigns roles from
-  its shape (the root plans, an `executor` child runs the plan, its descendants are workers), reads every transcript and
-  writes a report to `~/.pihouse/reports/`. The numbers are computed; the session's model then writes the summary and the
-  recommendations from them.
-- `ask` gives the model the architecture, the skills catalog and what is installed here, then the question.
+- `review` picks the run of the current session, rebuilds its tree from the journal, assigns roles from its shape (the
+  root plans, an `executor` or `workflow-executor` child runs the plan, its descendants are workers), reads every
+  transcript and writes a report to `~/.pihouse/reports/`. The numbers are computed; the session's model then writes
+  the summary and the recommendations from them. `review --last` takes the most recent **flagged** run instead.
+- `save [reason]` flags the current session's run and captures it into the workflow memory now.
+- `ask` gives the model the architecture, the skills catalog, what is installed here, the workflow memory, a slice of
+  the memory's index and the digests that match the question, never a transcript. Links and videos in the question go
+  through `workflow/sources.ts` first and are saved to `consulted/`.
+
+## Workflow memory
+
+Design and alternatives: `docs/decisions/ADR-001-workflow-memory.md`; contract: `docs/specs/workflow-memory.md`.
+
+- **Store** (`workflow/memory.ts`): everything reads and writes `~/.pihouse/memory/` (`$PIHOUSE_HOME/memory/`) through
+  it, with atomic writes. `index.json` lists every entry (kind, project, status, one-line summary, last use);
+  `workflow-memory.md` is the living memory; `runs/<runId>/` holds captured packages (`run.json`, `report.md`,
+  normalized and raw transcript copies); `digests/`, `batches/`, `consulted/`, `ideas/`, `proposals/`, `archive/`.
+  Models only ever see `indexSlice`, capped by chars. `LIMITS` holds every size cap, and tests assert them.
+- **Flags and capture** (`workflow/capture.ts`): a run is flagged by a `workflow-` agent name, an executor in its tree,
+  or `flags.json` (written when a session starts the planner or the executor, and by `/workflow save`). Capture is code:
+  on save, on `agent_end` of a flagged session, and in a sweep of the journal that the keeper and `review --last` run
+  first. A processed run is never captured again.
+- **Keeper** (`extensions/keeper.ts`, `workflow/digest.ts`, skill `skills/extras/keeper`): `pih keeper` starts a root
+  registered with the fixed agent-link name `keeper` (an optional `name` on the hub's register request). The digest
+  runs from a command, in a fresh session (`ctx.newSession`): one nested model call per run
+  (`ctx.modelRegistry.complete`, bounded input from the report and a code-condensed transcript), then one
+  consolidation call over the digests that rewrites `workflow-memory.md` and writes proposals. Code adds the removal
+  proposals (skills unused in the last 10 processed runs, raw copies archived over 90 days ago), marks the batch
+  processed, archives the raw copies and prunes. Between jobs the `context` event drops every message before the last
+  boundary and puts the capped bootstrap first, as a hidden message (not in the system prompt, which the Claude bridge
+  rebuilds), so a turn costs the same however old the keeper is.
+- **Sources** (`workflow/sources.ts`): YouTube captions fetched from the player endpoint (no key), then `yt-dlp`, then `whisper` with `ffmpeg`,
+  detected on PATH, never installed; web pages are stripped to text by code. When nothing works the result names what
+  to install and the cheap-agent fallback.

@@ -87,6 +87,12 @@ export interface HubOptions {
 
 export interface RegisterRequest {
 	harness: string;
+	/**
+	 * The name wanted for a root (the hub keeps it unique). Problem: a root is named after its harness (`pihouse-6`),
+	 * so a durable agent such as the keeper had no fixed name to be found by. Example: `pih keeper` registers
+	 * `keeper`. Solution: an optional name; without one the harness names it as before.
+	 */
+	name?: string;
 	model?: string | null;
 	cwd: string;
 	parent?: null;
@@ -172,7 +178,7 @@ export class Hub {
 		const factory = req.adapter ? profile && this.opts.adapters[profile.adapter] : undefined;
 		if (req.adapter && !factory)
 			return { error: `no adapter for "${req.harness}" in this hub, so it cannot drive it; register with pull: true` };
-		const name = this.registry.uniqueName(req.harness);
+		const name = this.registry.uniqueName(req.name || req.harness);
 		const record: AgentRecord = {
 			name,
 			parent: null,

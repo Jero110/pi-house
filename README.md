@@ -34,10 +34,11 @@
 - **Inter-harness.** pi-house plans with you, then hands the plan to other agents (Claude Code, Codex, opencode, more
   pi-house sessions), each in its own pane with its native UI. They talk through agent-link without anyone waiting or polling.
 - **Self-learning.** Every run is journaled. `/workflow review` reads what each agent did (tasks, skills, tokens,
-  time per message) and recommends what to change in your skills, plans and agent choices; `/workflow ask` answers
-  about your setup and researches the tools you name.
-- **Lightweight.** pi unmodified, five extensions, two MCP servers with no third-party dependencies, about 10k lines
-  of TypeScript that Node runs as is (no build step), and 23 skills as plain Markdown.
+  time per message) and recommends what to change in your skills, plans and agent choices. Planner and executor runs,
+  and any chat you `/workflow save`, go to a workflow memory that the keeper (`pih keeper`) digests when you ask;
+  `/workflow ask` answers from that memory and turns the links and videos you send into notes.
+- **Lightweight.** pi unmodified, eight extensions, two MCP servers with no third-party dependencies, about 14k lines
+  of TypeScript that Node runs as is (no build step), and 24 skills as plain Markdown.
 
 ## Install
 
@@ -118,8 +119,11 @@ Then ask for what you want, or start the workflow explicitly:
 | Command | What it does |
 | --- | --- |
 | `/skill:planner <idea>` | Plans with you, then hands the plan to an executor agent. |
-| `/workflow review` | What the last run did: tasks, agents, skills, tokens and time by role, harness and message, then recommendations. |
-| `/workflow ask <question>` | Answers about your workflow, skills and setup; researches tools you name. |
+| `/workflow review` | What this session's run did: tasks, agents, skills, tokens and time by role, harness and message, then recommendations. |
+| `/workflow review --last` | The same for the most recent flagged run (planner, executor or saved). |
+| `/workflow save [reason]` | Flags this conversation for the workflow memory and captures it now, with your reason. |
+| `/workflow ask <question>` | Answers from your workflow memory, skills and setup; links and videos in the question are transcribed and kept. |
+| `pih keeper` | Starts the keeper, the agent that keeps the workflow memory (see [Workflow memory](#workflow-memory)). |
 | `/skill:<name>` | Runs any skill by hand, e.g. `/skill:code-review-and-quality`. |
 
 Every pi option and command works too (`pih --model ...`, `/model`, `/login`).
@@ -253,10 +257,38 @@ pi-house learns from what already exists on disk; it adds no tracking of its own
    Both are saved in the report.
 4. **Decide.** You apply what you agree with. pi-house does not rewrite your skills by itself.
 
-`/workflow ask <question>` gives the model the architecture, the skills catalog, what is installed on this machine
-and the last report. When the question names something it does not know, it searches pi's own docs and examples first,
+`/workflow ask <question>` gives the model the architecture, the skills catalog, what is installed on this machine,
+the last report and the workflow memory (below). When the question names something it does not know, it searches pi's own docs and examples first,
 then sends an opencode agent to the web, and ends with one verdict: we already have something better, it is about the
 same as something we have, or it is worth trying (what to change, and on which past task to test it).
+
+## Workflow memory
+
+A memory of how you work, in `~/.pihouse/memory/` (or `$PIHOUSE_HOME/memory/`), kept by one agent, the **keeper**.
+
+- **Capture.** Planner and executor runs are flagged by default (the executor runs as `workflow-executor`), and
+  `/workflow save [reason]` flags any other conversation. A flagged run is captured as one package: the whole agent
+  tree, its computed metrics, your reason and a copy of every transcript. Capture is code; no model reads anything.
+  Unflagged runs never enter the memory.
+- **The keeper.** Run `pih keeper` in a terminal. It registers with agent-link as `keeper` (a second `pih keeper` says
+  where the first one runs) and says how many runs are pending. Say "summarize them" (or `/keeper summarize`): in a
+  fresh session it reads each pending run once (one bounded model call per run, at most 10 runs per batch), writes a
+  digest of each, updates `workflow-memory.md`, writes proposals, and marks the batch processed so it is never read
+  again. Later batches see only digests.
+- **Proposals.** `/keeper proposals`, `/keeper approve <id>`, `/keeper reject <id> [why]`. Only approved proposals are
+  applied; a rejected one is never proposed again. The keeper also proposes removing skills and ideas no run used in
+  the last 10 processed runs, and deleting raw transcript copies archived over 90 days ago.
+- **Pruning.** Memory nobody used in 90 days, or that was superseded, moves to `archive/` (also `/keeper prune`).
+  Nothing is deleted without your approval.
+- **Flat cost.** After every job the keeper's older messages leave its context; each request sees a capped bootstrap
+  (instructions, workflow memory, a slice of the index, the pending count). `/keeper new` starts a fresh session.
+- **Sources.** A link or video in `/workflow ask` is transcribed by a tool, never by a model reading it: YouTube
+  captions fetched from the YouTube player endpoint (no key), then `yt-dlp` subtitles, then local `whisper` (with `ffmpeg`), when they are on your PATH.
+  pihouse installs none of them. The transcript is kept in `consulted/` with a summary, and ideas go to `ideas/`. When
+  nothing works, it says what to install and offers a cheap agent instead.
+
+The design and its alternatives: [ADR-001](docs/decisions/ADR-001-workflow-memory.md) and the
+[spec](docs/specs/workflow-memory.md).
 
 ## Skills
 
@@ -267,7 +299,7 @@ Four groups. Pre-build and build run inside the workflow; post-build and extras 
 | **Pre-build** | `planner` (pihouse), `grilling` (Matt Pocock): the grill-me step |
 | **Build** | `executor` (pihouse); development skills (Addy): `test-driven-development`, `spec-driven-development`, `source-driven-development`, `security-and-hardening`, `performance-optimization`, `doubt-driven-development`, `constraint-driven-development`, `documentation-and-adrs`, `observability-and-instrumentation`, `incremental-implementation`, `git-workflow-and-versioning`, `ci-cd-and-automation` |
 | **Post-build** | `shipping-and-launch` (Addy), `handoff` (Matt Pocock) |
-| **Extras** | `api-and-interface-design`, `browser-testing-with-devtools`, `code-review-and-quality`, `debugging-and-error-recovery`, `code-simplification` (Addy); `impeccable` (Paul Bakaus) |
+| **Extras** | `api-and-interface-design`, `browser-testing-with-devtools`, `code-review-and-quality`, `debugging-and-error-recovery`, `code-simplification` (Addy); `impeccable` (Paul Bakaus); `keeper` (pihouse): started by `pih keeper` |
 
 How skills load:
 
@@ -332,7 +364,7 @@ Finds and reads agent sessions, arranges cmux and drives its browser.
 ```mermaid
 flowchart LR
   you(["you"]) --> pihouse
-  subgraph pihouse["pihouse: pi + 5 extensions"]
+  subgraph pihouse["pihouse: pi + 8 extensions"]
     ext["header · ask_user_question · /workflow"]
   end
   pihouse -- "MCP stdio" --> mcp["agent-link MCP<br/>spawn · send · reply · status · cancel · inbox"]
@@ -356,7 +388,7 @@ cmux MCP and `/workflow review` work after the hub or the agents are gone.
 
 | Package | What it is |
 | --- | --- |
-| [`packages/pihouse`](packages/pihouse) | the `pih` command: launcher, setup, extensions (header, status bar, `ask_user_question`, `/workflow`, the Claude Code login) |
+| [`packages/pihouse`](packages/pihouse) | the `pih` command: launcher, setup, extensions (header, status bar, compact tool calls, `ask_user_question`, `/workflow`, the keeper, the Claude Code login) |
 | [`packages/agent-link-core`](packages/agent-link-core) | hub daemon, one adapter per harness (claude, codex, opencode, pi), MCP server, guard, session journal |
 | [`packages/agent-link`](packages/agent-link) | the composed hub and the `agent-link` CLI (`status`, `sessions`, `transcript`, `install`) |
 | [`packages/agent-link-cmux`](packages/agent-link-cmux) | cmux pane backend and its MCP entry |

@@ -87,3 +87,25 @@ test("open without a harness prints usage; one the hub cannot drive says why", a
 		await t.stop();
 	}
 });
+
+test("open registers the root under the name it is given", async () => {
+	const t = await testHub();
+	try {
+		const seen: string[] = [];
+		const code = await runRoot({
+			argv: ["claude"],
+			name: "keeper",
+			env: { PATH: "/usr/bin:/bin", HOME: t.home, TMUX: "/tmp/t,1,0" },
+			cwd: t.home,
+			home: t.home,
+			run: async (cmd) => {
+				seen.push(cmd.env.AGENT_LINK_AGENT ?? "");
+				return 0;
+			},
+		});
+		assert.equal(code, 0);
+		assert.deepEqual(seen, ["keeper"]);
+	} finally {
+		await t.stop();
+	}
+});

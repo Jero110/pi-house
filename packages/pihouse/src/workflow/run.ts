@@ -57,10 +57,15 @@ export function briefOf(task: string | undefined, cwd: string): string | undefin
 }
 const SKILLS_LINE = /^\s*(?:Skills?|Load the skills?|Skills to load)\s*:\s*(.+)$/im;
 
+// Problem: a worker whose brief only lists skills/build/executor/SKILL.md among the files it edits looked like an
+// executor. Example: the "capture" worker of a run. Solution: count only a task that starts the skill, either
+// "/skill:executor" first or a line that says to read the skill file and follow it (the planner's hand-off text).
+const STARTS_EXECUTOR = /^\s*\/skill:executor\b/;
+const READ_AND_FOLLOW = /^\s*(?:read|load)\b[^\n]*skills\/build\/executor\/SKILL\.md[^\n]*\bfollow\b/im;
+
 export function isExecutor(r: SessionRecord): boolean {
-	return (
-		/^executor\b/.test(r.name) || /\/skill:executor\b|\bexecutor skill\b|skills\/build\/executor\b/i.test(r.task ?? "")
-	);
+	const task = r.task ?? "";
+	return /^(?:workflow-)?executor\b/.test(r.name) || STARTS_EXECUTOR.test(task) || READ_AND_FOLLOW.test(task);
 }
 
 function assigned(task: string | undefined): string[] {
