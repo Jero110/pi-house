@@ -7,8 +7,6 @@
 
 <h1 align="center">pi-house</h1>
 
-<p align="center"><strong>Bring light to your agents.</strong></p>
-
 <p align="center">
   A self-learning, lightweight, inter-harness coding agent built on top of <a href="https://github.com/earendil-works/pi">pi</a>.<br>
   It leverages cmux and tmux to run every agent in its own pane.

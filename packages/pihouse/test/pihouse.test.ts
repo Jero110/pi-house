@@ -17,9 +17,9 @@ import { visibleWidth } from "@earendil-works/pi-tui";
 import { Journal, readJournal } from "agent-link-core";
 import type { TranscriptRoots } from "agent-transcripts";
 import { answersText, pickedSkillsText, showPicker, skillPickerQuestion } from "../src/extensions/ask.ts";
+import { headerLines } from "../src/extensions/brand.ts";
 import { askContext, latestReport, reviewFileName, reviewInstructions } from "../src/extensions/workflow.ts";
 import { piCommand, runPihouse, withSkillsDir } from "../src/launcher.ts";
-import { LOGO_WIDTH, logoLines } from "../src/logo.ts";
 import { EXTENSIONS, PI_CLI, pihousePaths, SKILL_GROUP_DIRS, SKILLS_DIR, THEME } from "../src/paths.ts";
 import { BRIDGE_SOURCE, ensureAgentDir, ensureBridge, readConfig, setup, writePihouseProfile } from "../src/setup.ts";
 import { catalogReadme, readCatalog, skillPath } from "../src/workflow/catalog.ts";
@@ -32,13 +32,18 @@ function tempHome(t: { after: (fn: () => void) => void }): { home: string; env: 
 	return { home, env: { HOME: home, PATH: "", AGENT_LINK_HOME: join(home, ".al") } };
 }
 
-test("the logo is the pihouse mark: 6 lines of the same width, a gray roof over a white π", () => {
-	const lines = logoLines();
-	assert.equal(lines.length, 6);
-	for (const l of lines) assert.equal(visibleWidth(l), LOGO_WIDTH);
-	const drawn = lines.join("");
-	assert.ok(drawn.includes("\u001b[38;2;244;244;245m"), "the white of the π");
-	assert.ok(drawn.includes("\u001b[38;2;139;139;146m"), "the gray of the roof");
+test("the header is plain text: the name and the commands, with no logo and no slogan, and never wider than the terminal", () => {
+	const theme = { bold: (t: string) => t, fg: (_c: string, t: string) => t } as unknown as Parameters<
+		typeof headerLines
+	>[0];
+	const text = headerLines(theme, 120, true).join("\n");
+	assert.match(text, /pi-house v/);
+	assert.match(text, /\/skill:planner/);
+	assert.match(text, /agent-link on/);
+	assert.doesNotMatch(text, /Bring light|[▀▄█]/);
+	assert.match(headerLines(theme, 120, false).join("\n"), /agent-link off/);
+	for (const width of [120, 60, 20])
+		for (const l of headerLines(theme, width, true)) assert.ok(visibleWidth(l) <= width);
 });
 
 test("the agent dir is made once from pi's login, with no default model, this checkout's skills and no stray extensions", (t) => {
