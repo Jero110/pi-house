@@ -1,6 +1,6 @@
 # pihouse Agent installer for Windows.
 #
-#   irm https://raw.githubusercontent.com/Jero110/pihouse/main/install.ps1 | iex
+#   irm https://raw.githubusercontent.com/Jero110/pi-house/main/install.ps1 | iex
 #
 # pihouse needs a Unix shell, Unix sockets and tmux, so on Windows it runs inside WSL2 (Ubuntu). This script:
 #   1. installs WSL2 with Ubuntu when it is missing (Windows asks for administrator rights and a restart; run the
@@ -9,7 +9,7 @@
 #   3. with -WithHarnesses, also installs Claude Code, Codex and opencode inside Ubuntu.
 #
 # With options:
-#   & ([scriptblock]::Create((irm https://raw.githubusercontent.com/Jero110/pihouse/main/install.ps1))) -WithHarnesses
+#   & ([scriptblock]::Create((irm https://raw.githubusercontent.com/Jero110/pi-house/main/install.ps1))) -WithHarnesses
 # Options: -Distro <name> (default Ubuntu), -WithHarnesses, -Ref <branch or tag> (default main).
 param(
 	[string]$Distro = "Ubuntu",
@@ -52,7 +52,7 @@ if ($distros -notcontains $Distro) {
 
 $flags = "--backend tmux --deps"
 if ($WithHarnesses) { $flags += " --with-harnesses" }
-$url = "https://raw.githubusercontent.com/Jero110/pihouse/$Ref/install.sh"
+$url = "https://raw.githubusercontent.com/Jero110/pi-house/$Ref/install.sh"
 # The script runs from a file inside WSL, so no quotes cross from PowerShell to wsl.exe (Windows PowerShell 5 passes
 # embedded double quotes unescaped) and the installer keeps the terminal as stdin for apt's password prompt.
 $script = @(

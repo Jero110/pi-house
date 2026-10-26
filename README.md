@@ -1,11 +1,11 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: light)" srcset="assets/pihouse-light.svg">
-    <img alt="pihouse" src="assets/pihouse.svg" width="160">
+    <img alt="pi-house" src="assets/pihouse.svg" width="160">
   </picture>
 </p>
 
-<h1 align="center">pihouse</h1>
+<h1 align="center">pi-house</h1>
 
 <p align="center"><strong>Bring light to your agents.</strong></p>
 
@@ -15,7 +15,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/Jero110/pihouse/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/Jero110/pihouse/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="https://github.com/Jero110/pi-house/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/Jero110/pi-house/actions/workflows/ci.yml/badge.svg"></a>
   <img alt="Node 24+" src="https://img.shields.io/badge/node-%3E%3D24-339933?style=flat-square">
   <img alt="License MIT" src="https://img.shields.io/badge/license-MIT-blue?style=flat-square">
 </p>
@@ -33,8 +33,8 @@
 
 ---
 
-- **Inter-harness.** pihouse plans with you, then hands the plan to other agents (Claude Code, Codex, opencode, more
-  pihouses), each in its own pane with its native UI. They talk through agent-link without anyone waiting or polling.
+- **Inter-harness.** pi-house plans with you, then hands the plan to other agents (Claude Code, Codex, opencode, more
+  pi-house sessions), each in its own pane with its native UI. They talk through agent-link without anyone waiting or polling.
 - **Self-learning.** Every run is journaled. `/workflow review` reads what each agent did (tasks, skills, tokens,
   time per message) and recommends what to change in your skills, plans and agent choices; `/workflow ask` answers
   about your setup and researches the tools you name.
@@ -44,7 +44,7 @@
 ## Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Jero110/pihouse/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Jero110/pi-house/main/install.sh | bash
 ```
 
 The installer asks one question, **cmux or tmux**, and sets up the rest:
@@ -52,34 +52,40 @@ The installer asks one question, **cmux or tmux**, and sets up the rest:
 - `pih` and `agent-link` in `~/.local/bin`, the code in `~/.pihouse/src`.
 - The agent-link MCP server registered with every harness it finds (Claude Code, Codex, opencode, pi, pihouse).
 - With cmux, also the cmux MCP server. With tmux, only agent-link.
-- pihouse's own pi config in `~/.pihouse/agent`, reusing your pi login. No default provider or model: pihouse starts on the provider you are logged in to.
+- pi-house's own pi config in `~/.pihouse/agent`, reusing your pi login. No default provider or model: pi-house starts on the provider you are logged in to.
 
 Skip the question with `bash -s -- --backend cmux` (or `tmux`). Whatever is missing is installed first: Node.js 24,
 git, and tmux if you choose it (with Homebrew on macOS, which is installed too if needed; with apt on Ubuntu, Debian
 and WSL). `--no-deps` skips that step. cmux comes from [cmux.com](https://cmux.com) (macOS).
 
 The Claude bridge is opt-in: add `--claude-bridge` (`bash -s -- --claude-bridge`) and, when Claude Code is installed,
-setup adds it so pihouse can run Claude models on your Claude login. They show up in `/model`; they are never the default.
+setup adds it so pi-house can run Claude models on your Claude login. They show up in `/model`; they are never the default.
+
+> **Check Anthropic's terms before you enable it.** The bridge runs Claude through your Claude Code subscription login.
+> Anthropic's [Consumer Terms](https://www.anthropic.com/legal/consumer-terms) (section 3) restrict automated access
+> "except when you are accessing our Services via an Anthropic API Key or where we otherwise explicitly permit it", and
+> its policy on third-party tools using Pro and Max logins has been changing in 2026. Use it only if you have checked
+> that it is allowed for you. An API key (`/login`, "API key") is the route that does not depend on that.
 `--with-harnesses` installs Claude Code, Codex and opencode first (into `~/.local`):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Jero110/pihouse/main/install.sh | bash -s -- --with-harnesses
+curl -fsSL https://raw.githubusercontent.com/Jero110/pi-house/main/install.sh | bash -s -- --with-harnesses
 ```
 
 ### Windows
 
-pihouse needs a Unix shell, Unix sockets and tmux, so on Windows it runs inside WSL2 (Ubuntu). In PowerShell:
+pi-house needs a Unix shell, Unix sockets and tmux, so on Windows it runs inside WSL2 (Ubuntu). In PowerShell:
 
 ```powershell
-irm https://raw.githubusercontent.com/Jero110/pihouse/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/Jero110/pi-house/main/install.ps1 | iex
 ```
 
 The first time, it installs WSL2 with Ubuntu (Windows asks for administrator rights and a restart); open Ubuntu once
-to create your user, then run the same command again. The second run installs git, tmux, Node.js 24 and pihouse inside
+to create your user, then run the same command again. The second run installs git, tmux, Node.js 24 and pi-house inside
 Ubuntu, with the tmux backend. To install Claude Code, Codex and opencode there as well:
 
 ```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Jero110/pihouse/main/install.ps1))) -WithHarnesses
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Jero110/pi-house/main/install.ps1))) -WithHarnesses
 ```
 
 Then open Ubuntu, run `tmux`, `cd` into a project under your Linux home (`~/`, much faster than `/mnt/c`) and run
@@ -110,7 +116,7 @@ Every pi option and command works too (`pih --model ...`, `/model`, `/login`).
 
 ### The interface
 
-pihouse runs pi in a quiet black, white and gray theme with one lilac accent, and replaces pi's footer with a single status
+pi-house runs pi in a quiet black, white and gray theme with one lilac accent, and replaces pi's footer with a single status
 line:
 
 ```
@@ -186,7 +192,7 @@ flowchart LR
   ask -- "unknown tool" --> research["pi docs, then a web research agent"]
 ```
 
-pihouse learns from what already exists on disk; it adds no tracking of its own.
+pi-house learns from what already exists on disk; it adds no tracking of its own.
 
 1. **Record.** The hub journals every agent it opens: parent, task, harness, model, pane, and the path of the
    harness's own transcript.
@@ -197,7 +203,7 @@ pihouse learns from what already exists on disk; it adds no tracking of its own.
 3. **Recommend.** The session's model reads that report and writes a summary and up to five recommendations, each
    with its evidence (agent and message number) and the file to change: a skill, the plan, or the executor's choices.
    Both are saved in the report.
-4. **Decide.** You apply what you agree with. pihouse does not rewrite your skills by itself.
+4. **Decide.** You apply what you agree with. pi-house does not rewrite your skills by itself.
 
 `/workflow ask <question>` gives the model the architecture, the skills catalog, what is installed on this machine
 and the last report. When the question names something it does not know, it searches pi's own docs and examples first,
@@ -221,7 +227,7 @@ How skills load:
   `disable-model-invocation: true`, so it loads only when a plan names it or you call `/skill:<name>`.
 - The planner shows every development skill in one picker, the ones whose `offerWhen` (in `skills/catalog.json`)
   fits the work first, marked recommended, and writes only the ones you pick into the plan, next to each task.
-- The executor passes each task its skills by absolute path, and pihouse lets every worker read the skills folder without
+- The executor passes each task its skills by absolute path, and pi-house lets every worker read the skills folder without
   a permission prompt. `/workflow review` then checks which of them each agent really loaded.
 
 The full catalog, with what each one does and its source: [skills/README.md](skills/README.md). Third-party skills keep
@@ -316,8 +322,8 @@ How the pieces fit, in detail: [docs/architecture.md](docs/architecture.md).
 ## FAQ
 
 **Why pi, and not a harness of its own?**
-pi is small and its extension API gives pihouse everything it needs (tools, commands, messages that start a turn, the
-header) without a fork. pihouse pins pi and keeps its own config in `~/.pihouse/agent`, so your plain pi stays as it is.
+pi is small and its extension API gives pi-house everything it needs (tools, commands, messages that start a turn, the
+header) without a fork. pi-house pins pi and keeps its own config in `~/.pihouse/agent`, so your plain pi stays as it is.
 
 **Do I need cmux?**
 You need cmux or tmux, because every agent gets its own pane. cmux adds the cmux MCP (sessions, layout, browser); with
@@ -328,11 +334,11 @@ Through WSL2, with tmux: `install.ps1` sets it up (see [Windows](#windows)). Nat
 Unix sockets, and the guard reads shell commands, not PowerShell.
 
 **What does it cost?**
-What each harness spends with its provider. pihouse calls no model on its own; `/workflow review` shows the tokens per
+What each harness spends with its provider. pi-house calls no model on its own; `/workflow review` shows the tokens per
 role, harness, agent and message. opencode defaults to a free model.
 
-**What does pihouse keep, and where?**
-`~/.pihouse`: pihouse's pi config, sessions and `/workflow` reports. `~/.agent-link`: the hub socket and token, the event log,
+**What does pi-house keep, and where?**
+`~/.pihouse`: pi-house's pi config, sessions and `/workflow` reports. `~/.agent-link`: the hub socket and token, the event log,
 the session journal and the profiles. Nothing leaves your machine except what each harness sends to its own provider.
 
 **Is it safe to leave several agents running?**
@@ -345,13 +351,15 @@ Yes: the executor is one. A worker talks only with its parent and its own worker
 ## Develop
 
 ```bash
-git clone https://github.com/Jero110/pihouse && cd pihouse
+git clone https://github.com/Jero110/pi-house && cd pi-house
 npm install --ignore-scripts
 npm run check && npm test
 bash install.sh            # installs from this checkout
 ```
 
-Rules for contributors (and their agents) are in [AGENTS.md](AGENTS.md). Tests never call real models.
+Rules for contributors (and their agents) are in [AGENTS.md](AGENTS.md) and [CONTRIBUTING.md](CONTRIBUTING.md). Tests never
+call real models. Security reports go through [SECURITY.md](SECURITY.md); everyone is expected to follow the
+[Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## Uninstall
 
@@ -359,6 +367,11 @@ Rules for contributors (and their agents) are in [AGENTS.md](AGENTS.md). Tests n
 pih uninstall             # removes the MCP registrations and the pihouse profile
 rm -rf ~/.pihouse ~/.local/bin/pih ~/.local/bin/pihouse ~/.local/bin/agent-link
 ```
+
+## Credits
+
+pi-house stands on [pi](https://github.com/earendil-works/pi) by Earendil Works and ships skills by Addy Osmani, Matt
+Pocock and others (see [skills/LICENSES](skills/LICENSES/README.md)). It started as Faro.
 
 ## License
 

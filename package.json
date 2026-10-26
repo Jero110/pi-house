@@ -29,5 +29,25 @@
 		"@types/node": "26.6.5",
 		"husky": "9.1.7",
 		"typescript": "7.0.2"
-	}
+	},
+	"author": "Jero110",
+	"homepage": "https://github.com/Jero110/pi-house#readme",
+	"bugs": {
+		"url": "https://github.com/Jero110/pi-house/issues"
+	},
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/Jero110/pi-house.git"
+	},
+	"keywords": [
+		"coding-agent",
+		"pi",
+		"agents",
+		"cli",
+		"tmux",
+		"cmux",
+		"mcp",
+		"claude-code",
+		"codex"
+	]
 }

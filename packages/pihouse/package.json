@@ -18,5 +18,26 @@
 		"agent-transcripts": "0.1.0",
 		"cmux-mcp": "0.1.0",
 		"typebox": "1.3.27"
-	}
+	},
+	"author": "Jero110",
+	"homepage": "https://github.com/Jero110/pi-house#readme",
+	"bugs": {
+		"url": "https://github.com/Jero110/pi-house/issues"
+	},
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/Jero110/pi-house.git",
+		"directory": "packages/pihouse"
+	},
+	"keywords": [
+		"coding-agent",
+		"pi",
+		"agents",
+		"cli",
+		"tmux",
+		"cmux",
+		"mcp",
+		"claude-code",
+		"codex"
+	]
 }

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # pihouse installer.
 #
-#   curl -fsSL https://raw.githubusercontent.com/Jero110/pihouse/main/install.sh | bash
-#   curl -fsSL https://raw.githubusercontent.com/Jero110/pihouse/main/install.sh | bash -s -- --backend tmux
+#   curl -fsSL https://raw.githubusercontent.com/Jero110/pi-house/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/Jero110/pi-house/main/install.sh | bash -s -- --backend tmux
 #
 # What is missing is installed first: Node.js 24, git, and tmux when you choose tmux (Homebrew on macOS, installing
 # Homebrew itself when needed; apt on Ubuntu, Debian and WSL). --no-deps skips that. --backend cmux|tmux skips the
@@ -17,7 +17,7 @@
 # PIHOUSE_HARNESS_PREFIX (npm prefix for --with-harnesses, default ~/.local).
 set -euo pipefail
 
-REPO="${PIHOUSE_REPO:-https://github.com/Jero110/pihouse.git}"
+REPO="${PIHOUSE_REPO:-https://github.com/Jero110/pi-house.git}"
 REF="${PIHOUSE_REF:-main}"
 BIN_DIR="${PIHOUSE_BIN_DIR:-$HOME/.local/bin}"
 ORIG_PATH="$PATH"
