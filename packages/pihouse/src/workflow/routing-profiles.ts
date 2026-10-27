@@ -357,6 +357,8 @@ export const ROUTING_DECISIONS_FILE = join("routing", "decisions.jsonl");
 /** The longest line the journal writes or reads. A longer line is counted as skipped and never parsed. */
 export const MAX_DECISION_LINE = 4096;
 const MAX_DECISION_REASON = 500;
+/** The largest time a Date can hold; a larger journal time would make the decision impossible to show. */
+const MAX_EPOCH_MS = 8.64e15;
 const FAILURE_KINDS: readonly Failure["kind"][] = ["exhausted", "auth", "network", "rate"];
 
 /** One decision as `pih route` printed it. Nothing secret or prompt-like is stored: ids, a model id, an account and a reason. */
@@ -435,6 +437,7 @@ function decisionOf(line: string): RoutingDecision | undefined {
 	if (
 		typeof o.time !== "number" ||
 		!Number.isFinite(o.time) ||
+		Math.abs(o.time) > MAX_EPOCH_MS ||
 		typeof o.profile !== "string" ||
 		typeof o.task !== "string" ||
 		!nullableText(o.agent) ||

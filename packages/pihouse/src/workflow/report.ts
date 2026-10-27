@@ -1,7 +1,22 @@
 // The /workflow review report: what ran, with which skills, how many tokens and how much time, by role, by
 // harness, by agent and by message. Plain Markdown, so it reads the same in the session and in the file.
 import type { Usage } from "agent-transcripts";
+import { pihousePaths } from "../paths.ts";
+import { type RoutingDecision, type RoutingDecisions, readRoutingDecisions } from "./routing-profiles.ts";
 import type { Role, RunAgent, WorkflowRun } from "./run.ts";
+
+/**
+ * The routing decision that chose a participant's model, body-free: what evidence keeps after the raw copies go. Unknown
+ * stays null: a paused decision has no model or account.
+ */
+export interface RoutingEvidence {
+	profile: string;
+	model: string | null;
+	account: string | null;
+	reason: string;
+	failure: string | null;
+	decidedAt: string;
+}
 
 export interface WorkflowEvidenceParticipant {
 	id: string;
@@ -23,6 +38,11 @@ export interface WorkflowEvidenceParticipant {
 		failedToolCalls?: number;
 		toolCalls?: number;
 	} | null;
+	/**
+	 * Present only when a routing decision chose this participant. Unrouted participants omit the key, so the evidence
+	 * fingerprint of an unrouted run does not change.
+	 */
+	routing?: RoutingEvidence;
 }
 
 export interface WorkflowEvidence {
@@ -81,6 +101,67 @@ export function duration(ms: number): string {
  */
 export function newTokens(u: Usage): number {
 	return u.input + u.output + u.cacheWrite;
+}
+
+/**
+ * The decision that chose a participant's worker: the latest one made for its agent name before the worker started.
+ * Problem: an agent name is not a worker's identity, and the same name is routed again in a later run.
+ * Example: "w-2" was routed to account B at 14:00 in one run; a later run starts its own "w-2" at 15:00 with no decision.
+ * Solution: only decisions made before the start count, and the latest of them wins. Without one, nothing is shown.
+ */
+export function routingFor(
+	name: string,
+	startedAt: string,
+	decisions: readonly RoutingDecision[],
+): RoutingDecision | undefined {
+	const started = Date.parse(startedAt);
+	if (!Number.isFinite(started)) return undefined;
+	let latest: RoutingDecision | undefined;
+	for (const decision of decisions) {
+		if (decision.agent !== name || decision.time > started) continue;
+		if (!latest || decision.time >= latest.time) latest = decision;
+	}
+	return latest;
+}
+
+export function routingEvidence(decision: RoutingDecision): RoutingEvidence {
+	return {
+		profile: decision.profile,
+		model: decision.model,
+		account: decision.account,
+		reason: decision.reason,
+		failure: decision.failure,
+		decidedAt: new Date(decision.time).toISOString(),
+	};
+}
+
+const ROUTING_HEADERS = [
+	"Agent",
+	"Profile",
+	"Routed model",
+	"Journal model",
+	"Account",
+	"Reason",
+	"Failure",
+	"Decided",
+];
+
+// Problem: a model switched after routing (a native `model` change) must not pass for the routed model.
+// Example: w-2 was routed to anthropic/claude-sonnet-5-5, then switched to openai-codex/gpt-6-luna. The journal column
+// shows what ran, labeled as switched, beside the model routing chose and the account that was authorized for it.
+function routingCells(agent: string, routing: RoutingEvidence, journalModels: readonly string[]): string[] {
+	const switched = routing.model !== null && journalModels.some((model) => model !== routing.model);
+	const journal = journalModels.join(", ") || "-";
+	return [
+		agent,
+		routing.profile,
+		routing.model ?? "none (paused)",
+		switched ? `${journal} (switched after routing)` : journal,
+		routing.account ?? "none",
+		routing.reason,
+		routing.failure ?? "-",
+		routing.decidedAt,
+	];
 }
 
 const cell = (t: string) => t.replace(/\|/g, "\\|").replace(/\n/g, " ");
@@ -173,6 +254,17 @@ function evidenceGroupRow(
 			? duration(participants.reduce((sum, participant) => sum + (participant.activeMs ?? 0), 0))
 			: "unknown",
 	]);
+}
+
+/** The participants a routing decision chose, as the evidence keeps them. Empty for a run with no routing. */
+function evidenceRoutingRows(participants: readonly WorkflowEvidenceParticipant[]): string[][] {
+	const rows: string[][] = [];
+	for (const participant of participants) {
+		if (!participant.routing) continue;
+		const journalModels = participant.model ? participant.model.split(", ") : [];
+		rows.push(routingCells(participant.id, participant.routing, journalModels));
+	}
+	return rows;
 }
 
 /** Rebuilds the reportable metrics from durable structured evidence, without transcript or native-session reads. */
@@ -276,10 +368,20 @@ export function renderEvidenceReport(evidence: WorkflowEvidence): string {
 			]),
 		);
 	}
+	const routedRows = evidenceRoutingRows(evidence.participants);
+	if (routedRows.length) {
+		out.push("", "## Routing decisions", "", row(ROUTING_HEADERS), row(Array(ROUTING_HEADERS.length).fill("---")));
+		for (const cells of routedRows) out.push(row(cells));
+	}
 	return `${out.join("\n")}\n`;
 }
 
-export function renderReport(run: WorkflowRun, opts: { messages?: boolean } = {}): string {
+/**
+ * The live report. The routing journal is read from the pihouse home unless the caller passes its decisions, so a
+ * report shows the routing that chose each worker without the caller knowing where the journal is.
+ */
+export function renderReport(run: WorkflowRun, opts: { messages?: boolean; routing?: RoutingDecisions } = {}): string {
+	const routing = opts.routing ?? readRoutingDecisions(pihousePaths().home);
 	const all = run.agents;
 	const total = all.reduce((u, a) => add(u, a.summary?.usage), zero());
 	const hasUsage = all.some((a) => a.summary?.usage !== undefined);
@@ -367,6 +469,18 @@ export function renderReport(run: WorkflowRun, opts: { messages?: boolean } = {}
 				a.missing ? `${a.record.state} (no transcript: ${a.missing})` : a.record.state,
 			]),
 		);
+	}
+
+	const routedRows = all.flatMap((a) => {
+		const decision = routingFor(a.record.name, a.record.startedAt, routing.decisions);
+		if (!decision) return [];
+		const journalModels = a.summary?.models ?? (a.record.model ? [a.record.model] : []);
+		return [routingCells(a.record.name, routingEvidence(decision), journalModels)];
+	});
+	if (routedRows.length || routing.skipped) {
+		out.push("", "## Routing decisions", "", row(ROUTING_HEADERS), row(Array(ROUTING_HEADERS.length).fill("---")));
+		for (const cells of routedRows) out.push(row(cells));
+		if (routing.skipped) out.push("", `${routing.skipped} unreadable routing journal line(s) skipped.`);
 	}
 
 	if (opts.messages !== false) {
