@@ -1,7 +1,25 @@
 // The tree of agents the hub runs: names, parents, who may talk to whom and what status shows to whom.
 // The hub keeps it in memory; the event log (src/log.ts) keeps its history.
 import type { AgentAdapter, AgentRecord, BackendName, PendingAsk, PlaceHint, Profile, StopReason } from "../types.ts";
-import type { QueuedMessage } from "./queue.ts";
+import type { MessageKind, QueuedMessage } from "./queue.ts";
+
+/**
+ * A worker that replace stops so a replacement can continue its task. Problem: until the old worker is confirmed closed,
+ * its late output or its children's reports could reach the parent as current, and two workers could write. Example: a
+ * quota-exhausted worker whose cancelled turn still ends with its last text. Solution: the fence drops the worker's own
+ * output (logged, one stale notice at most), holds its children's reports until the replacement adopts them, and keeps
+ * a natural finish during the fence as the outcome replace reports.
+ */
+export interface Fence {
+	/** A turn that finished on its own during the fence: the outcome of replace, not a result for the parent. */
+	outcome?: { stop: StopReason; text: string };
+	/** Reports from the fenced worker's children, delivered to the replacement (or to the parent) once it is known. */
+	held: Array<{ from: string; text: string; kind: MessageKind }>;
+	/** The stale notice went to the parent: at most once. */
+	noticed: boolean;
+	/** The replacement's name, once it runs. */
+	replacement?: string;
+}
 
 /** One agent as the hub tracks it: its record plus what the queue and result routing need. */
 export interface Agent {
@@ -57,6 +75,16 @@ export interface Agent {
 	handoff?: { to: string; backend: BackendName };
 	/** Handed off: it closed with its pane; its live workers went to the agent that took over (Hub.adopt). */
 	handedOff?: boolean;
+	/** The task spawn gave it; replace hands the same task to the replacement. */
+	task?: string;
+	/**
+	 * The result of its last turn when that turn ended on its own (not cancelled, not failed), kept until the next turn.
+	 * Problem: replace would stop a worker that already finished and repeat its work. Example: "run the tests" finished,
+	 * then replace is asked; the answer is that result, and nothing is spawned.
+	 */
+	lastResult?: { stop: StopReason; text: string };
+	/** Set while replace stops this worker (see Fence). */
+	fence?: Fence;
 }
 
 export class Registry {

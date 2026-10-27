@@ -32,6 +32,10 @@ export interface SessionRecord {
 	pane?: string;
 	/** Where a root's terminal is, as it said at registration. */
 	place?: PlaceHint;
+	/** The journal id of the worker this one continues (replace): the lineage that reporting counts once. */
+	replaces?: string;
+	/** The journal id of the worker that continued this one (replace). */
+	replacedBy?: string;
 	/** The harness's own session: Claude session id, Codex thread id, opencode session id, pi session id. */
 	sessionId?: string;
 	/** The transcript file, when the harness keeps one and the adapter knows it. */

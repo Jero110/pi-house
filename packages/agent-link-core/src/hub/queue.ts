@@ -114,6 +114,11 @@ export function exitedNotice(agent: AgentRecord, detail: string | undefined, hel
 	return held?.trim() ? `${head}. Its last answer:\n\n${held.trim()}` : `${head}.`;
 }
 
+/** What a parent hears once, when a replaced worker's late output arrives: it is stale, and not delivered as a result. */
+export function staleNotice(agent: Pick<AgentRecord, "name">, replacement: string): string {
+	return `[agent-link] stale output: ${agent.name} was replaced by ${replacement}. What it wrote after it was stopped was not delivered as a result.`;
+}
+
 export function failedStartNotice(agent: AgentRecord, error: string): string {
 	return `[agent-link] ${who(agent)} failed to start: ${error}`;
 }

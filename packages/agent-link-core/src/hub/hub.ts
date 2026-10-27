@@ -30,6 +30,7 @@ import type {
 	SetModelResult,
 	StopReason,
 } from "../types.ts";
+import { continuationTask, repoFingerprint } from "./continuation.ts";
 import {
 	askNotice,
 	dialogLines,
@@ -42,9 +43,10 @@ import {
 	resultText,
 	SeenIds,
 	type SendResult,
+	staleNotice,
 	waitingNotice,
 } from "./queue.ts";
-import { type Agent, Registry } from "./registry.ts";
+import { type Agent, type Fence, Registry } from "./registry.ts";
 import {
 	agentEnv,
 	checkSpawn,
@@ -150,6 +152,15 @@ export type ModelResult =
 			interrupt?: InterruptOutcome;
 	  }
 	| { error: string; retry?: RetryOutcome; interrupt?: InterruptOutcome };
+
+/**
+ * What replace did: the replacement that continues the task; the old worker's own result when it had already finished
+ * (nothing spawned); or the reason nothing was replaced.
+ */
+export type ReplaceResult =
+	| { status: "replaced"; name: string; previous: string; before: string; after: string }
+	| { status: "finished"; name: string; result: string }
+	| { error: string };
 
 /** A report from a harness-side piece (POST /event). */
 export type HarnessEvent = { agent: string; type: string } & Record<string, unknown>;
@@ -266,7 +277,11 @@ export class Hub {
 	}
 
 	/** The spawn flow below a caller that is known to be live: checks, record, launch, pane, brief. */
-	private async startWorker(caller: Agent, req: SpawnRequest): Promise<{ name: string } | { error: string }> {
+	private async startWorker(
+		caller: Agent,
+		req: SpawnRequest,
+		replaces?: string,
+	): Promise<{ name: string } | { error: string }> {
 		this.profileFor(req.harness);
 		const checked = checkSpawn(req, {
 			caller,
@@ -291,9 +306,10 @@ export class Hub {
 			startedAt: Date.now(),
 		};
 		const agent = this.newAgent(record, profile);
+		agent.task = req.task.trim();
 		this.registry.add(agent);
 		this.log.agent(record);
-		this.journalCreate(agent, { task: req.task, backend: req.backend }, caller);
+		this.journalCreate(agent, { task: req.task, backend: req.backend, replaces }, caller);
 		const adapter = this.createAdapter(agent, factory);
 		// The brief is the first message; it waits until connect() resolves.
 		this.enqueue(agent, {
@@ -448,14 +464,7 @@ export class Hub {
 			} else
 				this.log.event(successor, "notice-dropped", { kind: m.kind, reason: heir ? "parent exited" : "no parent" });
 		}
-		for (const a of this.subtree(to)) {
-			const parent = a.record.parent ? this.registry.get(a.record.parent) : undefined;
-			this.journalUpdate(a, {
-				parent: parent?.journalId ?? null,
-				parentName: a.record.parent,
-				root: this.rootJournalId(a) ?? a.journalId,
-			});
-		}
+		for (const a of this.subtree(to)) this.relink(a);
 		this.pump(to);
 		if (heir) this.pump(heir);
 		return [...adoptedNames];
@@ -467,6 +476,16 @@ export class Hub {
 			to.inbox.push(m);
 			this.publish(to.record.name, m);
 		} else to.queue.push(m);
+	}
+
+	/** Writes an agent's parent and root into its journal record again, after its tree moved. */
+	private relink(a: Agent): void {
+		const parent = a.record.parent ? this.registry.get(a.record.parent) : undefined;
+		this.journalUpdate(a, {
+			parent: parent?.journalId ?? null,
+			parentName: a.record.parent,
+			root: this.rootJournalId(a) ?? a.journalId,
+		});
 	}
 
 	private subtree(agent: Agent): Agent[] {
@@ -501,7 +520,7 @@ export class Hub {
 
 	private journalCreate(
 		agent: Agent,
-		extra: { task?: string; place?: PlaceHint; pid?: number; backend?: BackendName },
+		extra: { task?: string; place?: PlaceHint; pid?: number; backend?: BackendName; replaces?: string },
 		parent?: Agent,
 	): void {
 		const { journal } = this.opts;
@@ -528,6 +547,7 @@ export class Hub {
 				backend: extra.backend,
 				place: extra.place,
 				pid: extra.pid,
+				replaces: extra.replaces,
 				startedAt: at.toISOString(),
 			});
 		} catch (e) {
@@ -602,6 +622,7 @@ export class Hub {
 		agent.inflight = msg;
 		agent.replyText = undefined;
 		agent.lastText = "";
+		agent.lastResult = undefined;
 		this.log.messageDelivered(msg.id);
 		this.publish(agent.record.name, msg);
 		this.transition(agent, "wake");
@@ -622,6 +643,10 @@ export class Hub {
 		if (msg) {
 			if (agent.inflight === msg) agent.inflight = undefined;
 			this.log.messageTurnEnd(msg.id);
+		}
+		if (agent.fence) {
+			this.fencedTurnEnd(agent, agent.fence, res);
+			return;
 		}
 		if (agent.closing || agent.record.state === "exited") return;
 		// A turn that succeeded, or one the user started in the pane, supersedes the failed message; a failed turn replaces it.
@@ -647,9 +672,38 @@ export class Hub {
 			this.log.event(name, "turn-end-held");
 		} else if (this.transition(agent, turnEndCause(res.stopReason))) {
 			agent.held = undefined;
+			if (res.stopReason !== "cancelled" && res.stopReason !== "error")
+				agent.lastResult = { stop: res.stopReason, text: result };
 			this.notifyParent(agent, resultText(agent.record, res.stopReason, result), "result");
 		}
 		this.pump(agent);
+	}
+
+	/**
+	 * A turn ends on a fenced worker (replace stopped it). Its output never reaches the parent as current. A turn that
+	 * finished on its own before the replacement exists is the outcome replace reports; any other is logged as late, and
+	 * once a replacement runs the parent hears, once, that the output is stale.
+	 * Problem: a cancelled or ignored turn ends after its replacement runs, and its text reaches the parent as a finished
+	 * result. Example: a quota-exhausted worker's last answer arriving next to the replacement's answer for the same task.
+	 * Solution: only a natural end during the fence is kept; the rest is dropped, with one stale notice.
+	 */
+	private fencedTurnEnd(agent: Agent, fence: Fence, res: PromptResponse): void {
+		const name = agent.record.name;
+		const result = agent.replyText ?? (res.text.trim() ? res.text : agent.lastText);
+		agent.replyText = undefined;
+		const natural = res.stopReason !== "cancelled" && res.stopReason !== "error";
+		if (natural && !fence.outcome && !fence.replacement) {
+			fence.outcome = { stop: res.stopReason, text: result };
+			this.log.event(name, "fence-outcome", { stopReason: res.stopReason, length: result.length });
+			this.transition(agent, turnEndCause(res.stopReason));
+			return;
+		}
+		this.log.event(name, "late-result-dropped", { stopReason: res.stopReason, length: result.length });
+		const parent = agent.record.parent ? this.registry.get(agent.record.parent) : undefined;
+		if (fence.replacement && !fence.noticed && parent && !parent.closing && parent.record.state !== "exited") {
+			fence.noticed = true;
+			this.enqueue(parent, { from: name, text: staleNotice(agent.record, fence.replacement), kind: "notice" });
+		}
 	}
 
 	private update(agent: Agent, u: SessionUpdate): void {
@@ -751,7 +805,19 @@ export class Hub {
 
 	/** Queues a hub notice or a result for the agent's parent, as if the agent had sent it. */
 	private notifyParent(agent: Agent, text: string, kind: MessageKind = "notice"): void {
+		// Problem: a fenced worker's dialog or late notice reaches its parent as current. Example: a permission prompt that
+		// its cancelled turn left open. Solution: dropped here, and logged; replace reports what matters.
+		if (agent.fence) {
+			this.log.event(agent.record.name, "late-result-dropped", { kind, fenced: true });
+			return;
+		}
 		const parent = agent.record.parent ? this.registry.get(agent.record.parent) : undefined;
+		// Problem: a child reports to a parent that replace is stopping, and the report would be lost. Example: a routing
+		// worker finishing while its planner is fenced. Solution: the report waits on the fence and moves to the replacement.
+		if (parent?.fence) {
+			parent.fence.held.push({ from: agent.record.name, text, kind });
+			return;
+		}
 		if (!parent || parent.closing || parent.record.state === "exited") {
 			this.log.event(agent.record.name, "notice-dropped", { kind, reason: parent ? "parent exited" : "no parent" });
 			return;
@@ -885,6 +951,172 @@ export class Hub {
 	}
 
 	/**
+	 * Replaces a worker whose harness cannot switch its model in place (Claude Code, Codex, a paste worker), on behalf of
+	 * an agent above it. The old worker is fenced, its turn cancelled and it is closed; its exit is confirmed (bounded by
+	 * interruptMs); then a replacement starts in the same folder under the same parent with the same task, a bounded
+	 * continuation and the repository fingerprints. Its live children move to it.
+	 * Problem: the parent could only cancel the worker and spawn another by hand, which lost the task's context and let the
+	 * old worker's late answer arrive as current. Example: a Codex worker out of quota, whose cancelled turn still reports.
+	 * Solution: one writer at a time. Anything that does not confirm the exit spawns nothing and says so.
+	 */
+	async replace(req: {
+		from: string;
+		to: string;
+		harness: string;
+		model?: string;
+		name?: string;
+		notes?: string;
+		backend?: BackendName;
+		read?: string[];
+	}): Promise<ReplaceResult> {
+		if (this.closed) return { error: "the hub is shutting down" };
+		const target = this.registry.get(req.to);
+		if (!target) return { error: this.registry.unknownAgent(req.to, req.from) };
+		if (req.from === req.to || !this.registry.isAncestor(req.from, req.to))
+			return { error: `${req.from} cannot replace ${req.to}: only its parent (or an agent above it) can.` };
+		const parent = target.record.parent ? this.registry.get(target.record.parent) : undefined;
+		if (!parent) return { error: `${req.to} has no parent to take its replacement` };
+		if (target.fence) return { error: `${req.to} is already being replaced` };
+		if (target.interrupt)
+			return {
+				error: `${req.to} is being interrupted to switch its model: wait for it to continue`,
+			};
+		if (target.record.state === "exited" || target.closing)
+			return { error: `${req.to} has exited: spawn a new worker to continue its task` };
+		if (parent.record.state === "exited" || parent.closing)
+			return { error: `${parent.record.name} has exited, so it cannot take the replacement` };
+		// Problem: a worker that already finished would be stopped and its work repeated. Example: "run the tests" finished
+		// with its result delivered; a replace after it answers with that result and spawns nothing.
+		if (target.record.state === "done" && target.lastResult)
+			return {
+				status: "finished",
+				name: target.record.name,
+				result: resultText(target.record, target.lastResult.stop, target.lastResult.text),
+			};
+		// Everything that can be refused is refused before the old worker is touched.
+		if (req.model && !isExactModel(req.model))
+			return {
+				error: `the model must be an exact <provider>/<id> (e.g. anthropic/claude-sonnet-5-5), not ${JSON.stringify(req.model)}`,
+			};
+		const backend = req.backend ?? target.record.backend ?? "cmux";
+		const task = target.task ?? "";
+		this.profileFor(req.harness);
+		const checked = checkSpawn(
+			{ from: parent.record.name, harness: req.harness, task, model: req.model, cwd: target.record.cwd, backend },
+			{ caller: parent, profiles: this.profiles, adapters: this.opts.adapters, backends: this.opts.backends },
+		);
+		if (!checked.ok) return { error: checked.error };
+
+		const name = target.record.name;
+		const before = repoFingerprint(target.record.cwd);
+		const fence: Fence = { held: [], noticed: false };
+		target.fence = fence;
+		this.log.event(name, "fenced", { by: req.from, before });
+		// Cancels the turn in flight, closes the adapter and the pane. Not awaited: the wait below is the bound.
+		void this.closeAgent(target);
+		const bound = this.opts.interruptMs ?? 20000;
+		const deadline = Date.now() + bound;
+		while (!this.confirmedExited(target) && !fence.outcome && Date.now() < deadline)
+			await new Promise((r) => setTimeout(r, Math.min(this.opts.idlePollMs ?? 250, deadline - Date.now())));
+
+		// A natural end during the fence is the outcome: the work is done, so nothing is spawned.
+		if (fence.outcome) {
+			this.transferFence(target, parent);
+			return {
+				status: "finished",
+				name,
+				result: resultText(target.record, fence.outcome.stop, fence.outcome.text),
+			};
+		}
+		if (!this.confirmedExited(target)) {
+			this.transferFence(target, parent);
+			return {
+				error: `${name} did not confirm its exit within ${Math.round(bound / 1000)} s, so nothing was spawned. It stays fenced: its output is dropped.`,
+			};
+		}
+
+		const after = repoFingerprint(target.record.cwd);
+		const continuation = continuationTask({
+			task,
+			progress: target.lastText,
+			notes: req.notes,
+			oldName: name,
+			oldJournalId: target.journalId ?? name,
+			before,
+			after,
+			cwd: target.record.cwd,
+		});
+		const started = await this.startWorker(
+			parent,
+			{
+				from: parent.record.name,
+				harness: req.harness,
+				task: continuation,
+				model: req.model,
+				name: req.name || this.nextReplacementName(name),
+				cwd: target.record.cwd,
+				backend,
+				read: req.read,
+			},
+			target.journalId,
+		);
+		const replacement = "error" in started ? undefined : this.registry.get(started.name);
+		if (!replacement) {
+			this.transferFence(target, parent);
+			const why = "error" in started ? started.error : "the replacement did not register";
+			return { error: `not replaced: ${why}. ${name} stays closed, so nothing writes in its folder.` };
+		}
+		fence.replacement = replacement.record.name;
+		this.transferFence(target, replacement);
+		this.journalUpdate(target, { replacedBy: replacement.journalId });
+		this.log.event(name, "replaced", { by: replacement.record.name, before, after });
+		this.log.event(replacement.record.name, "replaces", { old: name, before, after });
+		return { status: "replaced", name: replacement.record.name, previous: name, before, after };
+	}
+
+	/** `<base>-r<N>` with the smallest N no agent of this run uses: the replacement of claude-r1 is claude-r2. */
+	private nextReplacementName(old: string): string {
+		const base = old.replace(/-r\d+$/, "");
+		let n = 1;
+		while (this.registry.get(`${base}-r${n}`)) n++;
+		return `${base}-r${n}`;
+	}
+
+	/** The worker is confirmed gone: its record says exited, and when its process is known, the process is gone too. */
+	private confirmedExited(agent: Agent): boolean {
+		if (agent.record.state !== "exited") return false;
+		return agent.pid === undefined || !processAlive(agent.pid);
+	}
+
+	/**
+	 * Moves what a fenced worker leaves to `heir`: its live children (with their own workers) and the reports they sent
+	 * while it was fenced, each delivered once. The heir is the replacement, or the fenced worker's parent when nothing
+	 * was replaced. Problem: the children of a fenced worker are not closed, so they need an owner. Example: a planner's
+	 * routing worker still running when its planner is replaced; its result must reach the replacement, once.
+	 */
+	private transferFence(target: Agent, heir: Agent): void {
+		const fence = target.fence;
+		const held = fence?.held ?? [];
+		if (fence) fence.held = [];
+		const workers = this.registry
+			.children(target.record.name)
+			.filter((c) => c !== heir && c.record.state !== "exited" && !c.closing);
+		for (const w of workers) {
+			w.record.parent = heir.record.name;
+			this.log.event(w.record.name, "adopted", { by: heir.record.name, from: target.record.name });
+			for (const a of this.subtree(w)) this.relink(a);
+		}
+		for (const m of held) {
+			if (heir.record.state === "exited" || heir.closing) {
+				this.log.event(heir.record.name, "notice-dropped", { kind: m.kind, reason: "parent exited" });
+				continue;
+			}
+			this.enqueue(heir, m);
+		}
+		this.pump(heir);
+	}
+
+	/**
 	 * Changes the model of a worker, on behalf of an agent above it. The adapter does the switch through its harness's
 	 * own path; the record and the journal follow what it reports ("applied" now, "pending" via a model update).
 	 * With retry, an applied switch sends the message that failed the worker's last turn once more (retryFailed).
@@ -902,6 +1134,9 @@ export class Hub {
 		const self = req.from === req.to;
 		if (!self && !this.registry.isAncestor(req.from, req.to))
 			return { error: `${req.from} cannot change the model of ${req.to}: only its parent (or an agent above it) can.` };
+		// Problem: a model change on a worker that replace is stopping would race its replacement. Example: a switch that
+		// lands on the fenced worker while the replacement starts with the old model. Solution: refused, and named as such.
+		if (target.fence) return { error: `${req.to} is being replaced: its model cannot change now` };
 		// A self-switch must never cancel or replay the tool request that asked for it.
 		if (self && (req.retry || req.interrupt))
 			return { error: "a self-switch cannot use retry or interrupt: the current request must finish exactly once" };
@@ -1155,7 +1390,8 @@ export class Hub {
 			const name = agent.record.name;
 			if (agent.retry) clearTimeout(agent.retry);
 			// An agent that handed off closes alone: the agent that took over, and its workers, go on.
-			if (!agent.handedOff)
+			// A fenced worker's children are not closed: replace moves them to the replacement (or to the parent).
+			if (!agent.handedOff && !agent.fence)
 				await Promise.all(
 					this.registry
 						.children(name)

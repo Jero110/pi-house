@@ -24,6 +24,8 @@ export class FakeAdapter implements AgentAdapter {
 	readonly prompts: PromptRequest[] = [];
 	/** Calls in order: launch, connect, prompt, cancel, close. */
 	readonly calls: string[] = [];
+	/** Every call of every adapter of the kit, as "<agent>:<call>", in the order they happened. */
+	private readonly trace: string[];
 	/** Scripted: the harness runs a turn the hub did not start (the user typed in the pane). */
 	busy = false;
 	respond?: Responder;
@@ -40,9 +42,15 @@ export class FakeAdapter implements AgentAdapter {
 	readonly answers: string[] = [];
 	answerResult?: { answered: string } | { error: string };
 
-	constructor(deps: AdapterDeps, respond?: Responder) {
+	constructor(deps: AdapterDeps, respond?: Responder, trace: string[] = []) {
 		this.deps = deps;
 		this.respond = respond;
+		this.trace = trace;
+	}
+
+	private note(call: string): void {
+		this.calls.push(call);
+		this.trace.push(`${this.spec?.name ?? "?"}:${call}`);
 	}
 
 	/** Makes connect() wait until connectNow() or connectFail(). Call before the hub connects. */
@@ -79,21 +87,21 @@ export class FakeAdapter implements AgentAdapter {
 	}
 
 	async launch(spec: LaunchSpec): Promise<PaneCommand> {
-		this.calls.push("launch");
 		this.spec = spec;
+		this.note("launch");
 		if (this.launchError) throw this.launchError;
 		return { argv: ["fake-harness", "--name", spec.name], env: spec.env, cwd: spec.cwd };
 	}
 
 	connect(pane?: PaneHandle): Promise<void> {
-		this.calls.push("connect");
+		this.note("connect");
 		this.pane = pane;
 		this.connectedWithoutPane = pane === undefined;
 		return this.connectResult;
 	}
 
 	async prompt(req: PromptRequest): Promise<PromptResponse> {
-		this.calls.push("prompt");
+		this.note("prompt");
 		this.prompts.push(req);
 		this.running++;
 		this.maxConcurrent = Math.max(this.maxConcurrent, this.running);
@@ -128,12 +136,28 @@ export class FakeAdapter implements AgentAdapter {
 	ignoreCancel = false;
 
 	async cancel(): Promise<void> {
-		this.calls.push("cancel");
+		this.note("cancel");
 		if (this.turn && !this.ignoreCancel) this.finish("", "cancelled");
 	}
 
+	/**
+	 * A harness whose close waits until releaseClose(): the hub cannot confirm the worker exited until then. Tests
+	 * release every adapter before they stop the hub, since the hub's close waits for every tree.
+	 */
+	holdClose = false;
+	private releaseHold?: () => void;
+
 	async close(): Promise<void> {
-		this.calls.push("close");
+		this.note("close");
+		if (this.holdClose)
+			await new Promise<void>((resolve) => {
+				this.releaseHold = resolve;
+			});
+	}
+
+	releaseClose(): void {
+		this.holdClose = false;
+		this.releaseHold?.();
 	}
 
 	onUpdate(listener: (u: SessionUpdate) => void): void {
@@ -147,6 +171,8 @@ export class FakeAdapter implements AgentAdapter {
 
 export interface FakeKit {
 	factory: AdapterFactory;
+	/** The calls of every adapter in order, as "<agent>:<call>". */
+	trace: string[];
 	/** Every adapter the hub created, in order; `byName` once launch() or connect() named it. */
 	all: FakeAdapter[];
 	byName(name: string): FakeAdapter | undefined;
@@ -157,9 +183,10 @@ export interface FakeKit {
 export function fakeAdapters(respond?: Responder): FakeKit {
 	const kit: FakeKit = {
 		all: [],
+		trace: [],
 		byName: (name) => kit.all.find((a) => a.spec?.name === name),
 		factory: (deps) => {
-			const a = new FakeAdapter(deps, respond);
+			const a = new FakeAdapter(deps, respond, kit.trace);
 			kit.all.push(a);
 			kit.onCreate?.(a);
 			return a;
