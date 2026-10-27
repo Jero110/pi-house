@@ -1034,6 +1034,44 @@ test("model: only an agent above the worker may change its model; the record and
 		assert.equal(journalOf(t, "sub")?.model, "openai/gpt-5.5");
 	}));
 
+test("model: busy self-switch waits for the native idle update without cancelling or replaying", () =>
+	withHub(async (t) => {
+		const root = await pullRoot(t.client);
+		const child = await spawned(t, root, "pi", "busy-self");
+		const fake = await waitFor(() => t.kit.byName(child), "pi adapter");
+		fake.busy = true;
+		fake.setModelResult = { status: "pending", model: "openai/gpt-5.5" };
+		const request = await t.client.model({ from: child, to: child, model: "openai/gpt-5.5" });
+		assert.deepEqual(request, {
+			status: "pending",
+			model: "openai/gpt-5.5",
+			previous: "claude-bridge/claude-haiku-5-5",
+		});
+		assert.deepEqual(
+			fake.calls.filter((call) => call === "cancel"),
+			[],
+		);
+		assert.equal(fake.prompts.length, 1, "the original task was sent once");
+		fake.emit({ kind: "model", model: "openai/gpt-5.5" });
+		assert.equal(t.running.hub.registry.get(child)?.record.model, "openai/gpt-5.5");
+		assert.equal(fake.prompts.length, 1, "a model update does not replay or continue the task");
+		const peer = await spawned(t, root, "pi", "peer-self");
+		const sideways = await t.client.model({ from: child, to: peer, model: "anthropic/claude-sonnet-5-5" });
+		assert.match("error" in sideways ? sideways.error : "", /only its parent/);
+		assert.match(
+			"error" in (await t.client.model({ from: child, to: child, model: "openai/gpt-5.5", retry: true }))
+				? "self retry refused"
+				: "",
+			/self retry refused/,
+		);
+		assert.match(
+			"error" in (await t.client.model({ from: child, to: child, model: "openai/gpt-5.5", interrupt: true }))
+				? "self interrupt refused"
+				: "",
+			/self interrupt refused/,
+		);
+	}));
+
 test("model: only an exact <provider>/<id> reaches the adapter", () =>
 	withHub(async (t) => {
 		const root = await pullRoot(t.client);
