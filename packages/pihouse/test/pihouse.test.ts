@@ -231,7 +231,9 @@ test("setup: cmux adds the cmux MCP to pihouse and records the backend; tmux tak
 	assert.ok(lines.some((l) => /claude: not found on PATH, skipped/.test(l)));
 
 	setup({ paths, backend: "tmux", home, env, out: () => {} });
-	assert.deepEqual(JSON.parse(readFileSync(join(paths.agentDir, "mcp.json"), "utf8")).mcpServers, {});
+	assert.deepEqual(Object.keys(JSON.parse(readFileSync(join(paths.agentDir, "mcp.json"), "utf8")).mcpServers), [
+		"pihouse-memory",
+	]);
 	assert.deepEqual(readConfig(paths), { backend: "tmux" });
 });
 

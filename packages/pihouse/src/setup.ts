@@ -244,6 +244,26 @@ export function cmuxServer(paths: PihousePaths): ServerSpec {
 	};
 }
 
+export const MEMORY_SERVER = "pihouse-memory";
+
+/** How harnesses start the memory MCP server: this node and its entry. */
+export function memoryMcpCommand(): { command: string; args: string[] } {
+	return { command: stableNode(), args: [fileURLToPath(new URL("./memory-mcp.ts", import.meta.url))] };
+}
+
+/**
+ * The memory MCP for every harness found. Its env vars are the identity and place of the agent, never a token:
+ * the scope comes from the agent's folder and pihouse's home (see launchEnv), so nothing here names a project.
+ */
+export function memoryServer(paths: PihousePaths): ServerSpec {
+	return {
+		name: MEMORY_SERVER,
+		description: "Search and read retained pi-house knowledge on demand",
+		envVars: ["AGENT_LINK_AGENT", "PIHOUSE_HOME", "PIHOUSE_MEMORY_PROJECT", "PIHOUSE_MEMORY_HOME"],
+		manifest: join(paths.home, "install-memory.json"),
+	};
+}
+
 /** pihouse reads MCP servers from <agentDir>/mcp.json; the cmux server is added there with direct exposure. */
 export function setPihouseMcp(paths: PihousePaths, name: string, entry: Obj | undefined): void {
 	const file = join(paths.agentDir, "mcp.json");
@@ -288,6 +308,9 @@ export function setup(opts: SetupOptions): void {
 	if (opts.claudeBridge) ensureBridge(paths, env, out, opts.run);
 	out(`pih: agent-link profile ${writePihouseProfile(env)}`);
 	install({ home, env, backend, command: mcpCommand(backend), out });
+	const memory = memoryMcpCommand();
+	install({ home, env, backend, command: memory, server: memoryServer(paths), out });
+	setPihouseMcp(paths, MEMORY_SERVER, { ...memory, exposure: "direct", description: memoryServer(paths).description });
 	if (backend === "cmux") {
 		const command = cmuxMcpCommand();
 		install({ home, env, backend, command, server: cmuxServer(paths), out });
@@ -305,9 +328,11 @@ export function setup(opts: SetupOptions): void {
 /** Reverts setup's registrations. pihouse's own folder (sessions, reports) stays. */
 export function teardown(opts: Omit<SetupOptions, "backend">): void {
 	const { paths, home, env, out } = opts;
+	uninstall({ home, env, server: memoryServer(paths), out });
 	uninstall({ home, env, server: cmuxServer(paths), out });
 	uninstall({ home, env, server: agentLinkServer(home, env), out });
 	setPihouseMcp(paths, "cmux", undefined);
+	setPihouseMcp(paths, MEMORY_SERVER, undefined);
 	rmSync(join(hubPaths(agentLinkHome(env)).home, "profiles", "pihouse.json"), { force: true });
 	out(`pih: kept ${paths.home} (sessions, reports, settings); delete it by hand if you want them gone`);
 }
