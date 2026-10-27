@@ -358,16 +358,7 @@ test("worker children are spawned under a dedicated pull coordinator and never r
 test("legacy migration is explicit and creates activation only when called", () => {
 	const root = mkdtempSync(join(tmpdir(), "learning-activation-"));
 	try {
-		assert.equal(
-			activateLearningStore({
-				storeDir: root,
-				db: {} as never,
-				ownedRoot: root,
-				operationalState: () => ({ states: [], deliveries: null, handoff: null, livenessKnown: false }),
-				currentFingerprint: () => undefined,
-			}),
-			undefined,
-		);
+		assert.equal(activateLearningStore(root), undefined);
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}

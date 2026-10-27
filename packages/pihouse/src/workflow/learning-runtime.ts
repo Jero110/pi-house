@@ -35,9 +35,14 @@ export interface RuntimeOptions {
 	currentFingerprint: (revision: string) => string | undefined;
 }
 
-/** Called only by explicit digest/self-learning entry points; migration is never performed during startup. */
-export function activateLearningStore(options: RuntimeOptions): void {
-	migrateLegacyStore(options.storeDir);
+/**
+ * Called only by explicit digest/self-learning entry points; migration is never performed during startup.
+ * Problem: the store must be migrated before its operational database can be opened, so this cannot take a database.
+ * Example: a command that opened memory.sqlite first would create a store the migration then refuses to adopt.
+ * Solution: it takes the store folder alone and returns before anything else reads it.
+ */
+export function activateLearningStore(storeDir: string): void {
+	migrateLegacyStore(storeDir);
 }
 
 /** Select only safe, operational revisions with complete captured packages and known quiescence. */
@@ -147,6 +152,12 @@ export function produceDigestCandidates(options: RuntimeOptions): {
 	return { candidates, deferred };
 }
 
+/**
+ * Runs the digest jobs for the candidates: one isolated worker each, then the commit, then cleanup of the owned copies.
+ * Problem: the claim lease was fixed at two minutes, shorter than a worker may run, so a slow digest could be claimed
+ * again while still writing. Example: a five-minute worker and a lease that expires at two minutes.
+ * Solution: the caller sets the lease from its worker timeout; the default keeps the earlier two minutes for tests.
+ */
 export async function executeDigest(
 	options: RuntimeOptions & {
 		digestRoot: string;
@@ -154,6 +165,9 @@ export async function executeDigest(
 		cwd: string;
 		invocation: string;
 		now: () => number;
+		leaseMs?: number;
+		/** Digest jobs started by this call; the rest stay pending for the next invocation. Default 2. */
+		maxJobs?: number;
 		worker: (job: WorkerJob) => Promise<WorkerResult>;
 	},
 	candidates: RuntimeCandidate[],
@@ -162,8 +176,8 @@ export async function executeDigest(
 	const dispatched = await dispatchJobs(options.db, candidates, {
 		invocation: options.invocation,
 		now: options.now,
-		leaseMs: 120_000,
-		maxJobs: 2,
+		leaseMs: options.leaseMs ?? 120_000,
+		maxJobs: options.maxJobs ?? 2,
 		maxAttempts: 2,
 		adapter: async ({ id, revision, evidencePath }) => {
 			const candidate = byId.get(id);
@@ -178,6 +192,8 @@ export async function executeDigest(
 				cwd: options.cwd,
 				project: candidate.project,
 				maxOutputBytes: 12_000,
+				// The run folder is outside the cwd; the child may read it and nothing else of the store.
+				readDirs: [evidencePath],
 			});
 			if (outcome.status !== "success") return { status: outcome.status === "cancelled" ? "cancelled" : "failure" };
 			const packagePath = join(options.ownedRoot, "runs", candidate.runId, "run.json");
@@ -216,7 +232,8 @@ export async function executeDigest(
 		const freshState = options.operationalState(candidate.runId);
 		const freshFingerprint = options.currentFingerprint(candidate.revision);
 		if (!isQuiescent(freshState) || freshFingerprint !== candidate.fingerprint) {
-			results.push({ revision: candidate.revision, status: "deferred" });
+			// The digest is already committed; its copies stay until a later invocation proves the run quiet.
+			results.push({ revision: candidate.revision, status: "deferred", path: result.path });
 			continue;
 		}
 		const cleanup = await dispatchCleanup(options.db, candidate.id, {

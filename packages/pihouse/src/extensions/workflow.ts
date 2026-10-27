@@ -27,6 +27,7 @@ import {
 	projectOf,
 	readFlags,
 } from "../workflow/capture.ts";
+import { digestCommand, type LearningDeps } from "../workflow/learning-commands.ts";
 import { LIMITS, type MemoryStore, openMemory } from "../workflow/memory.ts";
 import { ACTIVE_MARKER } from "../workflow/migration.ts";
 import { createProposalTarget } from "../workflow/proposal-target.ts";
@@ -57,6 +58,7 @@ export const MESSAGE_TYPE = "pihouse-workflow";
 export const WORKFLOW_COMMANDS = [
 	{ usage: "report [--last]", completions: ["report", "report --last"] },
 	{ usage: "save [reason]", completions: ["save "] },
+	{ usage: "digest", completions: ["digest"] },
 	{ usage: "ask <question>", completions: ["ask "] },
 	{ usage: "proposals", completions: ["proposals"] },
 	{ usage: "approve <id>", completions: ["approve "] },
@@ -438,6 +440,38 @@ export async function proposalCommand(
 	}
 }
 
+/**
+ * Whether a model id resolves in pi's registry with configured auth. The learning children are only started when it does.
+ * Problem: the registry knows models that have no key, and a child started for one stalls in its pane. Example: a
+ * provider that was never signed in. Solution: the same check the status bar's model uses, before anything starts.
+ */
+function modelAvailable(ctx: ExtensionCommandContext, model: string): boolean {
+	const slash = model.indexOf("/");
+	if (slash <= 0) return false;
+	const found = ctx.modelRegistry.find(model.slice(0, slash), model.slice(slash + 1));
+	return found !== undefined && ctx.modelRegistry.hasConfiguredAuth(found);
+}
+
+/** `/workflow digest`: the learning runtime with the session's hub, pane backend and model registry. */
+async function digest(ctx: ExtensionCommandContext): Promise<void> {
+	const paths = pihousePaths();
+	const deps: LearningDeps = {
+		memory: paths.memory,
+		journalDir: hubPaths(agentLinkHome()).sessions,
+		env: process.env,
+		cwd: ctx.cwd,
+		backend: readConfig(paths)?.backend,
+		modelAvailable: (model) => modelAvailable(ctx, model),
+		progress: (text) => ctx.ui.notify(text, "info"),
+	};
+	try {
+		const result = await digestCommand(deps);
+		ctx.ui.notify(result.text, result.level);
+	} catch (error) {
+		ctx.ui.notify(`/workflow digest: ${messageOf(error)}`, "warning");
+	}
+}
+
 async function runProposalCommand(
 	command: ProposalCommand,
 	args: string[],
@@ -491,6 +525,7 @@ export default function workflow(pi: ExtensionAPI): void {
 			if (sub === "review") return ctx.ui.notify(REVIEW_REMOVED, "warning");
 			if (sub === "save") return save(pi, rest.join(" ").trim(), ctx);
 			if (sub === "proposals" || sub === "approve" || sub === "reject") return runProposalCommand(sub, rest, ctx);
+			if (sub === "digest") return digest(ctx);
 			if (sub === "ask" && rest.join(" ").trim()) {
 				pi.sendMessage(
 					{ customType: MESSAGE_TYPE, content: await askContext(rest.join(" ").trim()), display: false },

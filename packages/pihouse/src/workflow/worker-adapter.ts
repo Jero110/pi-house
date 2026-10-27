@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { linkSync, lstatSync, readFileSync, unlinkSync } from "node:fs";
+import { linkSync, lstatSync, mkdirSync, readFileSync, unlinkSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { createHubClient, type HubClient, identityFromEnv, readJournal } from "agent-link-core";
 import { validateDigest } from "./digest-contract.ts";
@@ -13,6 +13,8 @@ export interface WorkerJob {
 	cwd: string;
 	project?: string;
 	maxOutputBytes?: number;
+	/** Folders outside the cwd the child may read without a prompt (the hub's `read` on spawn). */
+	readDirs?: string[];
 }
 
 export interface WorkerAdapterOptions {
@@ -93,6 +95,9 @@ export function createWorkerAdapter(options: WorkerAdapterOptions): (job: Worker
 	return async (job) => {
 		if (![job.id, job.revision].every(safe) || !job.inputPath.startsWith("/") || !job.outputPath.startsWith("/"))
 			return { status: "deferred" };
+		// Problem: the attempt file is written next to the final path, and that folder may not exist yet. Example: the first
+		// digest of a store, whose digests/.attempts is created by no one else. Solution: create it before the spawn.
+		mkdirSync(dirname(job.outputPath), { recursive: true });
 		const outputPath = join(dirname(job.outputPath), `${basename(job.outputPath)}.${randomUUID()}.tmp`);
 		const spawnedAt = now();
 		const childName = `workflow-${job.stage}-${job.id}-${randomUUID().slice(0, 8)}`;
@@ -121,6 +126,7 @@ export function createWorkerAdapter(options: WorkerAdapterOptions): (job: Worker
 			backend: options.backend,
 			...(options.place ? { place: options.place } : {}),
 			...(options.model ? { model: options.model } : {}),
+			...(job.readDirs?.length ? { read: job.readDirs } : {}),
 		});
 		if ("error" in spawned) {
 			removeAttemptOutput();
@@ -208,14 +214,22 @@ export function coordinatorWorkerAdapter(
 	};
 }
 
+/**
+ * The adapter for the hub this session belongs to, or undefined when the session has no agent-link identity.
+ * Problem: a session outside the hub has no coordinator to register, so any worker it started would be unowned.
+ * Example: `/workflow digest` run from plain pi. Solution: no identity, no adapter, and the caller says so.
+ * The client is injectable so tests reach the same code path without a socket.
+ */
 export function nativeWorkerAdapter(
 	options: Omit<WorkerAdapterOptions, "client" | "from"> & {
 		env?: NodeJS.ProcessEnv;
+		client?: HubClient;
 		cwd: string;
 		backend: "cmux" | "tmux";
 	},
 ) {
 	const identity = identityFromEnv(options.env);
 	if (!identity) return undefined;
-	return coordinatorWorkerAdapter(createHubClient({ socket: identity.hub, token: identity.token }), options);
+	const client = options.client ?? createHubClient({ socket: identity.hub, token: identity.token });
+	return coordinatorWorkerAdapter(client, options);
 }

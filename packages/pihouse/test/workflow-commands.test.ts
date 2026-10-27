@@ -315,7 +315,16 @@ test("the proposal commands never start a model turn", async () => {
 	}
 });
 
-test("help and completion list exactly the commands in the table, and nothing removed or unbuilt", () => {
+/** Hides the agent-link identity of the shell running the tests, so a handler never reaches a real hub. */
+function withoutHubIdentity(t: { after: (fn: () => void) => void }): void {
+	const saved = Object.entries(process.env).filter(([key]) => key.startsWith("AGENT_LINK_"));
+	for (const [key] of saved) delete process.env[key];
+	t.after(() => {
+		for (const [key, value] of saved) process.env[key] = value;
+	});
+}
+
+test("help and completion list exactly the commands in the table, and nothing removed", () => {
 	const { pi, commands } = fakePi();
 	workflow(pi);
 	const spec = commands.get("workflow") as
@@ -328,15 +337,17 @@ test("help and completion list exactly the commands in the table, and nothing re
 	);
 	for (const c of WORKFLOW_COMMANDS) assert.ok(USAGE.includes(`/workflow ${c.usage}`), `usage lists ${c.usage}`);
 	const shown = `${USAGE} ${String(spec?.description)} ${values.join(" ")}`;
-	for (const word of ["review", "digest", "self-learning", "keeper"]) {
+	assert.ok(values.includes("digest"), "digest is offered");
+	for (const word of ["review", "keeper"]) {
 		assert.doesNotMatch(shown, new RegExp(word), `${word} is not offered`);
 	}
 });
 
-test("removed and not-yet-built invocations start nothing and say what to use instead", async (t) => {
+test("removed invocations start nothing and say what to use instead; digest without the hub starts nothing", async (t) => {
 	const home = mkdtempSync(join(tmpdir(), "workflow-removed-"));
 	const previous = process.env.PIHOUSE_HOME;
 	process.env.PIHOUSE_HOME = home;
+	withoutHubIdentity(t);
 	t.after(() => {
 		if (previous === undefined) delete process.env.PIHOUSE_HOME;
 		else process.env.PIHOUSE_HOME = previous;
@@ -356,19 +367,17 @@ test("removed and not-yet-built invocations start nothing and say what to use in
 
 	await handler("review --last", ctx);
 	await handler("digest", ctx);
-	await handler("self-learning", ctx);
 	await keeper("summarize", ctx);
 	await keeper("", ctx);
 
 	assert.deepEqual(
 		notes.map((n) => n.level),
-		["warning", "warning", "warning", "warning", "warning"],
+		["warning", "warning", "warning", "warning"],
 	);
 	assert.match(notes[0]?.text ?? "", /\/workflow review was removed.*\/workflow report/);
-	assert.match(notes[1]?.text ?? "", /^usage: \/workflow/);
-	assert.match(notes[2]?.text ?? "", /^usage: \/workflow/);
-	assert.match(notes[3]?.text ?? "", /The keeper was retired.*\/workflow proposals/);
-	assert.match(notes[4]?.text ?? "", /The keeper was retired/);
+	assert.match(notes[1]?.text ?? "", /need the agent-link hub.*Nothing was started/);
+	assert.match(notes[2]?.text ?? "", /The keeper was retired.*\/workflow proposals/);
+	assert.match(notes[3]?.text ?? "", /The keeper was retired/);
 	assert.equal(sent.length, 0, "no sendMessage");
 	assert.equal(users.length, 0, "no sendUserMessage");
 	assert.equal(existsSync(join(home, "reports")), false, "no report is written");
