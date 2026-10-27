@@ -9,10 +9,11 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "
 import { basename, dirname, join } from "node:path";
 import type { SessionRecord } from "agent-link-core";
 import { treeOf } from "agent-link-core";
-import type { TranscriptRoots } from "agent-transcripts";
+import { locateTranscript, type TranscriptRoots } from "agent-transcripts";
 import type { MemoryStore, RunAgentEntry, RunPackage, RunTranscript } from "./memory.ts";
 import { newTokens, renderReport } from "./report.ts";
 import { buildRun, isExecutor, type WorkflowRun } from "./run.ts";
+import { inspectJsonlCursor, type JsonlSourceCursor } from "./source-cursor.ts";
 
 export type FlagBy = RunPackage["flaggedBy"];
 
@@ -243,8 +244,12 @@ type StoredPackage = RunPackage & {
 	evidence?: unknown;
 	fingerprint?: string;
 	revision?: number;
-	cursor?: Record<string, string>;
+	cursor?: Record<string, StoredSourceCursor>;
 };
+
+type StoredSourceCursor =
+	| (JsonlSourceCursor & { appendedRecordIds: string[] })
+	| { sourceKind: "unknown"; sourceId: string | null; reason: string; appendedRecordIds: [] };
 
 const runFile = (store: MemoryStore, id: string) => join(store.dir, "runs", id, "run.json");
 
@@ -254,6 +259,27 @@ function readPackage(store: MemoryStore, id: string): StoredPackage | undefined 
 	} catch {
 		return undefined;
 	}
+}
+
+function lineageForSession(store: MemoryStore, sessionId: string, project: string): string | undefined {
+	for (const entry of store.readIndex()) {
+		if (entry.kind !== "run") continue;
+		const id = entry.id.slice("run:".length);
+		const pkg = readPackage(store, id);
+		const cursors = pkg?.cursor ? Object.values(pkg.cursor) : [];
+		if (
+			pkg?.project === project &&
+			cursors.some((cursor) => cursor?.sourceKind === "jsonl" && cursor.sourceId === sessionId)
+		) {
+			const evidence = pkg?.evidence;
+			if (evidence && typeof evidence === "object") {
+				const lineage = Reflect.get(evidence, "lineage");
+				if (typeof lineage === "string") return lineage;
+			}
+			return pkg?.id;
+		}
+	}
+	return undefined;
 }
 
 /**
@@ -267,18 +293,84 @@ export function captureRun(
 	root: SessionRecord,
 	store: MemoryStore,
 	opts: { by: FlagBy; reason?: string; roots?: TranscriptRoots; now?: Date },
-): "written" | "processed" {
+): "written" | "processed" | "deferred" {
+	const previous = readPackage(store, root.id);
+	if (store.readIndex().some((entry) => entry.id === `run:${root.id}` && entry.status === "processed"))
+		return "processed";
+	const priorCursors = previous?.cursor;
+	const tree = treeOf(records, root.id);
+	const currentIds = new Set(tree.map((record) => record.id));
+	if (priorCursors && Object.keys(priorCursors).some((id) => !currentIds.has(id))) return "deferred";
+	const sourceCursors: Record<string, StoredSourceCursor> = {};
+	const sourcePaths: Record<string, string> = {};
+	for (const record of tree) {
+		const prior = priorCursors?.[record.id];
+		if (prior?.sourceKind === "unknown") return "deferred";
+		if (prior && prior.sourceKind !== "jsonl") return "deferred";
+		const sourcePath = locateTranscript(
+			{
+				harness: record.harness,
+				sessionId: record.sessionId,
+				transcript: record.transcript,
+				worker: record.parent !== null,
+			},
+			opts.roots,
+		);
+		if ((record.harness !== "pi" && record.harness !== "pihouse") || !sourcePath || !record.sessionId) {
+			if (prior) return "deferred";
+			sourceCursors[record.id] = {
+				sourceKind: "unknown",
+				sourceId: record.sessionId ?? null,
+				reason: "source is not a verifiable pi JSONL stream",
+				appendedRecordIds: [],
+			};
+			continue;
+		}
+		const inspected = inspectJsonlCursor(sourcePath, record.sessionId, prior ?? null);
+		if (inspected.state !== "verified") return "deferred";
+		const cursorUnchanged =
+			prior?.sourceKind === "jsonl" &&
+			prior.byteOffset === inspected.cursor.byteOffset &&
+			prior.prefixFingerprint === inspected.cursor.prefixFingerprint;
+		sourceCursors[record.id] = {
+			...inspected.cursor,
+			appendedRecordIds: cursorUnchanged ? prior.appendedRecordIds : inspected.appendedRecordIds,
+		};
+		sourcePaths[record.id] = sourcePath;
+	}
 	const run = buildRun(records, root, opts.roots);
+	for (const [id, cursor] of Object.entries(sourceCursors)) {
+		if (cursor.sourceKind !== "jsonl") continue;
+		const record = tree.find((item) => item.id === id);
+		const path = sourcePaths[id];
+		if (!record?.sessionId || !path) return "deferred";
+		const confirmed = inspectJsonlCursor(path, record.sessionId, null);
+		if (
+			confirmed.state !== "verified" ||
+			confirmed.cursor.byteOffset !== cursor.byteOffset ||
+			confirmed.cursor.prefixFingerprint !== cursor.prefixFingerprint
+		)
+			return "deferred";
+	}
 	const { pkg, transcripts } = packageOf(run, opts);
-	const previous = readPackage(store, pkg.id);
 	const completeUsage = pkg.agents.every((agent) =>
 		["input", "output", "cacheRead", "cacheWrite"].every(
 			(key) => typeof agent.usage[key] === "number" && Number.isFinite(agent.usage[key]),
 		),
 	);
 	const completeSummaries = pkg.agents.every((agent) => agent.missing === null);
+	const rootCursor = sourceCursors[root.id];
+	const forkedFrom = rootCursor?.sourceKind === "jsonl" ? rootCursor.forkedFrom : null;
+	const forkLineage = forkedFrom ? lineageForSession(store, forkedFrom, pkg.project) : undefined;
 	const evidence = {
-		lineage: pkg.id,
+		lineage: forkLineage ?? pkg.id,
+		lineageStatus: forkedFrom
+			? forkLineage
+				? "fork-parent-lineage-resolved"
+				: "unknown; fork parent not retained"
+			: "root-id",
+		forkProvenance: forkedFrom ?? "unknown",
+		destructiveEligibility: "deferred",
 		title: root.name,
 		project: pkg.project,
 		plan: pkg.plan ?? null,
@@ -329,7 +421,7 @@ export function captureRun(
 			agents: pkg.metrics.agents,
 			messages: completeSummaries ? pkg.metrics.messages : null,
 		},
-		cursor: Object.fromEntries(run.agents.map((agent) => [agent.record.id, agent.record.updatedAt])),
+		cursor: sourceCursors,
 	};
 	const fingerprint = createHash("sha256").update(JSON.stringify(evidence)).digest("hex");
 	const revision = previous?.fingerprint === fingerprint ? (previous.revision ?? 1) : (previous?.revision ?? 0) + 1;
@@ -339,7 +431,7 @@ export function captureRun(
 		evidence,
 		fingerprint,
 		revision,
-		cursor: Object.fromEntries(run.agents.map((agent) => [agent.record.id, agent.record.updatedAt])),
+		cursor: sourceCursors,
 		...(review ? { review } : {}),
 	};
 	const reportRun = {
@@ -384,8 +476,11 @@ export function sweepFlagged(
 		if (known.has(`run:${root.id}`)) continue;
 		const flag = isFlagged(records, root, flags);
 		if (!flag) continue;
-		captureRun(records, root, store, { by: flag.by, reason: flag.reason, roots: opts.roots, now: opts.now });
-		done.push(root.id);
+		if (
+			captureRun(records, root, store, { by: flag.by, reason: flag.reason, roots: opts.roots, now: opts.now }) ===
+			"written"
+		)
+			done.push(root.id);
 	}
 	return done;
 }
