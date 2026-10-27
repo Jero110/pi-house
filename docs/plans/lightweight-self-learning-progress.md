@@ -12,3 +12,9 @@
 - Ownership/commit policy: retain pre-existing statusbar edits exactly; do not stage them. Treat the capability map, plan and specs as pre-existing user-owned untracked artifacts. This progress log is the deliberate T1 addition and may be committed alone after checking its staged diff. Later work must stage only explicitly owned hunks/files, run checks/tests, and make atomic commits. No push, destructive checkout, reset, or cleanup of unowned files.
 
 Validation snapshot: `git status --short` and `git diff -- packages/pihouse/src/extensions/statusbar.ts packages/pihouse/test/statusbar.test.ts` were inspected; statusbar files remain modified and unchanged by T1. Branch: `feature/lightweight-self-learning`.
+
+## T2 — Code-only reports
+
+- Dispatched to `evidence` (pihouse, `openai-codex/gpt-6-luna`) after T1 verification.
+- Result: PASS; added `/workflow report [--last]` with local fallback, explicit partial/missing-usage labels, and no LLM turn or automatic flagging. Commit `d4df594` (`feat: add code-only workflow reports`).
+- Executor verification: `node --test packages/pihouse/test/workflow-report.test.ts` passed (2/2); `npm run check` passed; `npm test` passed (367/367). The commit changes only workflow/report implementation and its test. Pre-existing statusbar files and untracked planning/spec documents remain untouched.
