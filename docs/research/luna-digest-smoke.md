@@ -1,6 +1,6 @@
 # Luna digest smoke: pre-experiment protocol
 
-Status: **run on 2026-10-27, see "Result" at the end.** The protocol below was written before any model call. The user later amended it: run the same synthetic experiment once on Luna AND once on Haiku and compare them. One sample per model; no general winner or cheapest-model claim follows from it.
+Status: **run on 2026-10-27; see Result.** The recorded historical experiment used one Luna and one Haiku call after a user amendment. Current initiative guidance authorizes Luna only and Haiku quota is exhausted; the old Haiku run is historical evidence, not permission to repeat it. Neither single sample supports general cost or quality claims.
 
 ## Input manifest
 
@@ -34,9 +34,7 @@ Preserve original input bytes, exact generated output and its SHA-256, byte and 
 
 ## Result (2026-10-27)
 
-Amendment: the user asked for the same experiment on `openai-codex/gpt-6-luna` and `claude-bridge/claude-haiku-5-5`
-("send the report to both, see how each returns the digest, which cost more and which did better"). This
-supersedes the Luna-only launch above for this experiment only.
+Historical amendment: the user requested the same experiment on `openai-codex/gpt-6-luna` and `claude-bridge/claude-haiku-5-5` for this experiment only. The current plan subsequently restricts authorized experiments to Luna; no Haiku/GLM calls are authorized now.
 
 Launch: the executor verified the three fixture hashes against the manifest, copied only `evidence.md` (hash
 verified again) into one private directory per model (`/private/tmp/pihouse-digest-smoke-1793120070-{luna,haiku}`),
@@ -82,7 +80,4 @@ Rubric review (manual, by the executor, against `rubric.md`):
 | Invented assertions | none found; one soft link (`test/import.test.ts` "associated with" the 2/2 result, while the evidence names `import.test.ts`) | none found; one soft attribution (the full-suite review "requested by exec"; the evidence puts it on the executor line in passive voice) |
 | Omissions | none found | none found |
 
-Reading: on this one synthetic run both digests are complete and safe, with no material difference in quality.
-Haiku's attribution is a little more explicit. Luna used fewer tokens in total (12,076 against 28,453), wrote half
-the output tokens and answered about 2.6 s sooner. One sample, one fixture: this does not establish a better or a
-cheaper model in general, and it does not authorize cleanup of real evidence.
+Reading: on this one synthetic fixture, both digests passed the recorded rubric; that is not a general quality claim. Reported token and latency observations are specific to these runs and do not establish general cost, quality, or model ranking. The figures do not authorize cleanup of real evidence.

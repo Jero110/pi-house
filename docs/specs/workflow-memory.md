@@ -1,5 +1,7 @@
 # Spec: workflow memory and the keeper
 
+> Historical specification. Its keeper-era contracts are superseded where they conflict with [ADR-002](../decisions/ADR-002-self-learning.md) and the current [self-learning module specifications](self-learning/common.md). Retained for historical rationale and migration context.
+
 Plan: `docs/plans/workflow-memory.md` (in the main checkout). Research: `docs/research/workflow-memory.md`. Decisions:
 `docs/decisions/ADR-001-workflow-memory.md`. The plan's Decisions are the fixed frame; this spec chooses among the
 proposals with the research and says what each build task (T3-T7) delivers and how it is tested.

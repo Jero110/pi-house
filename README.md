@@ -8,8 +8,8 @@
 <h1 align="center">pi-house</h1>
 
 <p align="center">
-  A self-learning, lightweight, inter-harness coding agent built on top of <a href="https://github.com/earendil-works/pi">pi</a>.<br>
-  It leverages cmux and tmux to run every agent in its own pane.
+  A lightweight, inter-harness coding agent built on unmodified <a href="https://github.com/earendil-works/pi">pi</a>.<br>
+  It plans with you and runs agents in their own cmux or tmux panes.
 </p>
 
 <p align="center">
@@ -18,90 +18,19 @@
   <img alt="License MIT" src="https://img.shields.io/badge/license-MIT-blue?style=flat-square">
 </p>
 
-<p align="center">
-  <a href="#install">Install</a> ·
-  <a href="#use">Use</a> ·
-  <a href="#the-workflow">Workflow</a> ·
-  <a href="#self-learning">Self-learning</a> ·
-  <a href="#skills">Skills</a> ·
-  <a href="#the-mcp-servers">MCP servers</a> ·
-  <a href="#architecture">Architecture</a> ·
-  <a href="#faq">FAQ</a>
-</p>
-
----
-
-- **Inter-harness.** pi-house plans with you, then hands the plan to other agents (Claude Code, Codex, opencode, more
-  pi-house sessions), each in its own pane with its native UI. They talk through agent-link without anyone waiting or polling.
-- **Self-learning.** Every run is journaled. `/workflow report` reads what each agent did (tasks, skills, tokens, time per
-  message). Planner and executor runs, and any chat you `/workflow save`, go to a workflow memory. `/workflow ask` answers
-  from that memory and turns the links and videos you send into notes. Digesting the memory and learning from it are being
-  rebuilt and are not available yet; `/workflow proposals` lists the changes proposed so far.
-- **Lightweight.** pi unmodified, eight extensions, two MCP servers with no third-party dependencies, about 14k lines
-  of TypeScript that Node runs as is (no build step), and 24 skills as plain Markdown.
-
 ## Install
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Jero110/pi-house/main/install.sh | bash
 ```
 
-The installer asks one question, **cmux or tmux**, and sets up the rest:
-
-- `pih` and `agent-link` in `~/.local/bin`, the code in `~/.pihouse/src`.
-- The agent-link MCP server registered with every harness it finds (Claude Code, Codex, opencode, pi, pihouse).
-- With cmux, also the cmux MCP server. With tmux, only agent-link.
-- pi-house's own pi config in `~/.pihouse/agent`, reusing your pi login. No default provider or model: pi-house starts on the provider you are logged in to.
-
-Skip the question with `bash -s -- --backend cmux` (or `tmux`). Whatever is missing is installed first: Node.js 24,
-git, and tmux if you choose it (with Homebrew on macOS, which is installed too if needed; with apt on Ubuntu, Debian
-and WSL). `--no-deps` skips that step. cmux comes from [cmux.com](https://cmux.com) (macOS).
-
-The Claude bridge is opt-in: add `--claude-bridge` (`bash -s -- --claude-bridge`) and, when Claude Code is installed,
-setup adds it so pi-house can run Claude models on your Claude login. They show up in `/model`, and Sonnet 5.5 through the
-bridge becomes the default model.
-
-> **Claude through your subscription is a gray area. Read this first.** The bridge runs Claude through the Claude
-> Agent SDK on your Claude Code login, so it spends your subscription limits instead of an API key.
->
-> - Anthropic's [support article on the Agent SDK](https://support.claude.com/en/articles/15036540-use-the-claude-agent-sdk-with-your-claude-plan)
->   says you "can still use the Claude Agent SDK, `claude -p`, and third-party apps with your subscription limits".
->   It names Max and Team plans, not Pro, and Anthropic has changed this policy several times in 2026.
-> - Anthropic's [Consumer Terms](https://www.anthropic.com/legal/consumer-terms) (section 3) still restrict automated
->   access "except when you are accessing our Services via an Anthropic API Key or where we otherwise explicitly permit
->   it".
-> - One user [reported a suspended account](https://github.com/elidickinson/pi-claude-bridge/issues/118) after using
->   the bridge. It is a single unverified report and the cause is unknown.
->
-> This is not legal advice. Use an account you can afford to lose, or use an API key.
-
-The default model is Sonnet 5.5: through the bridge when it is installed, through an Anthropic API key otherwise. If you
-have neither, pi starts on whichever provider you are logged in to. Change it any time with `/model`.
-`--with-harnesses` installs Claude Code, Codex and opencode first (into `~/.local`):
+The installer asks whether to use cmux or tmux and installs `pih`, agent-link, and isolated pi-house configuration. To choose cmux without a prompt:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Jero110/pi-house/main/install.sh | bash -s -- --with-harnesses
+bash -s -- --backend cmux
 ```
 
-### Windows
-
-pi-house needs a Unix shell, Unix sockets and tmux, so on Windows it runs inside WSL2 (Ubuntu). In PowerShell:
-
-```powershell
-irm https://raw.githubusercontent.com/Jero110/pi-house/main/install.ps1 | iex
-```
-
-The first time, it installs WSL2 with Ubuntu (Windows asks for administrator rights and a restart); open Ubuntu once
-to create your user, then run the same command again. The second run installs git, tmux, Node.js 24 and pi-house inside
-Ubuntu, with the tmux backend. To install Claude Code, Codex and opencode there as well:
-
-```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Jero110/pi-house/main/install.ps1))) -WithHarnesses
-```
-
-Then open Ubuntu, run `tmux`, `cd` into a project under your Linux home (`~/`, much faster than `/mnt/c`) and run
-`pih`. CI runs this Linux install on a fresh Ubuntu and checks that the PowerShell script parses; the WSL steps
-themselves have not run on a Windows machine yet.
+Node.js 24+, git, and tmux (when selected) are installed if missing. See [Windows/WSL](#windows) for Windows setup. The optional Claude bridge is enabled with `--claude-bridge`; review provider terms and account policy before using subscription-backed access.
 
 ## Use
 
@@ -110,319 +39,124 @@ cd your-project
 pih
 ```
 
-Then ask for what you want, or start the workflow explicitly:
-
-```
-/skill:planner a small CLI that tracks my reading list
-```
+Start a plan with `/skill:planner <idea>`, or use the workflow commands directly:
 
 | Command | What it does |
-| --- | --- |
-| `/skill:planner <idea>` | Plans with you, then hands the plan to an executor agent. |
-| `/workflow report [--last]` | What this session's run did: tasks, agents, skills, tokens and time by role, harness and message. `--last` takes the most recent flagged run (planner, executor or saved). |
-| `/workflow save [reason]` | Flags this conversation for the workflow memory and captures it now, with your reason. |
-| `/workflow ask <question>` | Answers from your workflow memory, skills and setup; links and videos in the question are transcribed and kept. |
-| `/workflow proposals`, `approve <id>`, `reject <id> [reason]` | The proposed changes to your skills and memory. Approve applies one and records a receipt; reject keeps the reason. |
-| `/skill:<name>` | Runs any skill by hand, e.g. `/skill:code-review-and-quality`. |
+|---|---|
+| `/workflow report [--last]` | Writes a code-computed Markdown report and returns its path. Active work is labeled partial. It does not call a model or enroll the session. |
+| `/workflow save [reason]` | Captures an otherwise unselected conversation for learning. |
+| `/workflow digest` | Manually generates missing digests in separate agents for eligible evidence. |
+| `/workflow self-learning` | Prepares missing digests, scans and reviews a batch in separate agents. Does not apply proposals. |
+| `/workflow ask <question>` | Selectively consults retained workflow evidence, metrics, architecture and skills. |
+| `/workflow proposals` | Lists proposed changes and their evidence/status. |
+| `/workflow approve <id>` | Approves the displayed proposal version and attempts its validated application. |
+| `/workflow reject <id> [reason]` | Records rejection and its reason. |
+| `/skill:<name>` | Invokes a skill manually, e.g. `/skill:code-review-and-quality`. |
 
-Every pi option and command works too (`pih --model ...`, `/model`, `/login`).
+`/workflow review`, `/keeper`, and `pih keeper` are retired and return concise guidance; they are not aliases. Digest and review require an agent-link-enabled pihouse session. The initiating conversation gets short status and paths, not full generated output. Approval never means a proposal was silently or automatically applied.
 
-### Paying less for models
+## Self-learning and data
 
-- **Max or Team plan:** Anthropic includes monthly API credits ($100 on Max 5x, $200 on Max 20x). Link a Console
-  organization in claude.ai under Settings, Billing, then create an API key in that organization and use it with
-  `/login`. Free, Pro and Enterprise are not eligible, and unused credits expire each month. See
-  [Anthropic's article](https://support.claude.com/en/articles/17154008-monthly-api-credits-for-max-and-team-plans).
-- **ChatGPT plan:** `/login` offers the `openai-codex` provider, which uses your ChatGPT login. The status bar shows
-  that account's usage windows.
-- **Cheaper models:** use a smaller model for routine work and keep the large one for planning.
+Planner/executor runs are selected automatically; other conversations require `/workflow save`. Reports and structured metrics are computed by code. Digesting and cross-run review are explicit, isolated model work. Unstable or unverifiable runs are deferred. Validated digest cleanup can remove only pi-house-owned captured conversational copies; it does not delete native harness sessions, repository files, or migration backups. Summaries can omit detail, and the system does not claim lossless transcript replacement.
 
-### The interface
+Canonical knowledge remains readable documents. SQLite is authoritative for operational jobs, metrics, decisions and receipts; FTS5 is a rebuildable derived index, not the operational database. Everyday agents receive retrieval tools and a short instruction, not automatically injected memories. Routing uses explicit authorized profiles; unsupported or unknown availability pauses rather than silently enabling a paid fallback. Native model switching is limited to verified same-harness support. Optional context monitoring is opt-in and recommendations require manual application.
 
-pi-house runs pi in a flat, quiet theme, close to Claude Code's: a gray bar for your message, a periwinkle accent, and
-greens and golds that sit in the same family. Pi's footer is replaced by a status block in Claude Code's layout. The first
-line is the session; below it, each account you use gets its own line with its limits and resets:
-
-```
-you@host  ~/project  Sonnet 5.5  effort: high  ctx: 32%
-◷ claude  5h: 23% (2h15m → 16:00)   7d: 31% (3d2h)
-◷ openai  5h: 41% (1h20m → 14:35)   7d: 9% (5d1h)
-```
-
-- **Claude:** pi-house reads the usage that Claude Code's own status line leaves in `~/.claude/rate-limits/<session>.json`
-  (`used_percentage` and `resets_at`, plus an optional `seven_day` object with the same two fields), so you see the limit
-  you share with Claude Code. It is as fresh as the last Claude Code refresh and hidden once its window has reset. Claude
-  Code only writes that file if your status line script does; see
-  [Claude Code's status line docs](https://code.claude.com/docs/en/statusline) for the `rate_limits` it passes in.
-- **ChatGPT:** with a ChatGPT login (`/login`, `openai-codex`) the windows come from OpenAI's usage endpoint.
-- **`account_usage` tool:** every pihouse agent can call it to read the same numbers before spawning: per logged-in
-  account, each window with percent used and reset, how old the observation is, and `available`, `exhausted`, `stale`
-  or `unknown`. Unknown is never shown as 0% or available. No model call; tokens never appear in the answer. The executor
-  checks it before each spawn.
-- **Active account:** the one whose model you are using is named in the accent color.
-- **Other logins and API keys:** no windows, so the line below the session shows its tokens and cost.
-- Narrow terminals drop the least important parts of the first line first; an account line never merges with another.
-
-Tool calls are drawn the way Claude Code draws them: one line for the call and one for what it did, with the detail behind
-`ctrl+o`:
-
-```
-● Bash(npm test)
-  ⎿  12 passed … +30 lines (ctrl+o to expand)
-● Read(package.json:1-200)
-  ⎿  Read 53 lines
-● Update(src/app.ts)
-  ⎿  Added 4 lines, removed 1 line
-     (a short colored diff)
-```
-
-Edits keep a short diff and writes their first lines; everything else is a summary until you expand it. Tools that draw
-themselves, such as the question pickers, are left alone. The terminal tab takes the name of the session, made from your
-first request ("Add dark mode to the settings page"), instead of the product name; before that it is the folder.
-
-It lives in `packages/pihouse` (`themes/pihouse.json`, `src/extensions/statusbar.ts`). One known limit: pi itself shows its
-footer for a moment (well under a second) while it reloads, so `/reload` flashes before pi-house's comes back; starting
-`pih` does not.
-
-## The workflow
-
-```mermaid
-sequenceDiagram
-  participant You
-  participant P as Planner (pihouse, your pane)
-  participant E as Executor (pihouse, its own pane)
-  participant W as Workers (claude, codex, opencode, pihouse)
-  You->>P: /skill:planner and your idea
-  P->>You: picker: starting point, then skills, then grill-me
-  P->>P: investigate, write docs/plans/slug.md
-  P->>You: approve the plan?
-  You->>P: approve
-  P->>E: spawn with the plan
-  loop each task, in the plan's order
-    E->>W: spawn with the task and its skills
-    W-->>E: report: status, validation, concerns
-    E->>E: verify and record in the ledger
-  end
-  E-->>P: final report
-  P-->>You: summary, then /workflow report
-```
-
-The **planner** asks every question in a picker (`ask_user_question`), not in chat. The skills picker
-(`pick_skills`) is built from the catalog, so it always shows every development skill; the planner recommends the
-few that fit the work (using each one's `offerWhen` in `skills/catalog.json`), and puts only
-the ones you pick into the plan. The plan names, for each
-task, the agent, harness and model, its skills, what can run in parallel and what waits.
-
-The **executor** never asks you anything: it decides, records its assumptions, runs every task on the agent the plan
-names, verifies, integrates, and reports. No skill fixes a model; the plan does, from what you asked for.
-
-**The layout** is the same in cmux and in tmux, in the window you started in, with no tabs: when the executor takes
-over, the planner's pane closes and the executor stays on the left at full height; every agent it launches opens in
-one column to its right, the column split evenly, and it closes up again as the executor closes finished agents.
-
-```
-┌──────────────┬──────────────┐
-│              │ w1 · opencode│
-│              ├──────────────┤
-│   executor   │ w2 · codex   │
-│              ├──────────────┤
-│              │ w3 · claude  │
-└──────────────┴──────────────┘
-```
-
-## Self-learning
-
-```mermaid
-flowchart LR
-  run["a run: planner, executor, workers"] --> journal[("journal<br/>~/.agent-link/sessions")]
-  run --> tr[("each harness's<br/>own transcripts")]
-  journal --> review["/workflow report"]
-  tr --> review
-  review --> report["report<br/>~/.pihouse/reports/*.md"]
-  report --> you(["you"])
-  you -- "change a skill, a plan, a model" --> next["next run"]
-  catalog[("skills catalog")] --> ask["/workflow ask"]
-  arch["architecture and this machine"] --> ask
-  report --> ask
-  ask -- "unknown tool" --> research["pi docs, then a web research agent"]
-```
-
-pi-house learns from what already exists on disk; it adds no tracking of its own.
-
-1. **Record.** The hub journals every agent it opens: parent, task, harness, model, pane, and the path of the
-   harness's own transcript.
-2. **Measure.** `/workflow report` rebuilds the run from the journal, assigns roles from its shape (the root plans, the
-   `executor` runs the plan, its children are workers) and reads every transcript with one parser per harness. The
-   numbers are computed, not estimated by a model: tokens and time by role, harness, agent and message; skills
-   assigned versus loaded; tool errors; the slowest answers.
-3. **Recommend.** The session's model reads that report and writes a summary and up to five recommendations, each
-   with its evidence (agent and message number) and the file to change: a skill, the plan, or the executor's choices.
-   Both are saved in the report.
-4. **Decide.** You apply what you agree with. pi-house does not rewrite your skills by itself.
-
-`/workflow ask <question>` gives the model the architecture, the skills catalog, what is installed on this machine,
-the last report and the workflow memory (below). When the question names something it does not know, it searches pi's own docs and examples first,
-then sends an opencode agent to the web, and ends with one verdict: we already have something better, it is about the
-same as something we have, or it is worth trying (what to change, and on which past task to test it).
-
-## Workflow memory
-
-A memory of how you work, in `~/.pihouse/memory/` (or `$PIHOUSE_HOME/memory/`).
-
-- **Capture.** Planner and executor runs are flagged by default (the executor runs as `workflow-executor`), and
-  `/workflow save [reason]` flags any other conversation. A flagged run is captured as one package: the whole agent
-  tree, its computed metrics, your reason and a copy of every transcript. Capture is code; no model reads anything.
-  Unflagged runs never enter the memory.
-- **The keeper is retired.** `pih keeper` and `/keeper` are gone. Proposals are decided with `/workflow proposals`,
-  `/workflow approve <id>` and `/workflow reject <id> [why]`: only an approved proposal is applied, and an applied one has
-  a receipt. A rejected one is not proposed again unless new evidence comes in. Digesting runs, pruning and proposing
-  removals come back with self-learning and are not available yet.
-- **Sources.** A link or video in `/workflow ask` is transcribed by a tool, never by a model reading it: YouTube
-  captions fetched from the YouTube player endpoint (no key), then `yt-dlp` subtitles, then local `whisper` (with `ffmpeg`), when they are on your PATH.
-  pihouse installs none of them. The transcript is kept in `consulted/` with a summary, and ideas go to `ideas/`. When
-  nothing works, it says what to install and offers a cheap agent instead.
-
-The design and its alternatives: [ADR-001](docs/decisions/ADR-001-workflow-memory.md) and the
-[spec](docs/specs/workflow-memory.md).
-
-## Skills
-
-Four groups. Pre-build and build run inside the workflow; post-build and extras are yours to invoke.
-
-| Group | Skills |
-| --- | --- |
-| **Pre-build** | `planner` (pihouse), `grilling` (Matt Pocock): the grill-me step |
-| **Build** | `executor` (pihouse); development skills (Addy): `test-driven-development`, `spec-driven-development`, `source-driven-development`, `security-and-hardening`, `performance-optimization`, `doubt-driven-development`, `constraint-driven-development`, `documentation-and-adrs`, `observability-and-instrumentation`, `incremental-implementation`, `git-workflow-and-versioning`, `ci-cd-and-automation` |
-| **Post-build** | `shipping-and-launch` (Addy), `handoff` (Matt Pocock) |
-| **Extras** | `api-and-interface-design`, `browser-testing-with-devtools`, `code-review-and-quality`, `debugging-and-error-recovery`, `code-simplification` (Addy); `impeccable` (Paul Bakaus) |
-
-How skills load:
-
-- Only `planner` and `executor` are visible to the model on their own. Every other skill carries
-  `disable-model-invocation: true`, so it loads only when a plan names it or you call `/skill:<name>`.
-- The planner shows every development skill in one picker, the ones whose `offerWhen` (in `skills/catalog.json`)
-  fits the work first, marked recommended, and writes only the ones you pick into the plan, next to each task.
-- The executor passes each task its skills by absolute path, and pi-house lets every worker read the skills folder without
-  a permission prompt. `/workflow report` then checks which of them each agent really loaded.
-
-The full catalog, with what each one does and its source: [skills/README.md](skills/README.md). Third-party skills keep
-their licenses ([skills/LICENSES](skills/LICENSES/README.md)).
-
-## When an agent stops halfway
-
-Every agent agent-link launches is journaled in `~/.agent-link/sessions/`: who launched it, its task, its pane, its
-session id and transcript path. Nothing depends on the hub or the agent still running.
-
-- From any agent in cmux, ask in plain words ("what did the claude in the right pane get done?"): the cmux MCP's
-  `list_agent_sessions` and `read_agent_transcript` find the session and read its transcript, never the screen.
-- From a shell, anywhere: `agent-link sessions`, then `agent-link transcript <name>`.
-
-So a Codex session can pick up where a stopped Claude Code session left off.
-
-## The MCP servers
-
-Both are plain MCP servers over stdio, so any harness can use them, not only pihouse. The installer registers them with
-every harness it finds.
-
-### agent-link
-
-Lets an agent launch other agents and talk to them. Each agent runs in a pane with its own UI; the hub reaches it by
-that harness's native interface (Claude Code's messaging socket, Codex's app-server, opencode's HTTP server, pi's
-extension socket), never by typing into the screen.
-
-| Tool | What it does |
-| --- | --- |
-| `spawn` | Opens a worker of a harness (claude, codex, opencode, pi, pihouse) with a task, a model and a folder, in the column right of the caller's pane. Returns at once. With `handoff: true` the new agent takes over: the caller's pane closes once its turn ends, and the caller's live workers become the new agent's workers (it can message, cancel, permit and switch their model; their results go to it). |
-| `send` | Sends a message to the caller's parent or one of its workers. A parent's message reads like the user's. |
-| `permit` | Answers a permission or question a worker waits on, at any time: the parent gets its numbered options and picks one. opencode is answered through its API, Claude through a PermissionRequest hook; never by reading or typing into the pane. |
-| `reply` | Sets the result explicitly; otherwise the last answer of the turn is the result. |
-| `status` | The tree of agents and their state: starting, working, asking, done, exited. |
-| `cancel` | Stops a worker and closes its pane. |
-| `model` | Changes the model of one of your own workers (its parent, or an agent above it), without typing into its pane: `model({ to, model, retry?, interrupt? })`, where `model` is an exact `<provider>/<id>`, e.g. `anthropic/claude-sonnet-5-5`. An idle worker switches at once; a busy or asking one switches before its next turn (pending), unless `interrupt: true`. `retry: true` (after an applied switch) sends the message that failed its last turn once more. `interrupt: true` cancels the running turn, switches, and continues the task with one continuation message, never the original task again; the answer says whether it continued and why not. `retry` and `interrupt` cannot be combined. Works for pi, pihouse and opencode workers. Claude Code and Codex refuse the switch (their model is fixed at launch), and a `paste` worker has none: cancel and spawn a new one. A switch does not bypass a provider's quota: check `account_usage` first (a pihouse tool, not part of the agent-link MCP). |
-| `inbox` | For a root that cannot be woken (a plain shell), the results and questions waiting for it. |
-
-A worker's final answer reaches its parent as a new message, so no agent waits or polls. CLI:
-`agent-link status | stop | sessions | transcript <agent> | open <harness> | install | uninstall`.
-
-### cmux MCP (cmux only)
-
-Finds and reads agent sessions, arranges cmux and drives its browser.
-
-| Area | Tools |
-| --- | --- |
-| Agent sessions | `list_agent_sessions`, `read_agent_transcript`: every agent session on this machine (cmux's records joined with the agent-link journal), and its transcript read from disk, never from the screen |
-| Tabs and panes | `list_surfaces`, `new_surface`, `close_surface`, `focus_surface`, `rename_tab`, `move_surface`, `reorder_surface`, `surface_health`, `new_pane`, `resize_pane`, `swap_pane` |
-| Workspaces | `list_workspaces`, `current_workspace`, `select_workspace`, `new_workspace`, `rename_workspace`, `close_workspace` (shows the contents first, asks before closing running agents), `tree`, `identify` |
-| Browser | `browser`: navigate, snapshot, click, type, wait, tabs, console, screenshots |
+Legacy migration is explicit, not an automatic startup action. It creates a verified `migration-backup/` before importing. Snapshot and restore guidance, API limitations, and retention boundaries are in [Workflow self-learning](docs/self-learning.md). The detailed contracts are in [module specifications](docs/specs/self-learning/common.md); historical rationale remains in [ADR-001](docs/decisions/ADR-001-workflow-memory.md), with current decisions in [ADR-002](docs/decisions/ADR-002-self-learning.md).
 
 ## Architecture
 
+All diagrams use the same legend: blue = code/policy, purple = LLM processing, green = stored data, yellow = human action.
+
+### Communication and ownership
+
 ```mermaid
 flowchart LR
-  you(["you"]) --> pihouse
-  subgraph pihouse["pihouse: pi + 8 extensions"]
-    ext["header · ask_user_question · /workflow"]
-  end
-  pihouse -- "MCP stdio" --> mcp["agent-link MCP<br/>spawn · send · reply · status · cancel · model · inbox"]
-  mcp -- "HTTP over a Unix socket + token" --> hub["hub daemon<br/>one FIFO queue per agent"]
-  hub -- "messaging socket" --> claude["Claude Code"]
-  hub -- "app-server" --> codex["Codex"]
-  hub -- "HTTP server" --> oc["opencode"]
-  hub -- "extension socket" --> piw["pi · pihouse"]
-  hub -- "open, read, keys" --> panes["cmux or tmux panes"]
-  hub --> journal[("~/.agent-link/sessions/*.json")]
-  cmux["cmux MCP"] --> journal
-  cmux --> tr[("transcripts on disk")]
-  ext -- "/workflow report" --> journal
-  ext -- "/workflow report" --> tr
+  classDef code fill:#e8f1ff,stroke:#2864a0
+  classDef llm fill:#f3e8ff,stroke:#7541a6
+  classDef store fill:#e8f5e9,stroke:#398447
+  classDef human fill:#fff2cc,stroke:#a47b00
+  U([Human]):::human --> P[pih / planner]:::code --> H[Per-home agent-link hub]:::code
+  H --> E[Executor pane]:::code --> W[Worker panes]:::llm
+  W -->|result to parent| E
+  H --> J[(Journal: agent identity and lineage)]:::store
+  P -. explicit retrieval .-> M[Separate memory MCP]:::code
+  W -. explicit retrieval .-> M
+  M --> D[(Canonical documents)]:::store
+  M --> O[(SQLite operational state)]:::store
+  M --> F[(Derived FTS5 index)]:::store
+  N[No automatic memory injection]:::code -.-> M
 ```
 
-Every agent runs in its own pane with its native UI, and the hub reaches it by that harness's own interface, not by
-typing into the screen. Nobody waits: `spawn` and `send` return at once, and a worker's final answer arrives in its
-parent as a new message. The journal records every agent (parent, task, pane, session id, transcript path), so the
-cmux MCP and `/workflow report` work after the hub or the agents are gone.
+### Evidence to learning
 
-| Package | What it is |
-| --- | --- |
-| [`packages/pihouse`](packages/pihouse) | the `pih` command: launcher, setup, extensions (header, status bar, compact tool calls, `ask_user_question`, `/workflow`, the Claude Code login) |
-| [`packages/agent-link-core`](packages/agent-link-core) | hub daemon, one adapter per harness (claude, codex, opencode, pi), MCP server, guard, session journal |
-| [`packages/agent-link`](packages/agent-link) | the composed hub and the `agent-link` CLI (`status`, `sessions`, `transcript`, `install`) |
-| [`packages/agent-link-cmux`](packages/agent-link-cmux) | cmux pane backend and its MCP entry |
-| [`packages/agent-link-tmux`](packages/agent-link-tmux) | tmux pane backend and its MCP entry |
-| [`packages/agent-transcripts`](packages/agent-transcripts) | one reader for Claude, Codex, opencode, pi and pihouse transcripts: messages, tokens, time, tools, skills |
-| [`packages/cmux-mcp`](packages/cmux-mcp) | the cmux MCP server: agent sessions, tabs, panes, workspaces, browser |
-| [`skills`](skills) | the four skill groups and their catalog |
+```mermaid
+flowchart TB
+  classDef code fill:#e8f1ff,stroke:#2864a0
+  classDef llm fill:#f3e8ff,stroke:#7541a6
+  classDef store fill:#e8f5e9,stroke:#398447
+  classDef human fill:#fff2cc,stroke:#a47b00
+  H([Human manually starts digest / self-learning]):::human --> C[Code captures revision + metrics]:::code
+  C --> R[(Captured report and transcript copies)]:::store
+  R --> D{{Isolated digest agent}}:::llm --> V[Code validates identity and durable bytes]:::code
+  V -->|invalid, unstable, or live| Q[Retain and queue / defer]:::code
+  V -->|valid and quiescent| G[(Canonical digest + receipt)]:::store --> X[Remove owned captured copies only]:::code
+  G --> S[Candidate scan]:::code --> B{{Separate bounded batch review agent}}:::llm
+  B --> P[(Review and proposals)]:::store --> A([Human approves pinned change]):::human
+  A --> I[Allowlisted apply + validation]:::code --> K[(Approved knowledge + receipt)]:::store
+```
 
-How the pieces fit, in detail: [docs/architecture.md](docs/architecture.md).
+### On-demand memory
 
-## FAQ
+```mermaid
+flowchart LR
+  classDef code fill:#e8f1ff,stroke:#2864a0
+  classDef llm fill:#f3e8ff,stroke:#7541a6
+  classDef store fill:#e8f5e9,stroke:#398447
+  classDef human fill:#fff2cc,stroke:#a47b00
+  H([Human asks]):::human --> A[/workflow ask/]:::code --> M[Scoped memory MCP]:::code
+  E[Everyday agent]:::llm -. explicit search / get .-> M
+  M --> F[(Rebuildable FTS5)]:::store
+  M --> D[(Canonical digests, reviews, approved records)]:::store
+  M --> O[(Operational SQLite: metrics, decisions, receipts)]:::store
+  M --> C[Bounded sourced context]:::code --> E
+  N[No startup injection]:::code -.-> E
+```
 
-**Why pi, and not a harness of its own?**
-pi is small and its extension API gives pi-house everything it needs (tools, commands, messages that start a turn, the
-header) without a fork. pi-house pins pi and keeps its own config in `~/.pihouse/agent`, so your plain pi stays as it is.
+### Quota-aware routing
 
-**Do I need cmux?**
-You need cmux or tmux, because every agent gets its own pane. cmux adds the cmux MCP (sessions, layout, browser); with
-tmux you get agent-link alone. cmux is macOS only; on Linux and on Windows (through WSL2) use tmux.
+```mermaid
+flowchart LR
+  classDef code fill:#e8f1ff,stroke:#2864a0
+  classDef llm fill:#f3e8ff,stroke:#7541a6
+  classDef store fill:#e8f5e9,stroke:#398447
+  classDef human fill:#fff2cc,stroke:#a47b00
+  H([Human / plan authority]):::human --> P[(Explicit authorized profiles)]:::store
+  Q[(Observable quota, auth, capability)]:::store --> R[Select compatible authorized option]:::code
+  P --> R
+  R -->|verified native support| S[Same-harness model switch]:::code --> W[One active writer]:::llm
+  R -->|unknown / unsupported| X[Pause with reason; no silent paid fallback]:::code
+  R -. optional context monitor: recommendation only .-> H
+```
 
-**Does it run on Windows?**
-Through WSL2, with tmux: `install.ps1` sets it up (see [Windows](#windows)). Natively, no: the hub and the adapters use
-Unix sockets, and the guard reads shell commands, not PowerShell.
+The [architecture guide](docs/architecture.md) explains responsibility boundaries and limitations. These diagrams distinguish code decisions, model work, persistent state, and human authorization; they do not claim universal quota visibility or cross-harness fenced continuation.
 
-**What does it cost?**
-What each harness spends with its provider. pi-house calls no model on its own; `/workflow report` shows the tokens per
-role, harness, agent and message. opencode defaults to a free model.
+## Skills
 
-**What does pi-house keep, and where?**
-`~/.pihouse`: pi-house's pi config, sessions and `/workflow` reports. `~/.agent-link`: the hub socket and token, the event log,
-the session journal and the profiles. Nothing leaves your machine except what each harness sends to its own provider.
+Skills are plain Markdown organized in pre-build, build, post-build and extras groups. The [catalog](skills/README.md) lists them and their sources. The planner recommends development skills; selected skills are carried into the plan and executor tasks.
 
-**Is it safe to leave several agents running?**
-A guard checks shell commands: workers are blocked from `rm -rf`, `sudo`, `git push`, `git reset --hard` and similar,
-and your own session is asked first. It is not a sandbox, and it only sees shell commands.
+## MCP servers
 
-**Can workers launch their own workers?**
-Yes: the executor is one. A worker talks only with its parent and its own workers.
+**agent-link** launches and messages workers through native harness interfaces and journals their lineage. **cmux MCP** (cmux only) finds sessions and arranges panes/workspaces. Both use stdio; see [Architecture](docs/architecture.md) for package responsibilities and tool details.
+
+## Windows
+
+pi-house requires Unix sockets and a Unix shell. On Windows, use WSL2 with tmux:
+
+```powershell
+irm https://raw.githubusercontent.com/Jero110/pi-house/main/install.ps1 | iex
+```
+
+Open Ubuntu, then run `pih` from a project under the Linux home directory. See the [installer](install.ps1) for options.
 
 ## Develop
 
@@ -430,25 +164,17 @@ Yes: the executor is one. A worker talks only with its parent and its own worker
 git clone https://github.com/Jero110/pi-house && cd pi-house
 npm install --ignore-scripts
 npm run check && npm test
-bash install.sh            # installs from this checkout
 ```
 
-Rules for contributors (and their agents) are in [AGENTS.md](AGENTS.md) and [CONTRIBUTING.md](CONTRIBUTING.md). Tests never
-call real models. Security reports go through [SECURITY.md](SECURITY.md); everyone is expected to follow the
-[Code of Conduct](CODE_OF_CONDUCT.md).
+See [AGENTS.md](AGENTS.md), [CONTRIBUTING.md](CONTRIBUTING.md), and [SECURITY.md](SECURITY.md).
 
 ## Uninstall
 
 ```bash
-pih uninstall             # removes the MCP registrations and the pihouse profile
+pih uninstall
 rm -rf ~/.pihouse ~/.local/bin/pih ~/.local/bin/pihouse ~/.local/bin/agent-link
 ```
 
-## Credits
-
-pi-house stands on [pi](https://github.com/earendil-works/pi) by Earendil Works and ships skills by Addy Osmani, Matt
-Pocock and others (see [skills/LICENSES](skills/LICENSES/README.md)). It started as Faro.
-
 ## License
 
-MIT. Third-party skills under [skills/LICENSES](skills/LICENSES/README.md) keep their own licenses.
+MIT. Third-party skills retain their licenses; see [skills/LICENSES](skills/LICENSES/README.md).
