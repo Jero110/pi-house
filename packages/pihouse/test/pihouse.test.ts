@@ -18,7 +18,7 @@ import { Journal, readJournal, type SessionRecord } from "agent-link-core";
 import type { TranscriptRoots } from "agent-transcripts";
 import { answersText, pickedSkillsText, showPicker, skillPickerQuestion } from "../src/extensions/ask.ts";
 import { headerLines } from "../src/extensions/brand.ts";
-import { askContext, latestReport, reviewFileName, reviewInstructions } from "../src/extensions/workflow.ts";
+import { askContext, latestReport, reviewFileName } from "../src/extensions/workflow.ts";
 import { liveKeeper, piCommand, runKeeper, runPihouse, whereRuns, withSkillsDir } from "../src/launcher.ts";
 import { EXTENSIONS, PI_CLI, pihousePaths, SKILL_GROUP_DIRS, SKILLS_DIR, THEME } from "../src/paths.ts";
 import {
@@ -567,13 +567,6 @@ test("a run is rebuilt from the journal and transcripts: roles, plan, tasks, ski
 	);
 	assert.match(report, /### t1-list \(worker, claude\)/);
 	assert.match(report, /\| 1 \| 10:00:50 \| 30s \| 5 \| 7 \| 0 \| Read \| test-driven-development \|/);
-	assert.match(reviewInstructions("/r.md", run.plan), /up to 5 recommendations/);
-	assert.match(reviewInstructions("/r.md", run.plan), /saved at \/r\.md/);
-	assert.match(reviewInstructions("/r.md", run.plan), /Your whole answer is the path of the report/);
-	assert.match(
-		reviewInstructions("/r.md", run.plan),
-		/Append both to \/r\.md as "## Summary" and "## Recommendations"/,
-	);
 });
 
 test("/workflow ask retrieves bounded architecture snippets and marks unsupported facts unknown", async (t) => {

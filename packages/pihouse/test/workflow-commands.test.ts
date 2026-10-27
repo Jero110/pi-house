@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import workflow, { proposalCommand } from "../src/extensions/workflow.ts";
+import workflow, { proposalCommand, USAGE, WORKFLOW_COMMANDS } from "../src/extensions/workflow.ts";
 import { migrateLegacyStore } from "../src/workflow/migration.ts";
 import { approveProposal, createProposal, getProposal } from "../src/workflow/proposals.ts";
 import { openOperationalStore } from "../src/workflow/storage.ts";
@@ -313,4 +313,63 @@ test("the proposal commands never start a model turn", async () => {
 		else process.env.PIHOUSE_HOME = previous;
 		f.cleanup();
 	}
+});
+
+test("help and completion list exactly the commands in the table, and nothing removed or unbuilt", () => {
+	const { pi, commands } = fakePi();
+	workflow(pi);
+	const spec = commands.get("workflow") as
+		| { description?: string; getArgumentCompletions?: (prefix: string) => { value: string }[] | null }
+		| undefined;
+	const values = spec?.getArgumentCompletions?.("")?.map((c) => c.value) ?? [];
+	assert.deepEqual(
+		values,
+		WORKFLOW_COMMANDS.flatMap((c) => [...c.completions]),
+	);
+	for (const c of WORKFLOW_COMMANDS) assert.ok(USAGE.includes(`/workflow ${c.usage}`), `usage lists ${c.usage}`);
+	const shown = `${USAGE} ${String(spec?.description)} ${values.join(" ")}`;
+	for (const word of ["review", "digest", "self-learning", "keeper"]) {
+		assert.doesNotMatch(shown, new RegExp(word), `${word} is not offered`);
+	}
+});
+
+test("removed and not-yet-built invocations start nothing and say what to use instead", async (t) => {
+	const home = mkdtempSync(join(tmpdir(), "workflow-removed-"));
+	const previous = process.env.PIHOUSE_HOME;
+	process.env.PIHOUSE_HOME = home;
+	t.after(() => {
+		if (previous === undefined) delete process.env.PIHOUSE_HOME;
+		else process.env.PIHOUSE_HOME = previous;
+		rmSync(home, { recursive: true, force: true });
+	});
+	const { pi, commands, sent, users } = fakePi();
+	const notes: { text: string; level: string }[] = [];
+	const ctx = {
+		ui: { notify: (text: string, level: string) => notes.push({ text, level }) },
+		sessionManager: { getSessionId: () => "s", getSessionFile: () => undefined },
+		cwd: home,
+	} as unknown as ExtensionCommandContext;
+	workflow(pi);
+	const handler = commands.get("workflow")?.handler;
+	const keeper = commands.get("keeper")?.handler;
+	assert.ok(handler && keeper);
+
+	await handler("review --last", ctx);
+	await handler("digest", ctx);
+	await handler("self-learning", ctx);
+	await keeper("summarize", ctx);
+	await keeper("", ctx);
+
+	assert.deepEqual(
+		notes.map((n) => n.level),
+		["warning", "warning", "warning", "warning", "warning"],
+	);
+	assert.match(notes[0]?.text ?? "", /\/workflow review was removed.*\/workflow report/);
+	assert.match(notes[1]?.text ?? "", /^usage: \/workflow/);
+	assert.match(notes[2]?.text ?? "", /^usage: \/workflow/);
+	assert.match(notes[3]?.text ?? "", /The keeper was retired.*\/workflow proposals/);
+	assert.match(notes[4]?.text ?? "", /The keeper was retired/);
+	assert.equal(sent.length, 0, "no sendMessage");
+	assert.equal(users.length, 0, "no sendUserMessage");
+	assert.equal(existsSync(join(home, "reports")), false, "no report is written");
 });

@@ -1,12 +1,12 @@
-// /workflow review, save and ask: pihouse looking at its own workflow.
+// /workflow report, save, ask and the proposals: pihouse looking at its own workflow.
 //
+// report: rebuilds the last run from disk (agent-link journal + transcripts) and writes a code-only report of what ran,
+//   with which skills, tokens and time by role, harness, agent and message. No model turn.
 // save: flags the current session's run and captures it into the workflow memory now. Planner and executor sessions
 //   are flagged and captured by default (see workflow/capture.ts).
-// review: rebuilds the last run from disk (agent-link journal + transcripts), writes a report of what ran,
-//   with which skills, tokens and time by role, harness, agent and message, then asks the model in this
-//   session for recommendations grounded in that report.
 // ask: gives the model the architecture, the skills catalog and what is installed here, then the question.
-// The report is computed, never guessed: the model only writes the recommendations and the answers.
+// proposals, approve, reject: the proposal store (see proposalCommand). No model turn.
+// `/workflow review` (model-written recommendations) was removed; the report is what remains, and it is computed.
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -22,14 +22,10 @@ import {
 	capTitle,
 	captureRun,
 	isFlagged,
-	lastFlagged,
 	localRecord,
 	ownRoot,
 	projectOf,
 	readFlags,
-	recordReview,
-	storedReport,
-	sweepFlagged,
 } from "../workflow/capture.ts";
 import { LIMITS, type MemoryStore, openMemory } from "../workflow/memory.ts";
 import { ACTIVE_MARKER } from "../workflow/migration.ts";
@@ -53,24 +49,32 @@ import { sessionTitle } from "./brand.ts";
 
 export const MESSAGE_TYPE = "pihouse-workflow";
 
-export const USAGE =
-	"usage: /workflow report [--last] | /workflow review [--last] | /workflow save [reason] | /workflow ask <question> | /workflow proposals | /workflow approve <id> | /workflow reject <id> [reason]";
+/**
+ * The public `/workflow` commands. The usage line and the completions both read this table, so they cannot list
+ * different commands. Problem: each listed the commands by hand, and the review command stayed in one after it was
+ * removed from the other. Solution: one table; the handler's dispatch below handles the same words.
+ */
+export const WORKFLOW_COMMANDS = [
+	{ usage: "report [--last]", completions: ["report", "report --last"] },
+	{ usage: "save [reason]", completions: ["save "] },
+	{ usage: "ask <question>", completions: ["ask "] },
+	{ usage: "proposals", completions: ["proposals"] },
+	{ usage: "approve <id>", completions: ["approve "] },
+	{ usage: "reject <id> [reason]", completions: ["reject "] },
+] as const;
 
-export function reviewInstructions(reportFile: string, plan: string | undefined): string {
-	return [
-		`The report of the last run is saved at ${reportFile}: all the metrics, computed from the transcripts. It is not in this`,
-		"message on purpose. Read the file, then:",
-		"1. Summarize in 3-5 lines what this run did: tasks, which agent and harness did each, the skills used.",
-		"   When you give token counts, use new tokens; name cache reads separately, as context read again, never as one sum.",
-		"2. Write up to 5 recommendations to improve the workflow. Look at: skills that helped, were assigned but not loaded, or were missing;",
-		"   task split and parallelism; harness and model per task; brief quality (questions back, retries, tool errors); time and token waste",
-		"   (slow answers, large inputs, idle waits). For each: the change, the evidence (agent name and message #), and where to change it",
-		`   (a skill under ${SKILLS_DIR}, the plan${plan ? ` ${plan}` : ""}, or the executor's choices).`,
-		`3. Append both to ${reportFile} as "## Summary" and "## Recommendations", below the metrics. Edit no other file.`,
-		"4. Print nothing else: do not repeat the metrics, the summary or the recommendations. Your whole answer is the path of the report.",
-		`The skills catalog is ${join(SKILLS_DIR, "catalog.json")}; read a skill or the plan when a recommendation depends on it.`,
-	].join("\n");
-}
+export const USAGE = `usage: ${WORKFLOW_COMMANDS.map((c) => `/workflow ${c.usage}`).join(" | ")}`;
+
+/**
+ * Removed invocations say what replaces them and start nothing: no alias, no model turn.
+ * Problem: a removed command that stays silent looks like it ran; one that falls through to a model reads the old words
+ * as a new request. Example: `/keeper summarize` must not start a digest that no longer exists. Solution: a concise
+ * warning that names the replacement.
+ */
+const REVIEW_REMOVED =
+	"/workflow review was removed. Use /workflow report [--last] for what a run did. Learning from runs (/workflow self-learning) is not available yet.";
+const KEEPER_RETIRED =
+	"The keeper was retired. Use /workflow proposals, /workflow approve <id> and /workflow reject <id> [reason]; /workflow report shows what a run did.";
 
 export const ARCHITECTURE = `## How pihouse works
 
@@ -85,7 +89,7 @@ export const ARCHITECTURE = `## How pihouse works
   asking only through ask_user_question; the user picks the build skills; grilling stress-tests the idea. On approval the
   planner launches an executor (a pihouse agent in its own pane) that runs the plan end to end with no questions to the user,
   dispatching tasks to workers on the harness and model the plan names. Post-build and Extras skills are manual.
-- /workflow review reads a run back from the journal and transcripts: tokens, time per message, skills per agent.`;
+- /workflow report reads a run back from the journal and transcripts: tokens, time per message, skills per agent.`;
 
 /**
  * The newest report in `dir`, by when it was written.
@@ -288,60 +292,6 @@ function report(args: string[], ctx: ExtensionCommandContext): void {
 	ctx.ui.notify(`Workflow report: ${file}`, "info");
 }
 
-async function review(pi: ExtensionAPI, args: string[], ctx: ExtensionCommandContext): Promise<void> {
-	const records = readJournal(hubPaths(agentLinkHome()).sessions);
-	const store = openMemory(pihousePaths().memory);
-	let runId: string;
-	let report: string;
-	let plan: string | undefined;
-	let slug: string;
-	if (args.includes("--last")) {
-		sweepFlagged(records, store);
-		const last = lastFlagged(records, store);
-		if (!last) {
-			ctx.ui.notify("No flagged run yet. Run the planner, or use /workflow save in a session.", "warning");
-			return;
-		}
-		if ("stored" in last) {
-			const stored = storedReport(store, last.stored);
-			if (!stored) {
-				ctx.ui.notify(`The captured run ${last.stored} has no report.`, "warning");
-				return;
-			}
-			runId = last.stored;
-			({ report, plan } = stored);
-			slug = last.stored;
-		} else {
-			const run = buildRun(records, last.root);
-			({ report, plan, slug } = { report: renderReport(run), plan: run.plan, slug: slugOf(run) });
-			runId = last.root.id;
-		}
-	} else {
-		const root = pickRoot(records, {
-			sessionId: ctx.sessionManager.getSessionId(),
-			agent: process.env.AGENT_LINK_AGENT,
-		});
-		if (!root) {
-			ctx.ui.notify("No workflow run found in the agent-link journal yet. Run the planner first.", "warning");
-			return;
-		}
-		const run = buildRun(records, root);
-		({ report, plan, slug } = { report: renderReport(run), plan: run.plan, slug: slugOf(run) });
-		runId = root.id;
-	}
-	const paths = pihousePaths();
-	mkdirSync(paths.reports, { recursive: true });
-	const file = join(paths.reports, reviewFileName(slug, new Date()));
-	writeFileSync(file, `${report}\n`);
-	recordReview(store, runId, file);
-	// Problem: the report went into the session as a message, which filled the screen and spent tokens the model did not
-	// need. Solution: the report stays in its file; the model gets only the path and writes its recommendations there.
-	pi.sendMessage(
-		{ customType: MESSAGE_TYPE, content: reviewInstructions(file, plan), display: false },
-		{ triggerTurn: true },
-	);
-}
-
 export type ProposalCommand = "proposals" | "approve" | "reject";
 
 export interface ProposalDeps {
@@ -529,15 +479,16 @@ export default function workflow(pi: ExtensionAPI): void {
 		}
 	});
 	pi.registerCommand("workflow", {
-		description: "review: what the last run did and how to improve it · ask <question>: about your workflow and skills",
+		description:
+			"report [--last]: what the last run did · save [reason] · ask <question> · proposals · approve <id> · reject <id> [reason]",
 		getArgumentCompletions: (prefix) =>
-			["report", "report --last", "review", "review --last", "save ", "ask ", "proposals", "approve ", "reject "]
+			WORKFLOW_COMMANDS.flatMap((c) => [...c.completions])
 				.filter((c) => c.startsWith(prefix))
 				.map((c) => ({ value: c, label: c })),
 		handler: async (raw, ctx) => {
 			const [sub, ...rest] = raw.trim().split(/\s+/);
 			if (sub === "report") return report(rest, ctx);
-			if (sub === "review") return review(pi, rest, ctx);
+			if (sub === "review") return ctx.ui.notify(REVIEW_REMOVED, "warning");
 			if (sub === "save") return save(pi, rest.join(" ").trim(), ctx);
 			if (sub === "proposals" || sub === "approve" || sub === "reject") return runProposalCommand(sub, rest, ctx);
 			if (sub === "ask" && rest.join(" ").trim()) {
@@ -547,7 +498,12 @@ export default function workflow(pi: ExtensionAPI): void {
 				);
 				return;
 			}
-			ctx.ui.notify(USAGE, "info");
+			ctx.ui.notify(USAGE, "warning");
 		},
+	});
+	// The keeper's command is gone with its extension; this stub only says so, so `/keeper` cannot reach a model.
+	pi.registerCommand("keeper", {
+		description: "retired: /workflow proposals, approve and reject",
+		handler: async (_raw, ctx) => ctx.ui.notify(KEEPER_RETIRED, "warning"),
 	});
 }
