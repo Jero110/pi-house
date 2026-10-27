@@ -185,6 +185,14 @@ export const CLAUDE_CODE_RATE_LIMITS = join(homedir(), ".claude", "rate-limits")
  * passed the number no longer describes the account, so a past window gives nothing.
  */
 export function readClaudeCodeUsage(dir: string, now: number): UsageWindow[] {
+	return readClaudeCodeObservation(dir, now)?.windows ?? [];
+}
+
+/** The same windows as readClaudeCodeUsage, with when the file was written (its mtime), for a freshness check. */
+export function readClaudeCodeObservation(
+	dir: string,
+	now: number,
+): { windows: UsageWindow[]; observedAt: number } | undefined {
 	let newest: { file: string; mtime: number } | undefined;
 	try {
 		for (const name of readdirSync(dir)) {
@@ -193,7 +201,7 @@ export function readClaudeCodeUsage(dir: string, now: number): UsageWindow[] {
 			const mtime = statSync(file).mtimeMs;
 			if (!newest || mtime > newest.mtime) newest = { file, mtime };
 		}
-		if (!newest) return [];
+		if (!newest) return undefined;
 		const data = JSON.parse(readFileSync(newest.file, "utf8")) as Record<string, unknown>;
 		const window = (label: string, source: unknown): UsageWindow[] => {
 			const o = (typeof source === "object" && source !== null ? source : {}) as Record<string, unknown>;
@@ -202,8 +210,8 @@ export function readClaudeCodeUsage(dir: string, now: number): UsageWindow[] {
 			if (used === undefined || (resetsAt !== undefined && resetsAt <= now)) return [];
 			return [{ label, percent: clampPercent(used), ...(resetsAt ? { resetsAt } : {}) }];
 		};
-		return [...window("5h", data), ...window("7d", data.seven_day)];
+		return { windows: [...window("5h", data), ...window("7d", data.seven_day)], observedAt: newest.mtime };
 	} catch {
-		return [];
+		return undefined;
 	}
 }
