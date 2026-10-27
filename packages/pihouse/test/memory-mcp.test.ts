@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
 import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import test from "node:test";
+import { launchEnv } from "../src/memory-mcp.ts";
+import { projectOf } from "../src/workflow/capture.ts";
 import { reconcileSearch, type SearchDocument } from "../src/workflow/search.ts";
 import { openOperationalStore } from "../src/workflow/storage.ts";
 
@@ -19,8 +21,9 @@ interface Client {
 	close(): Promise<void>;
 }
 
-function connect(env: Record<string, string>): Client {
+function connect(env: Record<string, string>, cwd?: string): Client {
 	const child: ChildProcessWithoutNullStreams = spawn(process.execPath, [ENTRY], {
+		cwd,
 		env: { PATH: process.env.PATH ?? "", ...env },
 	});
 	let err = "";
@@ -69,7 +72,8 @@ interface Fixture {
 }
 
 function fixture(): Fixture {
-	const dir = mkdtempSync(join(tmpdir(), "pihouse-memory-mcp-"));
+	// Real path: the git top-level a harness folder resolves to is never a symlink.
+	const dir = realpathSync(mkdtempSync(join(tmpdir(), "pihouse-memory-mcp-")));
 	const home = join(dir, "memory");
 	const project = join(dir, "alpha");
 	mkdirSync(project);
@@ -283,8 +287,7 @@ test("fails closed without trusted launch metadata", async () => {
 		(fx) => ({ ...fx.env, AGENT_LINK_AGENT: "" }),
 		(fx) => ({ ...fx.env, AGENT_LINK_AGENT: "../evil" }),
 		(fx) => ({ ...fx.env, PIHOUSE_MEMORY_PROJECT: "relative/path" }),
-		(fx) => ({ ...fx.env, PIHOUSE_MEMORY_PROJECT: "" }),
-		(fx) => ({ ...fx.env, PIHOUSE_MEMORY_HOME: "" }),
+		(fx) => ({ ...fx.env, PIHOUSE_MEMORY_HOME: join(fx.dir, "nowhere") }),
 	];
 	for (const env of cases) {
 		await withServer(async (client) => {
@@ -295,5 +298,46 @@ test("fails closed without trusted launch metadata", async () => {
 			assert.doesNotMatch(search.text, /mine|shared/);
 			assert.equal((await client.call("memory_get", { id: "shared" })).isError, true);
 		}, env);
+	}
+});
+
+test("launchEnv derives project and store from the launch folder, never from a preset that is absent", () => {
+	const dir = mkdtempSync(join(tmpdir(), "pihouse-launch-env-"));
+	try {
+		const env = launchEnv({ PIHOUSE_HOME: join(dir, "ph"), AGENT_LINK_AGENT: "w" }, dir);
+		assert.equal(env.PIHOUSE_MEMORY_PROJECT, projectOf(dir).project);
+		assert.equal(env.PIHOUSE_MEMORY_HOME, join(dir, "ph", "memory"));
+		// A value the launcher already set is trusted and kept.
+		const preset = launchEnv({ PIHOUSE_MEMORY_PROJECT: "/p", PIHOUSE_MEMORY_HOME: "/h" }, dir);
+		assert.equal(preset.PIHOUSE_MEMORY_PROJECT, "/p");
+		assert.equal(preset.PIHOUSE_MEMORY_HOME, "/h");
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("the entry started by a harness scopes itself from its folder and PIHOUSE_HOME", async () => {
+	const fx = fixture();
+	try {
+		const home = join(fx.dir, "ph");
+		mkdirSync(home);
+		renameSync(fx.home, join(home, "memory"));
+		const client = connect({ PIHOUSE_HOME: home, AGENT_LINK_AGENT: "worker-1" }, fx.project);
+		try {
+			const found = await client.call("memory_search", { query: "Zanzibar", project: join(fx.dir, "beta") });
+			const ids = (found.data.hits as { id: string }[]).map((h) => h.id);
+			assert.ok(ids.includes("mine"));
+			assert.ok(!ids.includes("secret"));
+		} finally {
+			await client.close();
+		}
+		const anonymous = connect({ PIHOUSE_HOME: home }, fx.project);
+		try {
+			assert.equal((await anonymous.call("memory_search", { query: "Zanzibar" })).isError, true);
+		} finally {
+			await anonymous.close();
+		}
+	} finally {
+		rmSync(fx.dir, { recursive: true, force: true });
 	}
 });
