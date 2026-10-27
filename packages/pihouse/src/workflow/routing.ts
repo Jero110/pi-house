@@ -20,7 +20,8 @@ export type Observation = {
 	observedAt: number;
 	source: string;
 	resetAt?: number;
-	windows?: { name: string; remaining?: number; used?: number }[];
+	/** The usage windows the observation saw, the same shape for every source (see account-usage.ts). */
+	windows?: { label: string; percent: number; resetsAt?: number }[];
 };
 export type Failure = { provider: string; account: string; kind: "exhausted" | "auth" | "network" | "rate" };
 type Resolution = { candidate: Candidate; credentials: boolean; modelAvailable: boolean };
@@ -117,8 +118,14 @@ export function route(input: Input): RoutingResult {
 type PollEntry = { failures: number; nextAt: number; pending?: Promise<PollResult> };
 export type PollState = Map<string, PollEntry>;
 export type PollResult = { status: "observed"; observation: Observation } | { status: "backoff"; retryAt: number };
+/** Accounts kept in one PollState. The oldest idle entry goes first, so the state cannot grow with every account seen. */
+export const MAX_POLL_ACCOUNTS = 64;
 
 // The caller shares this state across consumers; no model call is made by this policy.
+// Problem: every caller that asked for usage hit the endpoint again, and a refused login was retried on each call.
+// Example: two status bar redraws in the same second must share one request; a 401 must wait out its backoff.
+// Solution: one in-flight request per account (its promise is shared), and a backoff that grows only on failures.
+// An exhausted answer is a successful answer: the endpoint worked, the account is simply full.
 export function pollAccount(
 	state: PollState,
 	provider: string,
@@ -127,7 +134,12 @@ export function pollAccount(
 	fetch: () => Promise<Observation>,
 ): Promise<PollResult> {
 	const key = JSON.stringify([provider, account]);
-	const entry = state.get(key) ?? { failures: 0, nextAt: 0 };
+	const known = state.get(key);
+	if (!known && state.size >= MAX_POLL_ACCOUNTS) {
+		const idle = [...state.keys()].find((k) => !state.get(k)?.pending);
+		if (idle !== undefined) state.delete(idle);
+	}
+	const entry = known ?? { failures: 0, nextAt: 0 };
 	state.set(key, entry);
 	if (entry.pending) return entry.pending;
 	if (now < entry.nextAt) return Promise.resolve({ status: "backoff", retryAt: entry.nextAt });
@@ -140,7 +152,8 @@ export function pollAccount(
 		})
 		.catch((): Observation => ({ provider, account, state: "network", observedAt: now, source: "poll-error" }))
 		.then((observation) => {
-			entry.failures = observation.state === "available" ? 0 : Math.min(entry.failures + 1, 6);
+			const answered = observation.state === "available" || observation.state === "exhausted";
+			entry.failures = answered ? 0 : Math.min(entry.failures + 1, 6);
 			entry.nextAt = now + (entry.failures ? Math.min(60_000, 1_000 * 2 ** (entry.failures - 1)) : 1_000);
 			delete entry.pending;
 			return { status: "observed", observation } as const;

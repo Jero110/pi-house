@@ -1,6 +1,14 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { type Candidate, type Observation, type Profile, pollAccount, route } from "../src/workflow/routing.ts";
+import {
+	type Candidate,
+	MAX_POLL_ACCOUNTS,
+	type Observation,
+	type PollState,
+	type Profile,
+	pollAccount,
+	route,
+} from "../src/workflow/routing.ts";
 
 const terra: Candidate = {
 	harness: "pihouse",
@@ -115,4 +123,29 @@ test("quota belongs to the account, so providers behind one login share its obse
 		maxAgeMs: 20,
 	});
 	assert.equal(result.status, "selected");
+});
+
+test("an exhausted answer is a successful poll, so the next one stays on schedule", async () => {
+	// Problem: an exhausted account answered correctly, but counted as a failure, so each poll waited twice as long.
+	// Example: a spent ChatGPT account polled at 100, 1100 and 2100 ms waited until 3100 ms for the third poll.
+	const state: PollState = new Map();
+	let calls = 0;
+	const exhausted = () => {
+		calls++;
+		return Promise.resolve(available("a", "exhausted", 100));
+	};
+	await pollAccount(state, "provider", "a", 100, exhausted);
+	await pollAccount(state, "provider", "a", 1100, exhausted);
+	assert.equal((await pollAccount(state, "provider", "a", 2100, exhausted)).status, "observed");
+	assert.equal(calls, 3);
+});
+
+test("the shared poll state keeps a bounded number of accounts", async () => {
+	const state: PollState = new Map();
+	for (let i = 0; i < MAX_POLL_ACCOUNTS + 10; i++) {
+		await pollAccount(state, "provider", `acct-${i}`, 100, () =>
+			Promise.resolve(available(`acct-${i}`, "available", 100)),
+		);
+	}
+	assert.ok(state.size <= MAX_POLL_ACCOUNTS);
 });
