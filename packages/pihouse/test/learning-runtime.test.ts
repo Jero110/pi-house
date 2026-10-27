@@ -255,6 +255,7 @@ test("worker children are spawned under a dedicated pull coordinator and never r
 	let coordinator = "";
 	let exited = false;
 	let cancelled = false;
+	let spawnedOutput = "";
 	const client = {
 		register: async (body: { pull: boolean }) => {
 			assert.equal(body.pull, true);
@@ -265,6 +266,7 @@ test("worker children are spawned under a dedicated pull coordinator and never r
 			spawnFrom = body.from;
 			const outputPath = body.task.match(/Output: ([^\n]+)/)?.[1];
 			assert.ok(outputPath);
+			spawnedOutput = outputPath;
 			writeFileSync(
 				outputPath,
 				JSON.stringify({ schemaVersion: 1, runId: "run-one", project: "fixture", revision: "run-one.r1", sections }),
@@ -332,6 +334,7 @@ test("worker children are spawned under a dedicated pull coordinator and never r
 			cwd: root,
 		});
 		assert.equal(result.status, "success");
+		assert.ok(!existsSync(spawnedOutput));
 		assert.equal(spawnFrom, coordinator);
 		assert.equal(cancelled, true);
 		assert.equal(exited, true);
