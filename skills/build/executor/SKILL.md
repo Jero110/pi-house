@@ -27,6 +27,8 @@ the format; you rarely need it.
 
 ## Step 1: Dispatch
 
+If a fixed task names exact authorized alternative harnesses/models (including explicit run-level authorization), use one of those alternatives after a quota failure. Do not treat that fallback authority as permission to change task scope or choose an unlisted model. Never use paid fallback without authorization, and never retry indefinitely: record the quota failure and fallback attempt in the ledger.
+
 - **Look for safe parallel work by default**, at startup and after each result; do not wait for the user to request it.
   A task is ready only when every task that blocks it is done and verified. Dispatch ready tasks in plan order,
   running independent ready tasks concurrently. Before dispatch, check both prerequisite independence and file

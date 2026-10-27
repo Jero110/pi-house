@@ -894,8 +894,12 @@ export class Hub {
 	}): Promise<ModelResult> {
 		const target = this.registry.get(req.to);
 		if (!target) return { error: this.registry.unknownAgent(req.to, req.from) };
-		if (!this.registry.isAncestor(req.from, req.to))
+		const self = req.from === req.to;
+		if (!self && !this.registry.isAncestor(req.from, req.to))
 			return { error: `${req.from} cannot change the model of ${req.to}: only its parent (or an agent above it) can.` };
+		// A self-switch must never cancel or replay the tool request that asked for it.
+		if (self && (req.retry || req.interrupt))
+			return { error: "a self-switch cannot use retry or interrupt: the current request must finish exactly once" };
 		// Problem: retry sends the failed message again, and interrupt continues the interrupted task; both at once repeat
 		// work. Example: a quota failure retried and continued together runs the same task twice. Solution: refused.
 		if (req.retry && req.interrupt)

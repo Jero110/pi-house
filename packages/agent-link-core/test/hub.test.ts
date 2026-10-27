@@ -1028,8 +1028,10 @@ test("model: only an agent above the worker may change its model; the record and
 			previous: "claude-bridge/claude-haiku-5-5",
 		});
 		assert.deepEqual(fake.modelRequests, ["anthropic/claude-sonnet-5-5"]);
-		assert.equal(t.running.hub.registry.get("sub")?.record.model, "anthropic/claude-sonnet-5-5");
-		assert.equal(journalOf(t, "sub")?.model, "anthropic/claude-sonnet-5-5");
+		const self = await t.client.model({ from: "sub", to: "sub", model: "openai/gpt-5.5" });
+		assert.deepEqual(self, { status: "applied", model: "openai/gpt-5.5", previous: "anthropic/claude-sonnet-5-5" });
+		assert.equal(t.running.hub.registry.get("sub")?.record.model, "openai/gpt-5.5");
+		assert.equal(journalOf(t, "sub")?.model, "openai/gpt-5.5");
 	}));
 
 test("model: only an exact <provider>/<id> reaches the adapter", () =>

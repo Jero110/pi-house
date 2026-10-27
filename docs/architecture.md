@@ -84,6 +84,8 @@ flowchart LR
   R -. optional context monitor: recommendation only .-> H
 ```
 
+The MCP `model` tool permits self-targeting or ancestor-to-worker changes using exact configured model IDs. Busy self-switches wait for the next native idle boundary and cannot use `retry` or `interrupt`, avoiding cancellation or replay of their own request. Registered pull roots without adapter-side `setModel` refuse safely.
+
 The router does not imply universal quota visibility. Switching is limited to verified native same-harness support; it does not promise cross-harness fenced continuation. Optional context monitoring is opt-in and requires manual application; no automatic model switch occurs.
 
 ## Workflow implementation
