@@ -1,13 +1,13 @@
 # Traceable Books RAG: Shared Specification
 
 **Date:** 2026-10-27
-**Status:** Approved by the user on 2026-10-27; implementation requires separate plan approval.
+**Status:** Approved by the user on 2026-10-27; amended to PDF-only first-version scope by explicit user authorization on 2026-10-27. Execution follows the approved plan; T2 awaits executor verification of T1.
 **Map:** [CAPABILITY-MAP-books-rag.md](../../../CAPABILITY-MAP-books-rag.md)
 **Observed branch:** `feature/lightweight-self-learning` (contains unrelated work; do not change or stage it).
 
 ## Objective and binding decisions
 
-Provide a personal library of approximately 20 EPUB/PDF books to pihouse and other MCP clients. Retrieve only relevant passages, preserve verifiable source locations, and attach associated figures on demand. If retrieved evidence does not support the question, the agent must say it did not find support in the library rather than fabricate an answer or citation. This is a statement about the search, not proof that the entire library lacks the answer.
+Provide a personal library of approximately 20 PDF books to pihouse and other MCP clients. EPUB ingestion, archive/spine locators and assets are deferred by explicit user authorization (2026-10-27); reject non-PDF input explicitly. This format reduction changes no other privacy, provenance, extraction, rendering, retrieval, safety or evaluation gate. Retrieve only relevant passages, preserve verifiable source locations, and attach associated figures on demand. If retrieved evidence does not support the question, the agent must say it did not find support in the library rather than fabricate an answer or citation. This is a statement about the search, not proof that the entire library lacks the answer.
 
 - Extraction, chunking, and embeddings run locally without generative-model calls. They consume local compute, storage, and possibly model-download bandwidth, not the agent's inference quota.
 - Pinecone stores vectors and minimal indexing metadata. Full originals, extracted text, captions, and figures stay local.
@@ -45,7 +45,7 @@ This establishes feasibility, not validated automatic extraction accuracy, table
 
 ## Tech stack and code style
 
-Follow `AGENTS.md`: Node >=24, erasable TypeScript, top-level imports, no `any`, no changes to pi internals. New dependencies require documented necessity, exact version pins, and installation with `npm install --ignore-scripts`. Prefer existing MCP transport facilities such as `serveMcp` in `packages/cmux-mcp/src/server.ts`. Dependency choices remain research work, not approved dependencies.
+Follow `AGENTS.md`: erasable TypeScript, top-level imports, no `any`, no changes to pi internals. The repository baseline is Node >=24; the optional books package uses the T1-verified Node >=26.11.1 prerequisite without changing ordinary pihouse startup. New dependencies require documented necessity, exact version pins, and installation with `npm install --ignore-scripts`. Reuse the publicly exported `serveMcp` transport through `cmux-mcp`, whose implementation is `packages/cmux-mcp/src/server.ts`. T1 selected `pdfjs-dist@6.4.299` and `@napi-rs/canvas@1.0.13` for the PDF-only version; see the research/ADR and plan. Install worktree dependencies only in the authorized implementation task after executor verification, not as an implicit startup action.
 
 Example style (a contract illustration, not implemented code):
 
@@ -78,7 +78,7 @@ There is no build command. Existing test discovery is `packages/*/test/*.test.ts
 
 ## Testing strategy and quality gates
 
-Use Node's test runner, synthetic EPUB/PDF/layout fixtures, fake local embedding endpoints, and fake Pinecone HTTP responses. Automated tests must never use real APIs, paid tokens, or a real user's book. Keep retrieval evaluation deterministic with fixed vectors or recorded synthetic fixtures, clearly separated from an optional operator-run real-model benchmark.
+Use Node's test runner, synthetic PDF/layout fixtures and explicit unsupported-format cases (including EPUB), fake local embedding endpoints, and fake Pinecone HTTP responses. Automated tests must never use real APIs, paid tokens, or a real user's book. Keep retrieval evaluation deterministic with fixed vectors or recorded synthetic fixtures, clearly separated from an optional operator-run real-model benchmark.
 
 Mandatory success conditions:
 
@@ -98,4 +98,4 @@ Mandatory success conditions:
 
 ## Approval gate
 
-Approve the shared contract and all three module specifications before creating the execution plan. Planning must happen in a later turn than specification creation. No execution handoff is authorized by specification approval alone.
+The shared contract and all three module specifications were approved before the execution plan. The user's explicit PDF-only amendment defers EPUB without changing the remaining approved gates. T1 research and executor verification still precede T2; this amendment alone authorizes no implementation-task bypass.

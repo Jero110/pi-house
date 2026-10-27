@@ -4,13 +4,17 @@
 
 ## Goal
 
-Give pihouse, Claude Code, and Codex access to a personal library of approximately 20 EPUB/PDF books through an optional local stdio MCP server. A query retrieves bounded text evidence with verified source/version/location; relevant figures are available separately on demand. Example: a question about chunking retrieves the relevant subsection and links Figure 3-6 on PDF page 172 of the supplied book, rather than sending the whole chapter. An unrelated question receives an honest lack-of-support result, not an invented citation.
+Give pihouse, Claude Code, and Codex access to a personal library of approximately 20 PDF books through an optional local stdio MCP server. A query retrieves bounded text evidence with verified source/version/location; relevant figures are available separately on demand. Example: a question about chunking retrieves the relevant subsection and links Figure 3-6 on PDF page 172 of the supplied book, rather than sending the whole chapter. An unrelated question receives an honest lack-of-support result, not an invented citation.
 
 Approved specifications: `/Users/jeronimo.deli/Desktop/other/Vs/pi-house/CAPABILITY-MAP-books-rag.md` and `/Users/jeronimo.deli/Desktop/other/Vs/pi-house/docs/specs/books-rag/{common,book-corpus,book-retrieval,books-mcp}.md`. Read all five before execution. Specification approval does not itself authorize executing this plan.
 
+## Authorized scope amendment (2026-10-27)
+
+The user explicitly permitted a PDF-only first version ("si queires slo para pdfs"). EPUB ingestion, archive/spine locators and assets are deferred; non-PDF inputs must fail explicitly. This supersedes only the earlier EPUB-format requirements, not privacy, provenance, source hashes, structural extraction, figure rendering, path/asset safety, bounded retrieval or evaluation requirements. T1 may select the verified PDF.js/canvas pair and conservative fail-closed input budget. No EPUB dependency research or T2 implementation follows this amendment; executor verification of T1 is still required.
+
 ## Decisions (binding)
 
-- Approximately 20 EPUB/PDF books; text retrieval, not visual similarity search.
+- Approximately 20 PDF books for this version; EPUB deferred by explicit user authorization. Text retrieval, not visual similarity search.
 - Extract, chunk, embed, and retain originals/text/figures locally without an ingestion LLM. Pinecone receives vectors and minimal metadata only, never passages, captions, image bytes, local paths, or secrets.
 - The existing client agent may translate/reformulate queries into English; no separate translation model or server-side generation.
 - Retrieved text and requested images may reach the agent provider. This privacy boundary must be explicit.
@@ -30,7 +34,7 @@ Approved specifications: `/Users/jeronimo.deli/Desktop/other/Vs/pi-house/CAPABIL
 - Proposed CLI entry: `node packages/books-rag/src/cli.ts`; MCP entry: `node packages/books-rag/src/mcp.ts`. Store data in an explicitly configured local directory; do not write a user's corpus into the repository.
 - Use Node SQLite/FTS where available for local manifest/text/lexical lookup; reuse the repository's approach to SQLite warnings/capability detection without coupling to workflow tables. T1 verified Node 26.11.1 / SQLite 3.54.0 / FTS5 without warnings on macOS arm64 only; do not assume warning-free Node 24 compatibility. The public `cmux-mcp` root export includes `serveMcp` and image/text types; do not import an unexported transport subpath. Investigate portability before choosing a workaround.
 - A local embedding runtime is an operator prerequisite. T1 identified Ollama 0.40.11 with local nomic-embed-text:v1.5 F16, manifest SHA-256 `0a109f422b47e3a30ba2b10eca18548e944e8a23073ee3f3e947efcf3c45e59f`, 768 dimensions, task prefixes and `truncate:false` as a candidate, not a live-validated installation. Use the Ollama tag's 2048-token ceiling, not the upstream card's extended 8192 context. T1 retry supports conservative input budgeting over the entire prefixed input: `max(UTF8_BYTES(s), UTF8_BYTES(LOWERCASE(NFD(s)))) + 32 <= 2048`, with `truncate:false` as runtime fail-closed gate. This is an upper-bound budget, not actual measured tokens; installed GGUF tokenizer equivalence remains an optional live check, not a standalone implementation blocker. Do not download model weights automatically. Missing runtime/model prerequisites remain pending live checks, not reasons for cloud fallback.
-- Necessary extraction dependencies must be researched, exact-pinned, installable with `npm install --ignore-scripts`, and justified in the ADR. Prefer at most two new production npm packages; no pip/Homebrew/system installs or dependency install scripts. Stop and report if reliable extraction/rendering requires a materially broader toolchain. Dependency feasibility is not predetermined by this plan. T1 retry corrects the initial interpretation: two direct packages are a preference, not a binding cap; a justified third exact-pinned pure-JS dependency is authorized and not automatically a materially broader toolchain. `pdfjs-dist@6.4.299` plus `@napi-rs/canvas@1.0.13` passed synthetic PDF text/vector rendering on Node 26.11.1. Third-package `epub@2.1.1` passed script-free installation and synthetic root/spine/raw-XHTML access, but its public API did not establish bounded archive/XML handling. Existing AWS XML parsing loses XHTML mixed-content fidelity; other inspected EPUB libraries also leave security-boundary gaps. Public zip.js 2.24.0 plus fast-xml-parser 5.11.2 alongside the PDF pair is a four-direct-package alternative, source-inspected only, with executor clarification requested before assuming authorization. T1 remains BLOCKED on complete bounded extraction feasibility, not package-count preference or missing optional live tokenizer evidence. See `docs/books-rag-research.md` and `docs/decisions/ADR-003-books-rag.md`; no complete extraction dependency choice is adopted and T2 must not start.
+- Extraction dependencies: select `pdfjs-dist@6.4.299` (Apache-2.0), `@napi-rs/canvas@1.0.13` (MIT plus bundled notices), installed with `npm install --ignore-scripts --save-exact --workspace packages/books-rag pdfjs-dist@6.4.299 @napi-rs/canvas@1.0.13` only after T2 registers the workspace. The verified stack uses PDF.js `legacy/build/pdf.mjs` and the exact canvas platform binary; no EPUB/archive/XML package is selected. Two direct packages are a preference, not a hard cap; no broader system toolchain, pip/Homebrew or install scripts are authorized. Node 26.11.1 / macOS arm64 is the verified runtime/platform; use a books-only `node >=26.11.1` prerequisite with explicit rejection of unsupported runtimes, leaving ordinary pihouse startup unchanged. T1 PDF-only feasibility and token-budget research pass, subject to executor verification and the remaining implementation gates. See `docs/books-rag-research.md` and `docs/decisions/ADR-003-books-rag.md`.
 - Start with structural 400–800-token chunks; compare at least one smaller or larger configuration under the same evaluation conditions. A measurable choice replaces this initial assumption.
 - Use a local lexical index combined with hosted dense candidates if evidence supports it. Pinecone sparse+dense support is not assumed available/free. The word hybrid describes local corpus plus hosted vectors unless explicitly qualified.
 - Use pihouse defaults for workers because the user selected no models. Sequential execution limits quota use and avoids file conflicts. A separate final reviewer checks the evidence without repeating all implementation work.
@@ -74,7 +78,7 @@ Research in T1 is the first external investigation; no setup that spends money o
 Objective: verify an extraction/rendering stack, local embedding runtime/model, and Pinecone REST configuration against official documentation and source behavior before implementation. Inspect repository SQLite/MCP helpers and current external docs; do not assume earlier recommendations are compatible.
 
 Acceptance:
-- [ ] Document exact package/runtime/model versions, official source URLs and access dates, licenses, supported PDF/EPUB/layout/rendering behavior, tokenizer limits, image encoding, platform prerequisites, and install-script constraints.
+- [ ] Document exact package/runtime/model versions, official source URLs and access dates, licenses, supported PDF/layout/rendering behavior and explicit rejection of deferred EPUB, tokenizer limits, image encoding, platform prerequisites, and install-script constraints.
 - [ ] Verify Pinecone endpoint/index/namespace compatibility, embedding dimension, current pricing/free restrictions, metadata exclusions, bounded operations, and no automatic resource creation. No real upload is necessary for research.
 - [ ] Choose concrete dependencies and commands within assumptions; record failure modes and alternatives. Stop if no feasible stack meets the approved boundaries.
 - [ ] ADR follows existing Status/Date/Context/Decision/Alternatives considered/Consequences format and explains why this feature does not reverse workflow-memory's separate no-hosted-search choice.
@@ -117,17 +121,17 @@ Acceptance:
 Validation: `node --test packages/books-rag/test/store.test.ts packages/books-rag/test/locations.test.ts && npm run check && npm test`.
 Stop when: validation passes, or report BLOCKED after two failed attempts.
 
-### T4: Extract PDF/EPUB structure and preserve quality diagnostics
+### T4: Extract PDF structure and preserve quality diagnostics
 
 **Agent:** books-builder · **Harness:** pihouse · **Model:** default · **Blocked by:** T3 · **Parallel with:** none
 **Skills:** spec-driven-development, documentation-and-adrs, git-workflow-and-versioning
-**Files:** `packages/books-rag/src/pdf.ts`, `packages/books-rag/src/epub.ts`, `packages/books-rag/src/ingest.ts`, `packages/books-rag/test/extraction.test.ts`, `packages/books-rag/test/fixtures.ts`
+**Files:** `packages/books-rag/src/pdf.ts`, `packages/books-rag/src/ingest.ts`, `packages/books-rag/test/extraction.test.ts`, `packages/books-rag/test/fixtures.ts`
 
 Objective: extract structural blocks and source locations without a generative model, keeping uncertainty visible.
 
 Acceptance:
-- [ ] PDF headings/outlines are validated against content and positions, including mid-page boundaries and cross-page sections; EPUB spine/anchors have stable fallback locators.
-- [ ] Synthetic two-page code, table headers/units/cells, metadata conflicts, scanned/mixed pages, malformed archives, encrypted/unsupported inputs, and unsafe assets have preservation or explicit diagnostic paths.
+- [ ] PDF headings/outlines are validated against content and positions, including mid-page boundaries and cross-page sections; immutable source spans retain physical PDF page/coordinates.
+- [ ] Synthetic two-page code, table headers/units/cells, metadata conflicts, scanned/mixed pages, malformed/encrypted/unsupported PDFs, unsupported formats including EPUB, unsafe paths/symlinks and oversized/unsafe PDF assets have preservation or explicit bounded diagnostic paths. Do not execute PDF actions/scripts, follow external asset URLs or trust embedded attachments.
 - [ ] Do not fix code by guessed string replacements. Preserve a source rendering fallback for uncertain code/tables.
 - [ ] Neither originals nor extracted commercial text are added to git or sent to remote services.
 
@@ -277,6 +281,7 @@ Current baseline before plan execution: specification-only changes passed `npm r
 
 ## Out of scope
 
+- EPUB ingestion, archive/spine/anchor locators and EPUB assets: deferred by explicit user authorization for the PDF-only first version. Reject rather than partially ingest unsupported formats; this does not remove PDF path/asset safety checks.
 - OCR/scanned-book pipeline, vision embeddings, visual similarity queries, LLM summaries/descriptions during ingestion, GraphRAG, RAPTOR, or a wiki rewrite.
 - Hosted original text/figures, remote multiuser access/authentication, cross-machine corpus synchronization, and integrated PDF/EPUB viewing.
 - Automatic Pinecone account/resource creation, plan upgrades, payments, cloud embedding fallback, and large model downloads.

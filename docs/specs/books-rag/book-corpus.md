@@ -1,11 +1,11 @@
 # Spec: book-corpus
 
-**Status:** Approved by the user on 2026-10-27. **Depends on:** none.
+**Status:** Approved by the user on 2026-10-27; PDF-only first-version amendment explicitly authorized on 2026-10-27. **Depends on:** none.
 Shared objective, stack, commands, style, testing rules, assumptions, and boundaries: [common.md](common.md).
 
 ## Objective
 
-Turn locally supplied EPUB and text-bearing PDF books into a versioned local corpus whose text, structural chunks, and associated figures resolve back to exact original locations without generative-model ingestion.
+Turn locally supplied text-bearing PDF books into a versioned local corpus whose text, structural chunks, and associated figures resolve back to exact original locations without generative-model ingestion. EPUB ingestion, archive/spine locators and assets are deferred by explicit user authorization; unsupported formats, including EPUB, must fail explicitly. All other approved gates remain unchanged.
 
 ## Structure and boundary contract
 
@@ -15,9 +15,9 @@ A source record contains stable book identity, immutable version identity, SHA-2
 
 A passage contains immutable ID, source version/hash, full heading path, parent-section ID, original extracted text, separately normalized searchable text, mapping back to source blocks, ordered source spans, neighbor IDs, figure references, and quality flags. Configuration changes produce a distinct index version. A section starts/ends at structural boundaries, including mid-page positions; outline destinations are hints to validate against content, not unquestionable boundaries.
 
-PDF spans record one-based physical PDF page number and block coordinates with coordinate-system definition. Printed labels are separate and only populated when reliably available. EPUB spans record archive document/spine identity, heading anchor when available, and a stable text/block locator; no synthetic PDF-style pagination.
+PDF spans record one-based physical PDF page number and block coordinates with coordinate-system definition. Printed labels are separate and only populated when reliably available. No EPUB locator implementation is required in this version; future EPUB support would require separate archive document/spine/anchor identity, never fabricated PDF pagination.
 
-Figure records contain source version, figure identifier, exact caption when present, page/location, optional confident crop bounds, linking evidence, and whether output is a crop or full-page fallback. Keep them local. Support lazy rendering so ingestion need not store a raster of every page. Figure references crossing page boundaries must resolve. If an EPUB image cannot be safely decoded, return an explicit unsupported-asset result rather than executing active content.
+Figure records contain source version, figure identifier, exact caption when present, page/location, optional confident crop bounds, linking evidence, and whether output is a crop or full-page fallback. Keep them local. Support lazy rendering so ingestion need not store a raster of every page. Figure references crossing page boundaries must resolve. If a PDF-associated asset cannot be safely decoded, return an explicit unsupported-asset result rather than executing active content. Never execute PDF JavaScript/actions, follow external asset URLs, or extract embedded attachments as trusted inputs.
 
 ## Chunking behavior
 
@@ -38,7 +38,7 @@ Figure records contain source version, figure identifier, exact caption when pre
 - [ ] Metadata with one file author and two title-page authors retains both evidence sources and a visible conflict/override, not a fabricated silent merge.
 - [ ] Synthetic tables retain header/row relationships or receive a quality flag. No claim of table fidelity is made solely from plain text extraction.
 - [ ] Unchanged imports are idempotent; changed files/extractors/configuration create new versions, and old versions cannot be mistaken for current ones.
-- [ ] Scanned pages, encrypted/unsupported PDFs, malformed EPUB archives, unsafe archive paths, oversized assets, and extraction failures have explicit bounded diagnostics.
+- [ ] Scanned pages, encrypted/unsupported/malformed PDFs, unsupported formats including EPUB, unsafe paths/symlinks, oversized assets, and extraction failures have explicit bounded diagnostics. Keep path/asset safety despite deferring archive ingestion.
 - [ ] Source modification/missing originals is detected on evidence resolution, including lazy figure reads; no stale citation is returned as verified.
 - [ ] Tests and git contain only synthetic or suitably licensed fixtures, never the supplied commercial PDF.
 

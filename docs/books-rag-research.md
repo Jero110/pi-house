@@ -2,9 +2,15 @@
 
 Date/access date for every external source below: **2026-10-27**. Scope: T1 only; no RAG package, production parser, index, model download, cloud corpus upload, or client registration was implemented.
 
-## Result: BLOCKED on the complete extraction stack
+## Current result: PASS for user-authorized PDF-only T1 research
 
-PDF extraction and raster rendering are feasible on the current runtime. A **complete, bounded PDF plus EPUB stack is not established in this investigation**. Do not start T2 based on the PDF trial alone. This is a bounded investigation result, not proof that no suitable stack exists. The corrected T1 retry treats two production packages as a preference, not a binding cap: the user explicitly authorized investigation/justification of a modest third exact-pinned pure-JS dependency with `--ignore-scripts`, no system tools, and credible bounded security. Package count alone is not the remaining blocker.
+On 2026-10-27 the user explicitly permitted a PDF-only first version ("si queires slo para pdfs"). **EPUB ingestion, locators and assets are deferred**, not validated or silently supported. This supersedes the historical EPUB blocker only; privacy, provenance, bounded extraction/rendering, retrieval and all evaluation gates remain unchanged. Capability map, all four specifications and plan reflect that authorization. Stop before T2 for executor verification.
+
+Select **`pdfjs-dist@6.4.299` + `@napi-rs/canvas@1.0.13`**, verified script-free on **Node 26.11.1 / macOS arm64**. Use the legacy PDF.js build, local assets and loading-task cleanup. Require Node >=26.11.1 for the books package only; other platforms require prebuilt-binary smoke checks, not source builds. Conservative full-prefixed-input UTF-8/normalization budgeting with a 32-token allowance and `truncate:false` is source-backed below. Real model/Pinecone/operator prerequisites remain pending, not synthetic success. No worktree dependencies or T2 implementation were added.
+
+## Historical initial format investigation (EPUB now deferred)
+
+The initial PDF+EPUB scope did not establish a complete bounded EPUB adapter. Two packages were a preference, not a binding cap; a third was investigated in the corrected retry. No bespoke complex archive/XML parser or AGPL package was adopted. The history below explains the earlier stops; it is not a current PDF-only blocker or authorization for more EPUB research.
 
 Two candidate approaches were investigated:
 
@@ -58,7 +64,7 @@ Render a verified crop only when bounds are known; otherwise explicitly label fu
 
 Use PNG (`image/png`) initially, base64 in MCP image content; JPEG (`image/jpeg`) is a possible explicit fallback for large raster pages. Enforce longest side <=1600 and **base64 ASCII payload <=2 MiB** (a conservative interpretation of encoded-byte budget, so binary must be <=1,572,864 bytes), one image/call. Re-encode/downscale with a finite retry count; fail explicitly if still oversized. Mark reduced resolution and illegibility. MCP transport accepts arbitrary MIME strings, but manual client image support is not yet tested.
 
-## EPUB requirements that remain unresolved
+## Deferred EPUB requirements (historical research; not this version)
 
 W3C EPUB OCF specifies ZIP packaging, `META-INF/container.xml`, a package document, a manifest and ordered spine; XHTML headings/IDs and document paths provide citations, not rendered page numbers. A conforming stack must resolve these identities without executing JavaScript, CSS imports, active SVG or remote links. Image decoding can use the already tested canvas for supported bounded raster formats; unsupported assets, particularly active/external SVG, must return an explicit unsupported-asset diagnostic.
 
@@ -103,9 +109,9 @@ Vectors/minimal metadata leave the machine for AWS us-east-1 in this Starter can
 
 `packages/pihouse/src/workflow/storage.ts` imports `DatabaseSync` at top level, sets private directory modes, foreign keys/busy timeout, uses `BEGIN IMMEDIATE`/rollback and probes FTS5 with a disposable virtual table. Reuse these conventions, **not its operational tables or store opener**. FTS is derived; source/version truth stays separate. On Node 26.11.1 no SQLite warning was observed. Node docs call SQLite release-candidate since 25.7; do not promise the same warning behavior on Node 24. Do not globally suppress warnings. A books-only runtime minimum can be raised without changing ordinary pihouse startup, but requires implementation tests.
 
-Pending core gate: a complete extraction/rendering stack with credible bounded EPUB archive/XML handling and required identities. Package count alone is not this gate. Conservative source-backed input budgeting is documented below; live tokenizer equivalence remains optional. Pending optional operator/live gates: installed runtime and model identity/limits, real embedding ranking/thresholds, Pinecone eligibility/remaining allowances/visibility, real supplied-PDF extraction, client image behavior. No provided commercial book was read or uploaded during T1. Existing specification observations are historical evidence, not new T1 measurements. No T2–T11 acceptance is satisfied by these trials.
+Current T1 PDF-only feasibility gate passes on the measured platform; all implementation accuracy/security gates remain for later tasks. EPUB archive/XML identities are deferred by user authorization, no longer a core gate. Conservative source-backed input budgeting is documented below; live tokenizer equivalence remains optional. Pending optional operator/live gates: installed runtime and model identity/limits, real embedding ranking/thresholds, Pinecone eligibility/remaining allowances/visibility, real supplied-PDF extraction, client image behavior. No provided commercial book was read or uploaded during T1. Existing specification observations are historical evidence, not new T1 measurements. No T2–T11 acceptance is satisfied by these trials.
 
-## Corrected T1 research retry 1/1
+## Corrected T1 research retry 1/1 (before PDF-only authorization)
 
 ### Existing dependencies and third-package candidates
 
@@ -149,9 +155,23 @@ Proof for the inspected tokenizer family: cleaning/deleting controls cannot add 
 
 Installed GGUF tokenizer equivalence/Unicode tables remain an **optional live compatibility check**, not a core feasibility blocker. `truncate:false` is the runtime fail-closed gate if the installed runtime counts differently or has a smaller context. Never retry overflow by truncating, never accept dropped input, and retain explicit context errors. Model dimension/digest/configuration checks remain mandatory before real use, without requiring a weight download during research.
 
-### Retry outcome
+### Historical retry outcome and superseding authorization
 
-The two-package cap rationale is withdrawn and conservative token budgeting is feasible without a live model. The remaining BLOCKED result concerns **the unestablished credible bounded EPUB archive/XML adapter**, not the mere presence of a third dependency, missing optional live services, or a universal impossibility claim. Three high-level EPUB candidates have source/API gaps at the security boundary; the clean four-dependency alternative awaits explicit executor authority/verification. No bespoke ZIP/XML parser, AGPL adoption, T2 implementation, system installation, cloud upload or model weight download occurred. This is the single corrected T1 attempt; stop for executor verification.
+The corrected retry withdrew the hard-two-package rationale and established conservative token budgeting without a live model. It stopped BLOCKED on the unestablished bounded EPUB archive/XML adapter, not package-count preference or missing optional live services. **That format blocker is now superseded by explicit user authorization for PDF-only scope**, not by a claim that EPUB parsing became safe. The three-/four-package EPUB candidates are deferred; there is no outstanding current-version request to adopt them or continue their research.
+
+### PDF-only scope amendment and selected commands
+
+The amendment changes format scope only. Reject EPUB/other non-PDF input explicitly, including misleading extensions or unsupported signatures. Preserve PDF path/symlink checks, source-hash verification, bounded byte/page/pixel/time limits, encrypted/malformed/scanned diagnostics, code/table preservation warnings, exact page/block provenance, structural section handling, explicit figure links and lazy crop/full-page rendering. Never follow PDF external resources, execute scripts/actions or treat embedded attachments as trusted sources. The selected PDF stack still requires these implementation guards and tests; the one-page smoke is not a security or fidelity certification. Initial adapter limits: input <=128 MiB, <=2000 PDF pages, one page processed/rendered at a time, <=4 MiB extracted text/page, <=30 seconds/page and <=30 minutes/import, cancellation plus loading-task cleanup on failure. Reject non-finite/oversized geometry before allocating the bounded <=1600-side output canvas. PDF.js exposes `stopAtErrors` and `maxImageSize`; configure `maxImageSize:16000000` and expose skipped/unsupported images as incomplete coverage. Its OffscreenCanvas/canvas-area controls are not a process-memory sandbox on Node; do not claim those options hard-limit arbitrary decoder memory. Hostile PDF decoding needs an isolated cancellable worker/process and explicit resource diagnostics in implementation; input/image/page limits alone do not prove immunity to malformed files. All these are planned adapter gates, not claims that the trial enforced them.
+
+After T2 creates the workspace (not during T1), the selected installation command is:
+
+```sh
+npm install --ignore-scripts --save-exact --workspace packages/books-rag pdfjs-dist@6.4.299 @napi-rs/canvas@1.0.13
+```
+
+Use a books-only Node >=26.11.1 prerequisite; ordinary pihouse startup remains unchanged. Read/render local supplied bytes, use `pdfjs-dist/legacy/build/pdf.mjs` and the exact canvas binary, configure any needed CMaps/fonts/WASM assets from the installed package, and dispose `PDFDocumentLoadingTask`. Missing assets/binaries or unsupported runtime are explicit errors, never system installs or remote fetch fallback. No EPUB, XML, ZIP or AGPL production dependency is selected.
+
+The mandatory >=20 answerable / >=10 unrelated synthetic queries, recall@5 >=0.90, all citation/figure cases, unrelated-query abstention, >=2 chunk configurations, real supplied-PDF local inspection where available, source-version integrity and MCP byte/character/image limits are **unchanged**. Optional real-model/tokenizer/Pinecone/client checks remain separately pending. No book uploads, model weights, resource creation/payment, original-checkout edits, T2 work or ledger edits occurred. T1 is PASS for the amended PDF-only research contract, pending executor verification; stop here.
 
 ## Official sources
 

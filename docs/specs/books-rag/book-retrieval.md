@@ -1,11 +1,11 @@
 # Spec: book-retrieval
 
-**Status:** Approved by the user on 2026-10-27. **Depends on:** book-corpus.
+**Status:** Approved by the user on 2026-10-27; PDF-only first-version amendment explicitly authorized on 2026-10-27. **Depends on:** book-corpus.
 Shared objective, stack, commands, style, testing rules, assumptions, and boundaries: [common.md](common.md).
 
 ## Objective
 
-Retrieve compact, source-resolvable evidence from approximately 20 books through local embeddings and a configured Pinecone index. Precision, abstention, and provenance matter more than sophisticated architecture.
+Retrieve compact, source-resolvable evidence from approximately 20 PDF books through local embeddings and a configured Pinecone index. EPUB is deferred by explicit user authorization; it is not indexed in this version. Precision, abstention, provenance, privacy, bounded operations and all approved evaluation gates remain unchanged.
 
 ## Structure and boundary contract
 

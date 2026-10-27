@@ -1,11 +1,11 @@
 # Spec: books-mcp
 
-**Status:** Approved by the user on 2026-10-27. **Depends on:** book-retrieval.
+**Status:** Approved by the user on 2026-10-27; PDF-only first-version amendment explicitly authorized on 2026-10-27. **Depends on:** book-retrieval.
 Shared objective, stack, commands, style, testing rules, assumptions, and boundaries: [common.md](common.md).
 
 ## Objective
 
-Allow pihouse, Claude Code, Codex, and other compatible MCP clients to search a private local book library, read bounded passages, and request relevant figures, with traceable citations and explicit lack-of-evidence behavior.
+Allow pihouse, Claude Code, Codex, and other compatible MCP clients to search a private local PDF book library, read bounded passages, and request relevant figures, with traceable citations and explicit lack-of-evidence behavior. EPUB is deferred by explicit user authorization, not claimed supported. Tool names, output budgets, path/asset safety, privacy, citation discipline and all remaining approved quality/evaluation gates are unchanged.
 
 ## Structure and interface
 
@@ -24,7 +24,7 @@ Initial output budgets: search <= 5 excerpts of <= 800 characters each; read def
 
 The figure tool is separate so a text match does not force expensive vision context. Image-capable MCP clients may receive image content; incompatible clients receive source location and an explicit unsupported-image indication. Do not silently discard the figure or provide model-generated descriptions as originals.
 
-Tool arguments never permit arbitrary filesystem paths, commands, or remote URLs. IDs resolve only within the configured private library. Validate unknown/invalid IDs and guard against path traversal and unsafe archive assets. Serving this trusted local stdio process is not a security sandbox; authentication for a hosted server is out of scope.
+Tool arguments never permit arbitrary filesystem paths, commands, or remote URLs. IDs resolve only within the configured private library. Validate unknown/invalid IDs and guard against path traversal, unsafe symlinks, unsafe PDF assets and embedded attachments. Deferring EPUB does not relax these checks. Serving this trusted local stdio process is not a security sandbox; authentication for a hosted server is out of scope.
 
 ## Agent behavior contract
 
