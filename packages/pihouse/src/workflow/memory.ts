@@ -369,6 +369,15 @@ export function openMemory(dir: string, opts: { now?: () => Date } = {}): Memory
 				"pending",
 			);
 			if (existing) entry.createdAt = existing.createdAt;
+			// Problem: a reopened run replaces its own entry, which would erase the batch that processed it. Example: the
+			// review that read revision one would no longer be traceable from the index. Solution: keep that history and
+			// the supersession link; only the status and the new revision's evidence change.
+			if (existing && options?.reopen) {
+				entry.lastUsedAt = existing.lastUsedAt;
+				if (existing.batchId !== undefined) entry.batchId = existing.batchId;
+				if (existing.processedAt !== undefined) entry.processedAt = existing.processedAt;
+				if (existing.supersededBy !== undefined) entry.supersededBy = existing.supersededBy;
+			}
 			upsert(entry);
 			return "written";
 		},

@@ -124,6 +124,10 @@ test("a processed run is written again only as an explicit reopened revision, wh
 		store.pending().map((e) => e.id),
 		["run:r1"],
 	);
+	// The reopened entry keeps the batch that processed the earlier revision.
+	const reopened = store.readIndex().find((e) => e.id === "run:r1");
+	assert.equal(reopened?.batchId, "b1");
+	assert.ok(reopened?.processedAt);
 });
 
 test("digests are written, read back, capped and indexed", () => {
