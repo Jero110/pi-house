@@ -26,6 +26,8 @@ import type {
 	VersionId,
 } from "./contracts.ts";
 import { assertSourceIdentity, defineFigure, definePassage, defineSource } from "./contracts.ts";
+import type { FigureAsset } from "./figures.ts";
+import { validateFigureAsset } from "./figures.ts";
 import { assertId, assertOutsideCheckout, CorpusError, safePath, sha256, verifiedSourceBytes } from "./locations.ts";
 
 const schemaVersion = 1;
@@ -43,6 +45,7 @@ export interface CorpusImport {
 	readonly indexConfigurationHash: Sha256;
 	readonly passages: readonly Passage[];
 	readonly figures: readonly Figure[];
+	readonly figureAssets?: readonly FigureAsset[];
 }
 
 function canonical(value: unknown): string {
@@ -145,7 +148,7 @@ export class CorpusStore {
 		}
 	}
 
-	private change<T>(work: (db: DatabaseSync) => T): T {
+	private change<T>(work: (db: DatabaseSync) => T, verifyPublication?: () => void): T {
 		this.assertFiles();
 		const lock = join(this.directory, ".writer.lock");
 		let lockFd: number;
@@ -178,6 +181,7 @@ export class CorpusStore {
 			}
 			this.options.beforePublish?.();
 			this.assertFiles();
+			verifyPublication?.();
 			renameSync(temporary, this.databasePath);
 			return result;
 		} finally {
@@ -256,27 +260,44 @@ export class CorpusStore {
 				if (!figures.some((figure) => figure.id === link.figureId))
 					throw new CorpusError("identity_mismatch", "Missing linked figure");
 		}
-		const payload = canonical({ source, indexConfigurationHash: input.indexConfigurationHash, passages, figures });
-		return this.change((db) => {
-			const previous = db.prepare("SELECT payload FROM versions WHERE id=?").get(source.versionId);
-			if (previous) {
-				if (previous.payload !== payload)
-					throw new CorpusError("immutable_conflict", "Immutable version already contains different records");
-				return { source, imported: false };
-			}
-			// IDs are globally unique inside a library, even when supplied by a caller.
-			for (const row of db.prepare("SELECT payload FROM versions").all()) {
-				const old = this.decode(text(row.payload));
-				if ([...old.passages, ...old.figures].some((record) => ids.has(record.id)))
-					throw new CorpusError("identity_mismatch", "Record ID reused across versions");
-			}
-			verifiedSourceBytes(source);
-			db.prepare("INSERT INTO versions VALUES (?, ?, ?)").run(source.versionId, source.bookId, payload);
-			db.prepare(
-				"INSERT INTO current_versions VALUES (?, ?) ON CONFLICT(book_id) DO UPDATE SET version_id=excluded.version_id",
-			).run(source.bookId, source.versionId);
-			return { source, imported: true };
+		const figureAssets = input.figureAssets?.map((asset) => validateFigureAsset(asset, source, figures));
+		if (
+			figureAssets &&
+			(figureAssets.length !== figures.length || new Set(figureAssets.map((a) => a.figureId)).size !== figures.length)
+		)
+			throw new CorpusError("identity_mismatch", "Exactly one stored image per figure required");
+		const payload = canonical({
+			source,
+			indexConfigurationHash: input.indexConfigurationHash,
+			passages,
+			figures,
+			...(figureAssets ? { figureAssets } : {}),
 		});
+		return this.change(
+			(db) => {
+				const previous = db.prepare("SELECT payload FROM versions WHERE id=?").get(source.versionId);
+				if (previous) {
+					if (previous.payload !== payload)
+						throw new CorpusError("immutable_conflict", "Immutable version already contains different records");
+					return { source, imported: false };
+				}
+				// IDs are globally unique inside a library, even when supplied by a caller.
+				for (const row of db.prepare("SELECT payload FROM versions").all()) {
+					const old = this.decode(text(row.payload));
+					if ([...old.passages, ...old.figures].some((record) => ids.has(record.id)))
+						throw new CorpusError("identity_mismatch", "Record ID reused across versions");
+				}
+				verifiedSourceBytes(source);
+				db.prepare("INSERT INTO versions VALUES (?, ?, ?)").run(source.versionId, source.bookId, payload);
+				db.prepare(
+					"INSERT INTO current_versions VALUES (?, ?) ON CONFLICT(book_id) DO UPDATE SET version_id=excluded.version_id",
+				).run(source.bookId, source.versionId);
+				return { source, imported: true };
+			},
+			() => {
+				verifiedSourceBytes(source);
+			},
+		);
 	}
 
 	private decode(payload: string): CorpusImport {
@@ -292,6 +313,9 @@ export class CorpusStore {
 			indexConfigurationHash: input.indexConfigurationHash,
 			passages: input.passages.map((p) => definePassage(p, source)),
 			figures: input.figures.map((f) => defineFigure(f, source)),
+			...(input.figureAssets
+				? { figureAssets: input.figureAssets.map((a) => validateFigureAsset(a, source, input.figures)) }
+				: {}),
 		};
 	}
 
@@ -340,8 +364,28 @@ export class CorpusStore {
 		const record = this.resolveVersion(expected);
 		const passage = record.passages.find((item) => item.id === id);
 		if (!passage) throw new CorpusError("identity_mismatch", "Passage is not in this source version");
-		verifiedSourceBytes(record.source);
+		// Hosted-corpus amendment: durable evidence survives deletion, not mutation.
+		// Legacy imports without ingestion assets retain the original-required contract.
+		this.verifyEvidenceSource(record);
 		return passage;
+	}
+
+	private verifyEvidenceSource(record: CorpusImport): void {
+		try {
+			verifiedSourceBytes(record.source);
+		} catch (error) {
+			if (!(error instanceof CorpusError && error.code === "source_missing" && record.figureAssets !== undefined))
+				throw error;
+		}
+	}
+
+	readFigureAsset(expected: SourceIdentity, id: FigureId): FigureAsset {
+		assertId(id, "figure");
+		const record = this.resolveVersion(expected);
+		const asset = record.figureAssets?.find((a) => a.figureId === id);
+		if (!asset) throw new CorpusError("unsupported_asset", "No persisted image for this figure/version");
+		this.verifyEvidenceSource(record);
+		return asset;
 	}
 
 	readFigure(expected: SourceIdentity, id: FigureId): { readonly figure: Figure; readonly bytes: Uint8Array } {

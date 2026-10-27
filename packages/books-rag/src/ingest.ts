@@ -1,3 +1,5 @@
+import type { ChunkOptions } from "./chunks.ts";
+import { chunkPreparedIngest } from "./chunks.ts";
 import type {
 	BlockId,
 	BookId,
@@ -12,6 +14,8 @@ import type {
 	SourceVersion,
 } from "./contracts.ts";
 import { assertPdfLocation, defineSource } from "./contracts.ts";
+import type { FigureAsset } from "./figures.ts";
+import { discoverFigures, renderFigure } from "./figures.ts";
 import { assertId, CorpusError, readLocalPdf, sha256 } from "./locations.ts";
 import type { PdfBlock, PdfExtraction, PdfLimits } from "./pdf.ts";
 import { extractPdf, freezeExtraction, pdfExtractor, pdfLimits } from "./pdf.ts";
@@ -59,6 +63,39 @@ export interface PreparedIngest {
 	readonly extraction: PdfExtraction;
 	readonly blocks: readonly IngestBlock[];
 	readonly sections: readonly IngestSection[];
+}
+
+/** Complete T4 -> T5 boundary: nothing is visible until every bounded image and
+ * chunk has succeeded and the original hash is rechecked at atomic publication.
+ * Chunk settings must be included in the caller's indexConfigurationHash. */
+export async function publishIngest(
+	document: PreparedIngest,
+	store: CorpusStore,
+	options: ChunkOptions = {},
+): Promise<{ readonly source: SourceVersion; readonly imported: boolean }> {
+	const discovered = discoverFigures(document, store);
+	const passages = chunkPreparedIngest(document, store, discovered, options);
+	const figures = discovered.map((figure) => ({
+		...figure,
+		linkingEvidence: passages.flatMap((p) => p.figures.filter((link) => link.figureId === figure.id)),
+	}));
+	const figureAssets: FigureAsset[] = [];
+	const published = store
+		.listVersions(document.source.bookId)
+		.some((source) => source.versionId === document.source.versionId);
+	// Re-importing identical extraction reuses its immutable ingestion images;
+	// never re-render at query time or silently overwrite a stored generation.
+	for (const figure of figures)
+		figureAssets.push(
+			published ? store.readFigureAsset(document.source, figure.id) : await renderFigure(document.source, figure),
+		);
+	return store.import({
+		source: document.source,
+		indexConfigurationHash: document.indexConfigurationHash,
+		passages,
+		figures,
+		figureAssets,
+	});
 }
 
 function field<T>(evidence: readonly MetadataEvidence<T>[]): MetadataField<T> {

@@ -10,6 +10,7 @@ export interface FixturePage {
 	readonly text?: readonly FixtureText[];
 	readonly image?: boolean;
 	readonly oversizedImage?: boolean;
+	readonly noisyImage?: boolean;
 	readonly geometry?: readonly [number, number];
 }
 export interface FixtureOutline {
@@ -64,15 +65,27 @@ export function pdfFixture(options: PdfFixtureOptions): Uint8Array {
 		// A vector diagram is renderable even without a single embedded bitmap.
 		commands += "\nq 0 0 1 RG 20 20 60 30 re S Q\n";
 		let assets = "";
-		if (page.image || page.oversizedImage) {
+		if (page.image || page.oversizedImage || page.noisyImage) {
 			const imageId = reserve();
-			const side = page.oversizedImage ? 50000 : 1;
+			const side = page.oversizedImage ? 50000 : page.noisyImage ? 1600 : 1;
+			let pixels = "abc";
+			if (page.noisyImage) {
+				const bytes = Buffer.alloc(side * side * 3);
+				let seed = 123456789;
+				for (let i = 0; i < bytes.length; i++) {
+					seed ^= seed << 13;
+					seed ^= seed >>> 17;
+					seed ^= seed << 5;
+					bytes[i] = seed & 255;
+				}
+				pixels = `${bytes.toString("hex")}>`;
+			}
 			set(
 				imageId,
-				`<< /Type /XObject /Subtype /Image /Width ${side} /Height ${side} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Length 3 >>\nstream\nabc\nendstream`,
+				`<< /Type /XObject /Subtype /Image /Width ${side} /Height ${side} /ColorSpace /DeviceRGB /BitsPerComponent 8 ${page.noisyImage ? "/Filter /ASCIIHexDecode" : ""} /Length ${pixels.length} >>\nstream\n${pixels}\nendstream`,
 			);
 			assets = `/XObject << /Im1 ${imageId} 0 R >>`;
-			commands += "q 50 0 0 50 20 60 cm /Im1 Do Q\n";
+			commands += page.noisyImage ? "q 1600 0 0 1600 0 0 cm /Im1 Do Q\n" : "q 50 0 0 50 20 60 cm /Im1 Do Q\n";
 		}
 		set(streamId, `<< /Length ${Buffer.byteLength(commands, "latin1")} >>\nstream\n${commands}\nendstream`);
 		const [width, height] = page.geometry ?? [400, 600];
@@ -126,6 +139,28 @@ export function pdfFixture(options: PdfFixtureOptions): Uint8Array {
 	for (const offset of offsets.slice(1)) pdf += `${String(offset).padStart(10, "0")} 00000 n \n`;
 	pdf += `trailer\n<< /Size ${objects.length + 1} /Root ${catalog} 0 R /Info ${info} 0 R ${encryption} >>\nstartxref\n${xref}\n%%EOF\n`;
 	return Buffer.from(pdf, "latin1");
+}
+
+/** Four physical pages modeling the observed 171–174 boundary shape, not book content. */
+export function subsectionPdf(): Uint8Array {
+	return pdfFixture({
+		pages: [
+			{
+				text: [
+					{ text: "Semantic chunking", y: 400, size: 18 },
+					{ text: "A coherent subsection begins here.", y: 370 },
+				],
+			},
+			{ text: [{ text: "Its explanation continues on the following page.", y: 550 }] },
+			{
+				text: [
+					{ text: "Handling images", y: 400, size: 18 },
+					{ text: "Different topic. See Figure 3-7 on the next page.", y: 370 },
+				],
+			},
+			{ text: [{ text: "Figure 3-7. Synthetic vector diagram", y: 100 }] },
+		],
+	});
 }
 
 export function structuralPdf(): Uint8Array {
