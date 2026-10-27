@@ -43,6 +43,8 @@ test("reconciles canonical documents and searches only authorized active trusted
 		assert.deepEqual(searchDocuments(store, '"broken', scope), []);
 		assert.equal(searchDocuments(store, "Report", scope).length, 1);
 		assert.equal(searchDocuments(store, "Summary", scope).length, 1);
+		assert.equal(searchDocuments(store, '"unique nebula"', scope).length, 1);
+		assert.equal(searchDocuments(store, '"nebula unique"', scope).length, 0);
 	} finally {
 		store.close();
 		rmSync(dir, { recursive: true, force: true });
@@ -76,6 +78,41 @@ test("reconciliation preserves operational rows and surfaces missing or mismatch
 		assert.throws(() => reconcileSearch(store, [{ ...doc, hash: "0".repeat(64) }]), /hash/i);
 		rmSync(path);
 		assert.throws(() => reconcileSearch(store, [doc]));
+	} finally {
+		store.close();
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("search bounds output and propagates index failures", () => {
+	const dir = mkdtempSync(join(tmpdir(), "pihouse-bounds-"));
+	const store = openOperationalStore(join(dir, "memory.sqlite"));
+	try {
+		const path = join(dir, "doc.md");
+		writeFileSync(path, `needle ${"x".repeat(5000)}`);
+		const doc = {
+			id: "one",
+			path,
+			kind: "digest",
+			project: "alpha",
+			status: "active",
+			trust: "derived",
+			title: "needle",
+			summary: "",
+			provenance: "p".repeat(2000),
+			date: "now",
+		};
+		reconcileSearch(
+			store,
+			Array.from({ length: 10 }, (_, i) => ({ ...doc, id: `id-${i}` })),
+		);
+		const scope = { project: "alpha", trusts: ["derived"] };
+		const hits = searchDocuments(store, "needle", scope, 999);
+		assert.equal(hits.length, 6);
+		assert.ok(hits.reduce((sum, hit) => sum + hit.extract.length, 0) <= 6000);
+		assert.ok(hits.every((hit) => hit.provenance.length <= 512));
+		store.db.exec("DROP TABLE search_fts");
+		assert.throws(() => searchDocuments(store, "needle", scope));
 	} finally {
 		store.close();
 		rmSync(dir, { recursive: true, force: true });

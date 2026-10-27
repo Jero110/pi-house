@@ -74,8 +74,10 @@ export function searchDocuments(store: OperationalStore, query: string, scope: S
 	if (!scope.project || scope.trusts.length === 0 || !Number.isFinite(limit)) return [];
 	// Treat user input as text, not FTS syntax. An unmatched quote is invalid rather than a database error.
 	if (query.length > 512 || (query.match(/"/g)?.length ?? 0) % 2 !== 0) return [];
-	const terms = query.match(/[\p{L}\p{N}_]+/gu);
-	if (!terms || terms.length > 32) return [];
+	const parts = query.match(/"[^"]*"|[\p{L}\p{N}_]+/gu);
+	if (!parts || parts.length > 32) return [];
+	const terms = parts.map((part) => part.match(/[\p{L}\p{N}_]+/gu)?.join(" ") ?? "");
+	if (terms.some((term) => !term)) return [];
 	const expression = terms.map((term) => `"${term}"`).join(" AND ");
 	const count = Math.max(0, Math.min(6, Math.floor(limit)));
 	if (count === 0) return [];
