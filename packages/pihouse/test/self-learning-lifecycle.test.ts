@@ -16,8 +16,7 @@ import type { HubClient, SessionRecord } from "agent-link-core";
 import { askContext, proposalCommand } from "../src/extensions/workflow.ts";
 import { captureRun } from "../src/workflow/capture.ts";
 import { DIGEST_SECTIONS } from "../src/workflow/digest-contract.ts";
-import { type LearningDeps, selfLearningCommand } from "../src/workflow/learning-commands.ts";
-import { executeDigest, produceDigestCandidates } from "../src/workflow/learning-runtime.ts";
+import { digestCommand, type LearningDeps, selfLearningCommand } from "../src/workflow/learning-commands.ts";
 import { openMemory } from "../src/workflow/memory.ts";
 import { migrateLegacyStore } from "../src/workflow/migration.ts";
 import { getProposal, rollbackProposal } from "../src/workflow/proposals.ts";
@@ -223,7 +222,7 @@ function transcriptCopy(f: ReturnType<typeof fixture>, runId: string): string {
 		.join("\n");
 }
 
-test("pending cleanup retries through executeDigest without calling a digest worker", async () => {
+test("public digestCommand retries pending cleanup without calling a digest worker", async () => {
 	const f = fixture();
 	try {
 		const run = join(f.memory, "runs", "run-pending");
@@ -258,35 +257,12 @@ test("pending cleanup retries through executeDigest without calling a digest wor
 					"INSERT INTO jobs(id,revision_id,state,payload) VALUES ('digest-run-pending.r1','run-pending.r1','cleanup-failed',?)",
 				)
 				.run(JSON.stringify({ fingerprint: "source", attempts: 1, artifactPath: digestPath }));
-			const ports = {
-				operationalState: () => ({ states: ["stopped"], deliveries: 0, handoff: false, livenessKnown: true }),
-				currentFingerprint: () => "source",
-			};
-			assert.deepEqual(
-				produceDigestCandidates({ ...ports, db: store.db, storeDir: f.memory, ownedRoot: f.memory }).candidates,
-				[],
-			);
-			let generated = 0;
-			const results = await executeDigest(
-				{
-					...ports,
-					db: store.db,
-					storeDir: f.memory,
-					ownedRoot: f.memory,
-					digestRoot: join(f.memory, "digests"),
-					outputPath: () => digestPath,
-					cwd: f.root,
-					invocation: "cleanup-retry",
-					now: Date.now,
-					worker: async () => {
-						generated++;
-						return { status: "failure" };
-					},
-				},
-				[],
-			);
-			assert.equal(generated, 0);
-			assert.equal(results[0]?.status, "cleanup-failed");
+			const hub = fakeHub(f, () => {
+				throw new Error("pending cleanup must not spawn a digest or review child");
+			});
+			const outcome = await digestCommand(learningDeps(f, hub.client, () => "source"));
+			assert.match(outcome.text, /0 generated, 0 cleaned, 1 cleanup pending, 0 failed, 0 deferred, 0 not started/);
+			assert.equal(hub.spawns.length, 0, "public retry does not regenerate or start a review worker");
 			assert.equal(
 				store.db.prepare("SELECT state FROM cleanup_manifests WHERE id='run-pending.r1'").get()?.state,
 				"cleanup-failed",

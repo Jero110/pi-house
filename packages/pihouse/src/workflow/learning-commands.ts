@@ -168,7 +168,12 @@ async function digestStep(deps: LearningDeps, ready: Ready, options: RuntimeOpti
 	};
 	const produced = produceDigestCandidates(options);
 	summary.deferred.push(...produced.deferred.map((entry) => entry.reason));
-	if (produced.candidates.length === 0) return summary;
+	const cleanupRevisions = new Set(
+		options.db
+			.prepare("SELECT revision_id FROM jobs WHERE state IN ('generated', 'cleanup-failed')")
+			.all()
+			.map((row) => String(row.revision_id)),
+	);
 
 	const digestRoot = join(deps.memory, "digests");
 	const total = Math.min(produced.candidates.length, DIGEST_JOBS_PER_INVOCATION);
@@ -193,8 +198,14 @@ async function digestStep(deps: LearningDeps, ready: Ready, options: RuntimeOpti
 		},
 		produced.candidates,
 	);
-	summary.notStarted = produced.candidates.length - results.length;
+	const digestResults = results.filter((result) => !cleanupRevisions.has(result.revision));
+	summary.notStarted = Math.max(0, produced.candidates.length - digestResults.length);
 	for (const result of results) {
+		if (cleanupRevisions.has(result.revision)) {
+			if (result.status === "cleaned") summary.cleaned++;
+			else summary.cleanupPending++;
+			continue;
+		}
 		if (result.path) summary.generated.push(result.path);
 		if (result.status === "cleaned") summary.cleaned++;
 		else if (result.path) summary.cleanupPending++;
