@@ -10,7 +10,7 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { Candidate, Profile } from "./routing.ts";
+import { type Candidate, type Failure, type Observation, type Profile, type RoutingResult, route } from "./routing.ts";
 
 export const ROUTING_PROFILES_VERSION = 1;
 export const ROUTING_PROFILES_FILE = "routing-profiles.json";
@@ -150,4 +150,66 @@ function modelId(raw: unknown, path: string): [string, string] {
 	const match = typeof raw === "string" ? MODEL.exec(raw) : null;
 	if (!match) throw new Error(`${path}: expected provider/model`);
 	return [match[1], match[2]];
+}
+
+/** The model registry the host gives us: pi's own, injected so tests can fake it. Only its answers are trusted. */
+export interface ModelRef {
+	provider: string;
+	id: string;
+}
+export interface ModelRegistry {
+	find(provider: string, modelId: string): ModelRef | undefined;
+	hasConfiguredAuth(model: ModelRef): boolean;
+}
+
+export interface ChooseInput {
+	loaded: LoadedProfiles;
+	/** The profile the caller asked for; without one there is no routing authority. */
+	profileId?: string;
+	registry: ModelRegistry;
+	/** The model the session would use without routing ("provider/model"); kept whenever there is no authority. */
+	fixed: string;
+	observations: Observation[];
+	failures?: Failure[];
+	now: number;
+	maxAgeMs: number;
+	checkpoint?: string;
+}
+
+export type Choice =
+	| { status: "fixed"; model: string; reason: string }
+	| { status: "routed"; profile: string; profileHash: string; result: RoutingResult };
+
+/**
+ * Chooses a model: the fixed one unless an authorized profile was asked for and the file is valid.
+ * Problem: a candidate in the file names a model that may not exist, or whose key was never configured here.
+ * Example: "openai-codex/gpt-6-luna" is in the file, but the registry only has a look-alike "gpt-6-luna-v2".
+ * Solution: each candidate is looked up by its exact provider and ID; its credentials come from the registry's own
+ * answer, never from a flag in the file. Then route() decides from the resolved candidates and the observations.
+ */
+export function chooseRoute(input: ChooseInput): Choice {
+	const { loaded } = input;
+	if (loaded.status !== "loaded") {
+		const reason =
+			loaded.status === "absent" ? "no routing profiles file" : `routing profiles invalid: ${loaded.reason}`;
+		return { status: "fixed", model: input.fixed, reason };
+	}
+	const profile = loaded.profiles.find((item) => item.id === input.profileId);
+	if (!profile) return { status: "fixed", model: input.fixed, reason: "no authorized routing profile requested" };
+	const resolved = profile.candidates.map((candidate) => {
+		const found = input.registry.find(candidate.provider, candidate.model);
+		const modelAvailable = !!found && found.provider === candidate.provider && found.id === candidate.model;
+		const credentials = !!found && modelAvailable && input.registry.hasConfiguredAuth(found);
+		return { candidate, modelAvailable, credentials };
+	});
+	const result = route({
+		profile,
+		resolved,
+		observations: input.observations,
+		failures: input.failures,
+		now: input.now,
+		maxAgeMs: input.maxAgeMs,
+		checkpoint: input.checkpoint,
+	});
+	return { status: "routed", profile: profile.id, profileHash: loaded.hash, result };
 }

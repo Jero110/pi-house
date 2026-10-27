@@ -22,7 +22,7 @@ export type Observation = {
 	resetAt?: number;
 	windows?: { name: string; remaining?: number; used?: number }[];
 };
-type Failure = { provider: string; account: string; kind: "exhausted" | "auth" | "network" | "rate" };
+export type Failure = { provider: string; account: string; kind: "exhausted" | "auth" | "network" | "rate" };
 type Resolution = { candidate: Candidate; credentials: boolean; modelAvailable: boolean };
 type Reason = { candidate: Candidate; reason: string };
 type Input = {
@@ -76,8 +76,9 @@ export function route(input: Input): RoutingResult {
 		else if (!profile.allowedBilling.includes(candidate.billing)) reason = "billing-not-authorized";
 		else if (!profile.requiredCapabilities.every((capability) => candidate.capabilities.includes(capability)))
 			reason = "incompatible";
-		else if (!resolution?.credentials) reason = "credentials-unavailable";
-		else if (!resolution.modelAvailable) reason = "model-unavailable";
+		// The model must exist before its credentials mean anything: an unknown model has no key to check.
+		else if (!resolution?.modelAvailable) reason = "model-unavailable";
+		else if (!resolution.credentials) reason = "credentials-unavailable";
 		if (reason) {
 			reasons.push({ candidate, reason });
 			continue;
