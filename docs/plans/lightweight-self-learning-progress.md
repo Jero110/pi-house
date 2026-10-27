@@ -25,3 +25,10 @@ Validation snapshot: `git status --short` and `git diff -- packages/pihouse/src/
 - Initial implementation committed as `699c977` (`feat: add durable workflow storage primitives`): versioned operational schema, artifact commits/recovery, FTS capability diagnosis. Focused storage tests passed 3/3; check passed; suite passed 370/370.
 - The first review identified the explicit backup-preservation acceptance was missing. One allowed retry added private SQLite + canonical-artifact backup support in `4f1a124` (`feat: back up workflow database and artifacts`).
 - Executor verification after retry: `node --test packages/pihouse/test/storage.test.ts` passed (4/4); `npm run check` passed (Biome checked 161 files; no fixes); `npm test` passed (371/371); `git diff --check` passed. No unrelated files included.
+
+## T4 — Structured evidence revisions
+
+- Dispatched to `evidence-2` (pihouse, `openai-codex/gpt-6-luna`). The initial attempt was blocked: incomplete structured retention/report reconstruction and failing check. One retry was used.
+- Retry committed `764c353` (`feat: persist structured workflow evidence revisions`): body-free evidence metadata, fingerprints, revisions, cursors and capture tests. Same snapshots are tested idempotent; report capture labels missing sources.
+- Executor verification: `node --test packages/pihouse/test/evidence.test.ts packages/pihouse/test/capture.test.ts` passed (9/9); `npm run check` passed (Biome checked 162 files; no fixes); `npm test` passed (372/372); `git diff --check` passed.
+- **BLOCKED against T4 acceptance:** retained `report.md` is only a sanitized capture-time report, not regenerated from retained structured evidence after captured transcript deletion. The worker reports the current report renderer still requires `WorkflowRun`/transcript input. This criterion is unmet, so T4 is not considered done and dependent T5–T23 were not dispatched. No API/contract was weakened to claim success.
