@@ -515,6 +515,9 @@ test("the planner and the executor name the routing contract the CLI implements"
 	assert.match(executor, /Exit `3` \(`paused`\)/);
 	assert.match(executor, /Exit `4`/);
 	assert.match(executor, /or `2` \(a usage mistake\)/);
+	// The journal attributes a decision to its worker and task only when the executor passes both.
+	assert.match(executor, /`pih route <name> --agent <agent name> --task <T-id>`/);
+	assert.match(executor, /`--agent <the worker that will run the selected model> --task <T-id>`/);
 	assert.deepEqual(ROUTE_EXIT, { selected: 0, error: 1, usage: 2, paused: 3, unauthorized: 4 });
 	for (const kind of ["exhausted", "rate", "auth"]) {
 		const r = await run({

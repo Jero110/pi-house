@@ -60,8 +60,10 @@ If a fixed task names exact authorized alternative harnesses/models (including e
   spawns. Never spawn on an account it reports `exhausted`. `stale` or `unknown` is not proof of exhaustion: you may
   spawn, but watch that agent's first result.
 - **Routing profiles.** A task whose line has `**Routing profile:** <name>` may run on any candidate of that profile, in
-  the profile's order. A task without one is fixed to its model. For a profile task, run `pih route <name>` before its
-  spawn (it reads the pihouse home from the environment) and spawn with the `provider/model` on its `selected:` line.
+  the profile's order. A task without one is fixed to its model. For a profile task, run
+  `pih route <name> --agent <agent name> --task <T-id>` before its spawn. It reads the pihouse home from the environment,
+  and the two flags record the decision for that worker in the routing journal. Spawn with the `provider/model` on its
+  `selected:` line.
   Never spawn it on the plan's Model column, or on a model the profile does not list. Record
   `ROUTED: <T-id> <provider/model> account=<account> reason=<reason>` from its output.
   - Exit `3` (`paused`): no candidate can run now. Do not spawn that task. Record `PAUSED: <T-id>` with the checkpoint
@@ -72,7 +74,8 @@ If a fixed task names exact authorized alternative harnesses/models (including e
     column yourself.
   - When a worker of a profile task fails with a quota, rate or auth error, run
     `pih route <name> --current <provider/model of that worker> --failure <exhausted|rate|auth>` once, with the kind of
-    that failure. Its `selected:` id is the one alternative to spawn; for a live worker, the same id goes to agent-link's
+    that failure. Pass `--agent <the worker that will run the selected model> --task <T-id>` too, so the journal ties the
+    replacement to this failure. Its `selected:` id is the one alternative to spawn; for a live worker, the same id goes to agent-link's
     `model` tool (`retry: true` after a failed turn; `interrupt: true` only when waiting is worse than cutting the current turn). `paused` or exit `4`
     records the pause and stops there. Switch once: one route call per failure; never retry quota failures in a loop.
   - A network error is not quota: it follows Step 2, and `pih route` is not called for it.
