@@ -11,8 +11,8 @@ This is the operational guide to the implemented workflow. Module contracts live
 | `/workflow digest` | Manually digests eligible captured revisions in separate workers. |
 | `/workflow self-learning` | Prepares missing digests, scans and reviews a batch in separate workers. Does not apply proposals. |
 | `/workflow ask <question>` | Selectively consults retained metrics, digests, proposals, architecture and skills. |
-| `/workflow proposals` | Lists proposal status and scope. |
-| `/workflow approve <id>` / `reject <id> [reason]` | Pins current proposal version for approval/application, or records rejection. |
+| `/workflow proposals` | Lists proposal status, scope, short version (first 8 hex) and next action. |
+| `/workflow approve <id> [version]` / `reject <id> [reason]` | Approves and applies the version shown by `proposals`, passed as its version prefix. Without a version, approves only a proposal never revised since creation and names that version; a revised proposal refuses. Re-running approve on an approved proposal needs no version. Records rejection. |
 
 `/workflow review`, `/keeper`, and `pih keeper` are retired; they return replacement guidance and do not start old jobs. Digest/review work requires a pihouse session with agent-link available. The caller receives concise status and artifact paths, not generated full reports. A run is eligible for cleanup only when participants and delivery state are verifiably quiescent and the evidence fingerprint remains stable. Unknown or live runs stay queued. A digest is a lossy description, not a transcript replacement.
 
@@ -24,7 +24,7 @@ Legacy migration is explicit (`migrateLegacyStore` in `packages/pihouse/src/work
 
 For a store snapshot, use the tested `backupOperationalState` API: it serializes SQLite operational state and copies the canonical artifact directory into a new private destination, refusing to overwrite an existing destination. On failure, inspect and retain the incomplete destination; the helper does not delete it. Restore is an operator-managed restore of the database snapshot and matching artifacts as a consistent pair, after stopping writers and preserving the current store separately. This is not automatic rollback for arbitrary concurrent manual edits, does not restore native harness sessions, and does not erase migration backups. Run the migration/search integrity checks after restoration before resuming mutation.
 
-Proposals are constrained to allowlisted skill and memory targets and checked against the proposal's observed target version. Coordination locks protect cooperating pi-house writers only; they cannot guarantee CAS against arbitrary editors. Approval pins the command-current proposal version. Exact-change deduplication catches identical changes, not every semantically equivalent recommendation. No proposal is automatically applied.
+Proposals are constrained to allowlisted skill and memory targets and checked against the proposal's observed target version. Coordination locks protect cooperating pi-house writers only; they cannot guarantee CAS against arbitrary editors. Approval pins the version the user listed: `approve <id> <version>` refuses, and applies nothing, when the proposal has changed since it was listed. Exact-change deduplication catches identical changes, not every semantically equivalent recommendation. No proposal is automatically applied.
 
 ## Runtime limits
 
