@@ -576,16 +576,15 @@ test("a run is rebuilt from the journal and transcripts: roles, plan, tasks, ski
 	);
 });
 
-test("/workflow ask carries the architecture, the catalog, this machine and the question", async (t) => {
+test("/workflow ask retrieves bounded architecture snippets and marks unsupported facts unknown", async (t) => {
 	const { home, env } = tempHome(t);
 	const text = await askContext("how are my skills organized?", { ...env, PIHOUSE_HOME: join(home, ".pihouse") });
-	assert.match(text, /## How pihouse works/);
-	assert.match(text, /## Extras \(manual\)/);
-	assert.match(text, /`grilling` \| Matt Pocock/);
-	assert.match(text, /Backend: not set up/);
-	assert.match(text, /# Question\n\nhow are my skills organized\?/);
-	assert.match(text, /pi, which pihouse runs on: .*pi-coding-agent \(README\.md, docs\/, examples\/extensions\/\)/);
-	assert.match(text, /Search the pi package above for its name/);
+	assert.match(text, /Current architecture references/);
+	assert.match(text, /docs\/architecture\.md/);
+	assert.match(text, /Effective non-secret configuration/);
+	assert.match(text, /Price: unknown; quality\/validation: unknown/);
+	assert.match(text, /## Question\n\nhow are my skills organized\?/);
+	assert.doesNotMatch(text, /# Skills catalog/);
 });
 
 function askFixture(t: { after: (fn: () => void) => void }) {
@@ -617,9 +616,8 @@ test("/workflow ask reads the memory, the index and the matching digests, never 
 		store.writeDigest(id, `Digest ${i}: ${"x".repeat(1_900)}${i === 7 ? " caching" : ""}`);
 	}
 	const text = await askContext("how did caching go?", env, { memoryDir });
-	assert.match(text, /The user prefers small commits\./);
-	assert.match(text, /run:run-7 · run/);
-	assert.match(text, /## digest:run-7/);
+	assert.match(text, /Retained search unavailable/);
+	assert.match(text, /no activated operational store/);
 	assert.doesNotMatch(text, /TRANSCRIPT-SECRET/);
 	assert.ok(text.length <= LIMITS.ask, `context is ${text.length} chars`);
 });

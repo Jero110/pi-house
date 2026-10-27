@@ -8,13 +8,14 @@
 // ask: gives the model the architecture, the skills catalog and what is installed here, then the question.
 // The report is computed, never guessed: the model only writes the recommendations and the answers.
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { SessionRecord } from "agent-link-core";
 import { agentLinkHome, hubPaths, readJournal } from "agent-link-core";
-import { PI_PACKAGE, pihousePaths, REPO_ROOT, SKILLS_DIR } from "../paths.ts";
+import { pihousePaths, REPO_ROOT, SKILLS_DIR } from "../paths.ts";
 import { readConfig } from "../setup.ts";
+import { buildAskContext } from "../workflow/ask-context.ts";
 import {
 	addFlag,
 	capTitle,
@@ -29,8 +30,7 @@ import {
 	storedReport,
 	sweepFlagged,
 } from "../workflow/capture.ts";
-import { catalogMarkdown, readCatalog } from "../workflow/catalog.ts";
-import { type IndexEntry, LIMITS, type MemoryStore, openMemory } from "../workflow/memory.ts";
+import { LIMITS, type MemoryStore, openMemory } from "../workflow/memory.ts";
 import { renderReport } from "../workflow/report.ts";
 import { buildRun, pickRoot, type WorkflowRun } from "../workflow/run.ts";
 import { fetchSource, type SourceResult } from "../workflow/sources.ts";
@@ -72,11 +72,6 @@ export const ARCHITECTURE = `## How pihouse works
   dispatching tasks to workers on the harness and model the plan names. Post-build and Extras skills are manual.
 - /workflow review reads a run back from the journal and transcripts: tokens, time per message, skills per agent.`;
 
-function harnessesOnPath(env: NodeJS.ProcessEnv): string[] {
-	const dirs = (env.PATH ?? "").split(":").filter(Boolean);
-	return ["claude", "codex", "opencode", "pi", "tmux", "cmux"].filter((b) => dirs.some((d) => existsSync(join(d, b))));
-}
-
 /**
  * The newest report in `dir`, by when it was written.
  * Problem: it picked the last file name in order, which only worked while the date led the name. Solution: the file's
@@ -116,8 +111,6 @@ export interface AskDeps {
 
 const MAX_SOURCES = 3;
 const SOURCE_CHARS = 4_000;
-const DIGESTS_SHOWN = 3;
-
 /**
  * The links and media files named in a question, at most three.
  * Problem: "see https://youtu.be/x, then compare." would hand fetchSource a link ending in a comma. Solution: trim
@@ -130,20 +123,6 @@ export function sourcesIn(question: string): string[] {
 		) ?? [];
 	const clean = found.map((f) => f.replace(/[.,;:!?)\]}]+$/, ""));
 	return [...new Set(clean)].slice(0, MAX_SOURCES);
-}
-
-/** Index entries whose title or summary share words with the question, best first; ties keep the newest first. */
-function relevantDigests(store: MemoryStore, question: string): IndexEntry[] {
-	const wordsOf = (text: string) => new Set(text.toLowerCase().match(/[\p{L}\p{N}]{3,}/gu) ?? []);
-	const asked = wordsOf(question);
-	return store
-		.readIndex()
-		.filter((e) => e.kind === "digest" && e.status !== "archived")
-		.map((e) => ({ e, score: [...wordsOf(`${e.title} ${e.summary}`)].filter((w) => asked.has(w)).length }))
-		.filter((x) => x.score > 0)
-		.sort((a, b) => b.score - a.score || b.e.createdAt.localeCompare(a.e.createdAt))
-		.slice(0, DIGESTS_SHOWN)
-		.map((x) => x.e);
 }
 
 /**
@@ -214,60 +193,21 @@ export async function askContext(
 	const config = readConfig(paths);
 	const store = openMemory(deps.memoryDir ?? paths.memory);
 	store.adoptIdeas();
-	const report = latestReport(paths.reports);
-	const reportHead = report ? readFileSync(report, "utf8").split("\n").slice(0, 40).join("\n") : undefined;
 	const sources = sourcesIn(question);
 	const sourcesText = sources.length ? await sourcesSection(store, sources, deps, deps.fetchSource ?? fetchSource) : "";
-	const memory = store.readWorkflowMemory().slice(0, LIMITS.workflowMemory);
-	const index = store.indexSlice({ limit: 40, maxChars: 8_000 });
-	const digests = relevantDigests(store, question).flatMap((e) => {
-		const runId = e.id.replace(/^digest:/, "");
-		const text = store.readDigest(runId);
-		return text ? [{ id: e.id, text: text.slice(0, LIMITS.digest) }] : [];
-	});
-	store.touch(digests.map((d) => d.id));
 	return [
-		"# pihouse workflow context",
-		"",
-		ARCHITECTURE,
-		"",
-		"## This machine",
-		"",
-		`- Backend: ${config?.backend ?? "not set up (run pih setup)"}; MCP servers: agent-link${config?.backend === "cmux" ? ", cmux" : ""}`,
-		`- On PATH: ${harnessesOnPath(env).join(", ") || "none found"}`,
-		`- Repository: ${REPO_ROOT}`,
-		`- pi, which pihouse runs on: ${PI_PACKAGE} (README.md, docs/, examples/extensions/)`,
-		`- Workflow memory: ${store.dir}`,
-		report ? `- Last review report: ${report}` : "- No /workflow review report yet",
-		"",
-		"# Skills catalog",
-		"",
-		catalogMarkdown(readCatalog()),
-		"# Workflow memory (how the user works)",
-		"",
-		memory || "(empty: no run has been digested yet)",
-		"",
-		"# Memory index (newest first: id · kind · project · title · summary)",
-		"",
-		index || "(empty)",
-		"",
-		digests.length
-			? `# Relevant digests\n\n${digests.map((d) => `## ${d.id}\n\n${d.text}`).join("\n\n")}\n`
-			: "# Relevant digests\n\n(none match the question)\n",
-		reportHead ? `# Last review (first lines)\n\n${reportHead}\n` : "",
+		buildAskContext({
+			memoryDir: store.dir,
+			project: projectOf(deps.cwd ?? process.cwd()).projectSlug,
+			question,
+			repoRoot: REPO_ROOT,
+			skillsDir: SKILLS_DIR,
+			config: { backend: config?.backend, mcpServers: ["agent-link", ...(config?.backend === "cmux" ? ["cmux"] : [])] },
+		}),
 		sourcesText,
-		"# Question",
-		"",
-		question,
-		"",
-		"Answer from the context above and the files it names; say what you do not know. If the question names a tool, skill,",
-		"repository or link you do not know, research it first. Search the pi package above for its name (grep -ril): pihouse",
-		"is pi, so a pi extension or example is the cheapest way to add a tool. Then launch an opencode agent with agent-link",
-		"spawn to search the web, or fetch the link. Then give one verdict: we already have something better (name it, say",
-		"why), it is about the same as one of ours (name it), or it is worth trying (say exactly what to add or change, and on",
-		"which past task to test it).",
 	]
-		.join("\n")
+		.filter(Boolean)
+		.join("\n\n")
 		.slice(0, LIMITS.ask);
 }
 
