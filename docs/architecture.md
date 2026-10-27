@@ -32,8 +32,21 @@ extensions.
 
 - **Hub daemon**: one per machine, socket `~/.agent-link/hub.sock` (0600), token `~/.agent-link/token`. Started on demand
   by the MCP server or `agent-link open`.
-- **MCP server**: seven tools (`spawn`, `send`, `permit`, `reply`, `status`, `cancel`, `inbox`), one entry per backend
-  (`agent-link-cmux`, `agent-link-tmux`). The model never sees adapters.
+- **MCP server**: eight tools (`spawn`, `send`, `permit`, `reply`, `status`, `cancel`, `model`, `inbox`), one entry per
+  backend (`agent-link-cmux`, `agent-link-tmux`). The model never sees adapters.
+- **Model switch** (`model`): only an ancestor of the worker may call it, with an exact `<provider>/<id>` that the adapter
+  checks against the harness's configured models and auth. Supported by pi, pihouse and opencode; Claude Code and Codex
+  refuse (their model is set at launch) and `paste` has no switch, so the original turn keeps running there. Idle switches
+  apply at once; a busy or asking worker switches before its next turn (pending). The same agent keeps its history across
+  a switch: `interrupt: true` cancels the running turn, waits (at most 20 s) until it has ended as cancelled, the adapter is
+  idle and the new model is confirmed, then sends one continuation to the same agent that goes first in its queue. The
+  original task is never sent again. Any other end is explicit and sends nothing: a refused switch, a turn that ended on its
+  own, a turn that did not stop in time, or an exited worker. `retry` sends the failed message once more after an applied
+  switch, and is exclusive with `interrupt`. No automatic process restart happens: a worker that exited is respawned.
+- **Quota**: a switch does not make a provider's quota available. `account_usage` is a pihouse tool that reads each
+  account's usage; it is not part of the agent-link MCP.
+- **Restart after an update**: a running hub and every agent opened before the update keep the code they started with, so
+  the `model` tool exists there only after they restart (`agent-link stop`, then reopen the sessions).
 - **Adapters**, one per harness, each by its native path: Claude Code's messaging socket, Codex's app-server, opencode's
   HTTP server, pi's extension socket. A harness without one can use a `paste` profile.
 - **Pane backends**: open, close, read, keys, paste, alive. A caller's workers form one column to its right (the

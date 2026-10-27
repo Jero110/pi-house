@@ -5,7 +5,7 @@ export const SKILL_NAME = "agent-link";
 
 export const SKILL_MD = `---
 name: agent-link
-description: Launch other coding agents (claude, codex, opencode, pihouse, pi) in their own terminal panes and talk to them with the agent-link tools spawn, send, permit, reply, status, cancel and inbox; read what any agent did from its transcript. Use when a task splits into parts that can run in parallel, needs research or a second opinion, the user asks for another agent or model, or asks what another agent or pane did.
+description: Launch other coding agents (claude, codex, opencode, pihouse, pi) in their own terminal panes and talk to them with the agent-link tools spawn, send, permit, reply, status, cancel, model and inbox; read what any agent did from its transcript. Use when a task splits into parts that can run in parallel, needs research or a second opinion, the user asks for another agent or model, or asks what another agent or pane did.
 ---
 
 # agent-link
@@ -36,6 +36,26 @@ Use that exact name with send and cancel; status lists the names around you.
   permit({ to: "<worker>", choice: "<number or option>" }), at any time. Ask the user first when only they should decide.
 - As a worker, your final answer reaches your parent by itself; call reply({ result }) only to set it
   explicitly, and send({ to: "<parent>", message }) to ask before you finish.
+
+## Changing a worker's model
+
+Only the agent above a worker can change its model, with model({ to, model }). The model is an exact \`<provider>/<id>\`
+that the user has configured (e.g. \`anthropic/claude-sonnet-5-5\`): never guess one, and pick one yourself only when the
+user or the plan named it.
+
+- An idle worker switches at once. A busy or asking one switches before its next turn.
+- Its model is too small for the task, and the user names a larger one:
+  model({ to: "<worker>", model: "anthropic/claude-sonnet-5-5" }).
+- Its turn failed on a quota or rate-limit error: model({ to, model, retry: true }) switches it and sends the failed
+  message once more, but only after the switch applied and only while the worker is idle after that failure.
+- A busy worker must move now: model({ to, model, interrupt: true }). Its running turn is cancelled and its task continues
+  on the new model with one continuation message; the original task is not sent again. The answer says whether the task
+  continued and, if not, why. A turn that ended on its own before the cancel has nothing to continue.
+- retry and interrupt cannot be combined.
+- Only pi, pihouse and opencode workers switch. A Claude Code, Codex or paste worker refuses: cancel it and spawn a new one
+  with the model. An exited worker cannot be switched or retried either: spawn a new one.
+- A switch does not bypass quota. Before you pick a model whose account may be out of quota, check pihouse's
+  account_usage tool when you have it.
 
 ## Reading what another agent did
 

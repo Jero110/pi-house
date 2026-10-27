@@ -347,6 +347,7 @@ extension socket), never by typing into the screen.
 | `reply` | Sets the result explicitly; otherwise the last answer of the turn is the result. |
 | `status` | The tree of agents and their state: starting, working, asking, done, exited. |
 | `cancel` | Stops a worker and closes its pane. |
+| `model` | Changes the model of one of your own workers (its parent, or an agent above it), without typing into its pane: `model({ to, model, retry?, interrupt? })`, where `model` is an exact `<provider>/<id>`, e.g. `anthropic/claude-sonnet-5-5`. An idle worker switches at once; a busy or asking one switches before its next turn (pending), unless `interrupt: true`. `retry: true` (after an applied switch) sends the message that failed its last turn once more. `interrupt: true` cancels the running turn, switches, and continues the task with one continuation message, never the original task again; the answer says whether it continued and why not. `retry` and `interrupt` cannot be combined. Works for pi, pihouse and opencode workers. Claude Code and Codex refuse the switch (their model is fixed at launch), and a `paste` worker has none: cancel and spawn a new one. A switch does not bypass a provider's quota: check `account_usage` first (a pihouse tool, not part of the agent-link MCP). |
 | `inbox` | For a root that cannot be woken (a plain shell), the results and questions waiting for it. |
 
 A worker's final answer reaches its parent as a new message, so no agent waits or polls. CLI:
@@ -371,7 +372,7 @@ flowchart LR
   subgraph pihouse["pihouse: pi + 8 extensions"]
     ext["header · ask_user_question · /workflow"]
   end
-  pihouse -- "MCP stdio" --> mcp["agent-link MCP<br/>spawn · send · reply · status · cancel · inbox"]
+  pihouse -- "MCP stdio" --> mcp["agent-link MCP<br/>spawn · send · reply · status · cancel · model · inbox"]
   mcp -- "HTTP over a Unix socket + token" --> hub["hub daemon<br/>one FIFO queue per agent"]
   hub -- "messaging socket" --> claude["Claude Code"]
   hub -- "app-server" --> codex["Codex"]
