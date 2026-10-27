@@ -4,8 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { isQuiescent } from "../src/workflow/jobs.ts";
-import { activateLearningStore, produceDigestCandidates } from "../src/workflow/learning-runtime.ts";
+import { activateLearningStore, executeDigest, produceDigestCandidates } from "../src/workflow/learning-runtime.ts";
 import { openOperationalStore } from "../src/workflow/storage.ts";
+import { coordinatorWorkerAdapter, observedTerminalReason } from "../src/workflow/worker-adapter.ts";
 
 test("quiescence is conservative for active, pending-delivery, handoff and unknown states", () => {
 	assert.equal(isQuiescent({ states: ["idle"], deliveries: 0, handoff: false, livenessKnown: true }), true);
@@ -25,8 +26,12 @@ test("candidate production requires an operational revision, retained complete p
 		const owned = join(root, "owned");
 		const run = join(owned, "runs", "run-one");
 		mkdirSync(join(run, "transcripts"), { recursive: true });
-		writeFileSync(join(run, "run.json"), JSON.stringify({ id: "run-one", project: "fixture", agents: [{ id: "a" }] }));
+		writeFileSync(
+			join(run, "run.json"),
+			JSON.stringify({ id: "run-one", fingerprint: "source-hash", project: "fixture", agents: [{ id: "a" }] }),
+		);
 		writeFileSync(join(run, "transcripts", "a.json"), "{}\n");
+		writeFileSync(join(run, "transcripts", "a.jsonl"), "{}\n");
 		store.db.prepare("INSERT INTO runs(id, created_at) VALUES ('run-one', 'now')").run();
 		store.db
 			.prepare(
@@ -44,6 +49,7 @@ test("candidate production requires an operational revision, retained complete p
 		assert.equal(result.candidates.length, 1);
 		assert.equal(result.candidates[0].revision, "run-one.r1");
 		assert.deepEqual(result.deferred, []);
+		assert.deepEqual(result.candidates[0].expectedFiles, ["a.json", "a.jsonl"]);
 		assert.equal(
 			produceDigestCandidates({
 				...options,
@@ -53,6 +59,195 @@ test("candidate production requires an operational revision, retained complete p
 		);
 	} finally {
 		store.close();
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("verified synthetic digest execution commits then fences cleanup against a fresh source fingerprint", async () => {
+	const root = mkdtempSync(join(tmpdir(), "learning-execute-"));
+	const store = openOperationalStore(join(root, "memory.sqlite"), { fts: false });
+	try {
+		const owned = join(root, "owned");
+		const run = join(owned, "runs", "run-one");
+		mkdirSync(join(run, "transcripts"), { recursive: true });
+		mkdirSync(join(root, "digests"), { recursive: true });
+		writeFileSync(
+			join(run, "run.json"),
+			JSON.stringify({ id: "run-one", fingerprint: "source-hash", project: "fixture", agents: [{ id: "a" }] }),
+		);
+		writeFileSync(join(run, "transcripts", "a.jsonl"), "synthetic evidence\\n");
+		store.db.prepare("INSERT INTO runs(id, created_at) VALUES ('run-one', 'now')").run();
+		store.db
+			.prepare(
+				"INSERT INTO revisions(id, run_id, source_hash, created_at) VALUES ('run-one.r1', 'run-one', 'source-hash', 'now')",
+			)
+			.run();
+		store.db
+			.prepare("INSERT INTO metrics(id, revision_id, kind, value) VALUES ('m1', 'run-one.r1', 'run', '{}')")
+			.run();
+		store.db
+			.prepare("INSERT INTO participants(id, revision_id, role, payload) VALUES ('p1', 'run-one.r1', 'planner', '{}')")
+			.run();
+		const options = {
+			storeDir: join(root, "legacy"),
+			db: store.db,
+			ownedRoot: owned,
+			operationalState: () => ({ states: ["idle"], deliveries: 0, handoff: false, livenessKnown: true }),
+			currentFingerprint: () => "source-hash",
+		};
+		const candidate = produceDigestCandidates(options).candidates[0];
+		const sections = Object.fromEntries(
+			[
+				"objective",
+				"participants",
+				"decisions",
+				"failures",
+				"validations",
+				"artifacts",
+				"limitations",
+				"candidates",
+			].map((key) => [key, `synthetic ${key}`]),
+		);
+		const result = await executeDigest(
+			{
+				...options,
+				digestRoot: join(root, "digests"),
+				outputPath: () => join(root, "worker-output.json"),
+				cwd: root,
+				invocation: "manual-1",
+				now: Date.now,
+				worker: async (job) => {
+					const output = { schemaVersion: 1, runId: "run-one", project: "fixture", revision: job.revision, sections };
+					writeFileSync(job.outputPath, JSON.stringify(output));
+					return { status: "success", outputPath: job.outputPath };
+				},
+			},
+			[candidate],
+		);
+		assert.equal(result[0].status, "cleaned");
+		assert.equal(store.db.prepare("SELECT state FROM cleanup_manifests WHERE id='run-one.r1'").get()?.state, "cleaned");
+		assert.equal(store.db.prepare("SELECT state FROM jobs WHERE id=?").get(candidate.id)?.state, "cleaned");
+	} finally {
+		store.close();
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("terminal observation uses only the latest assistant message and fails closed", () => {
+	const root = mkdtempSync(join(tmpdir(), "worker-terminal-"));
+	try {
+		const path = join(root, "child.jsonl");
+		writeFileSync(
+			path,
+			[
+				'{"type":"message","message":{"role":"assistant","stopReason":"stop"}}',
+				'{"type":"message","message":{"role":"assistant","stopReason":"max_tokens"}}',
+			].join("\n"),
+		);
+		assert.equal(observedTerminalReason(path), "failure");
+		writeFileSync(path, '{"type":"message","message":{"role":"assistant","stopReason":"stop"}}');
+		assert.equal(observedTerminalReason(path), "stop");
+		assert.equal(observedTerminalReason(undefined), "failure");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("worker children are spawned under a dedicated pull coordinator and never read a parent inbox", async () => {
+	const root = mkdtempSync(join(tmpdir(), "worker-coordinator-"));
+	const journal = join(root, "journal");
+	mkdirSync(journal);
+	const transcript = join(root, "worker.jsonl");
+	const sections = Object.fromEntries(
+		["objective", "participants", "decisions", "failures", "validations", "artifacts", "limitations", "candidates"].map(
+			(key) => [key, key],
+		),
+	);
+	let spawnFrom = "";
+	let coordinator = "";
+	let exited = false;
+	let cancelled = false;
+	const client = {
+		register: async (body: { pull: boolean }) => {
+			assert.equal(body.pull, true);
+			coordinator = "workflow-coordinator";
+			return { name: coordinator, identity: { agent: coordinator, hub: "", token: "", depth: 0 } };
+		},
+		spawn: async (body: { from: string; task: string; name: string; cwd: string }) => {
+			spawnFrom = body.from;
+			const outputPath = body.task.match(/Output: ([^\n]+)/)?.[1];
+			assert.ok(outputPath);
+			writeFileSync(
+				outputPath,
+				JSON.stringify({ schemaVersion: 1, runId: "run-one", project: "fixture", revision: "run-one.r1", sections }),
+			);
+			writeFileSync(
+				transcript,
+				JSON.stringify({
+					type: "message",
+					message: {
+						role: "assistant",
+						stopReason: "stop",
+						content: [{ type: "text", text: "maliciously long generated report" }],
+					},
+				}),
+			);
+			assert.equal(observedTerminalReason(transcript), "stop");
+			writeFileSync(
+				join(journal, "child.json"),
+				JSON.stringify({
+					id: `20260101T000000Z-${body.name}`,
+					name: body.name,
+					parent: coordinator,
+					parentName: coordinator,
+					root: coordinator,
+					harness: "pihouse",
+					model: null,
+					cwd: body.cwd,
+					task: body.task,
+					state: "done",
+					depth: 1,
+					startedAt: new Date().toISOString(),
+					updatedAt: new Date().toISOString(),
+					transcript,
+				}),
+			);
+			return { name: body.name };
+		},
+		cancel: async () => {
+			cancelled = true;
+			return { ok: true };
+		},
+		event: async () => {
+			exited = true;
+			return { ok: true };
+		},
+		inbox: async () => {
+			throw new Error("coordinator inbox must not be consumed");
+		},
+	};
+	try {
+		const worker = coordinatorWorkerAdapter(client as never, {
+			cwd: root,
+			backend: "tmux",
+			journalDir: journal,
+			timeoutMs: 1000,
+			pollMs: 20,
+		});
+		const result = await worker({
+			stage: "digest",
+			id: "digest-run-one.r1",
+			revision: "run-one.r1",
+			project: "fixture",
+			inputPath: join(root, "evidence"),
+			outputPath: join(root, "digest.json"),
+			cwd: root,
+		});
+		assert.equal(result.status, "success");
+		assert.equal(spawnFrom, coordinator);
+		assert.equal(cancelled, true);
+		assert.equal(exited, true);
+	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}
 });

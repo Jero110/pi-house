@@ -1,10 +1,13 @@
 import { createHash } from "node:crypto";
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { lstatSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
-import { type DispatchInput, enqueueJob, isQuiescent } from "./jobs.ts";
+import { cleanupAdapter, commitDigest } from "./cleanup.ts";
+import type { DigestIdentity } from "./digest-contract.ts";
+import { type DispatchInput, dispatchCleanup, dispatchJobs, enqueueJob, isQuiescent } from "./jobs.ts";
 import { runSelfLearning, type SelfLearningOptions } from "./learning-review.ts";
 import { migrateLegacyStore } from "./migration.ts";
+import type { WorkerJob, WorkerResult } from "./worker-adapter.ts";
 
 const SAFE_ID = /^[a-z0-9][a-z0-9._-]*$/i;
 const sha256 = (value: Buffer | string): string => createHash("sha256").update(value).digest("hex");
@@ -13,6 +16,8 @@ export interface RuntimeCandidate extends DispatchInput {
 	runId: string;
 	project: string;
 	expectedFiles: string[];
+	inputFingerprint: string;
+	inputBytes: number;
 }
 
 export interface RuntimeOptions {
@@ -42,6 +47,7 @@ export function produceDigestCandidates(options: RuntimeOptions): {
 } {
 	const candidates: RuntimeCandidate[] = [];
 	const deferred: { revision: string; reason: string }[] = [];
+	let aggregateBytes = 0;
 	const rows = options.db
 		.prepare(
 			"SELECT r.id, r.run_id, r.source_hash FROM revisions r LEFT JOIN cleanup_manifests c ON c.id=r.id WHERE c.id IS NULL ORDER BY r.created_at, r.rowid",
@@ -67,23 +73,50 @@ export function produceDigestCandidates(options: RuntimeOptions): {
 		const packagePath = join(root, "run.json");
 		const transcripts = join(root, "transcripts");
 		try {
+			const rootStat = lstatSync(root);
+			const packageStat = lstatSync(packagePath);
+			const transcriptStat = lstatSync(transcripts);
+			if (
+				rootStat.isSymbolicLink() ||
+				!rootStat.isDirectory() ||
+				packageStat.isSymbolicLink() ||
+				!packageStat.isFile() ||
+				transcriptStat.isSymbolicLink() ||
+				!transcriptStat.isDirectory()
+			)
+				throw new Error("unsafe owned input path");
 			const info: unknown = JSON.parse(readFileSync(packagePath, "utf8"));
 			if (typeof info !== "object" || info === null || Array.isArray(info)) throw new Error("invalid package");
 			const pkg = info as Record<string, unknown>;
-			if (pkg.id !== runId || !Array.isArray(pkg.agents) || pkg.agents.length === 0)
+			if (
+				pkg.id !== runId ||
+				pkg.fingerprint !== row.source_hash ||
+				!Array.isArray(pkg.agents) ||
+				pkg.agents.length === 0
+			)
 				throw new Error("incomplete package");
-			const files = readdirSync(transcripts)
-				.filter((name) => /^[a-z0-9][a-z0-9._-]*\.json$/i.test(name))
-				.sort();
-			if (files.length === 0 || files.some((name) => !statSync(join(transcripts, name)).isFile()))
-				throw new Error("no retained transcript package");
-			const packageFingerprint = sha256(
-				JSON.stringify({
-					package: readFileSync(packagePath),
-					files: files.map((name) => [name, readFileSync(join(transcripts, name))]),
-				}),
-			);
-			if (!packageFingerprint) throw new Error("package fingerprint unavailable");
+			const realRoot = realpathSync(options.ownedRoot);
+			const realRun = realpathSync(root);
+			const realTranscripts = realpathSync(transcripts);
+			if (!realRun.startsWith(`${realRoot}/`) || !realTranscripts.startsWith(`${realRun}/`))
+				throw new Error("owned path escaped");
+			const files = readdirSync(transcripts).sort();
+			if (
+				files.length === 0 ||
+				files.some(
+					(name) =>
+						!/^[a-z0-9][a-z0-9._-]*\.(json|jsonl)$/i.test(name) ||
+						!lstatSync(join(transcripts, name)).isFile() ||
+						lstatSync(join(transcripts, name)).isSymbolicLink(),
+				)
+			)
+				throw new Error("retained transcript package is missing or unsafe");
+			const packageBytes = readFileSync(packagePath);
+			const sourceBytes = files.map((name) => [name, readFileSync(join(transcripts, name))] as const);
+			const inputBytes = packageBytes.length + sourceBytes.reduce((sum, [, bytes]) => sum + bytes.length, 0);
+			if (inputBytes > 2_000_000 || aggregateBytes + inputBytes > 2_000_000)
+				throw new Error("aggregate input budget exceeded");
+			const packageFingerprint = sha256(JSON.stringify({ package: packageBytes, files: sourceBytes }));
 			// Never infer completeness from a legacy processed flag; only current operational evidence gets a new job.
 			const project = typeof pkg.project === "string" ? pkg.project : "";
 			if (
@@ -95,14 +128,17 @@ export function produceDigestCandidates(options: RuntimeOptions): {
 				throw new Error("retained package coverage is incomplete");
 			const id = `digest-${revision}`;
 			enqueueJob(options.db, id, revision, String(row.source_hash));
+			aggregateBytes += inputBytes;
 			candidates.push({
 				id,
 				revision,
 				runId,
 				project,
 				fingerprint: String(row.source_hash),
-				evidencePath: resolve(packagePath),
+				evidencePath: resolve(root),
 				expectedFiles: files,
+				inputFingerprint: packageFingerprint,
+				inputBytes,
 			});
 		} catch {
 			deferred.push({ revision, reason: "retained run package is missing or incomplete" });
@@ -111,7 +147,82 @@ export function produceDigestCandidates(options: RuntimeOptions): {
 	return { candidates, deferred };
 }
 
-/** Runtime coordinator port; callers wire verified native worker adapters and commit/cleanup gates explicitly. */
+export async function executeDigest(
+	options: RuntimeOptions & {
+		digestRoot: string;
+		outputPath: (candidate: RuntimeCandidate) => string;
+		cwd: string;
+		invocation: string;
+		now: () => number;
+		worker: (job: WorkerJob) => Promise<WorkerResult>;
+	},
+	candidates: RuntimeCandidate[],
+): Promise<Array<{ revision: string; status: string; path?: string }>> {
+	const byId = new Map(candidates.map((candidate) => [candidate.id, candidate]));
+	const dispatched = await dispatchJobs(options.db, candidates, {
+		invocation: options.invocation,
+		now: options.now,
+		leaseMs: 120_000,
+		maxJobs: 2,
+		maxAttempts: 2,
+		adapter: async ({ id, revision, evidencePath }) => {
+			const candidate = byId.get(id);
+			if (!candidate || options.currentFingerprint(revision) !== candidate.fingerprint) return { status: "failure" };
+			const outputPath = options.outputPath(candidate);
+			const outcome = await options.worker({
+				stage: "digest",
+				id,
+				revision,
+				inputPath: evidencePath,
+				outputPath,
+				cwd: options.cwd,
+				project: candidate.project,
+				maxOutputBytes: 12_000,
+			});
+			if (outcome.status !== "success") return { status: outcome.status === "cancelled" ? "cancelled" : "failure" };
+			const packagePath = join(options.ownedRoot, "runs", candidate.runId, "run.json");
+			const transcriptDir = join(options.ownedRoot, "runs", candidate.runId, "transcripts");
+			const names = candidate.expectedFiles;
+			const bytes = readFileSync(packagePath);
+			const inputs = names.map((name) => [name, readFileSync(join(transcriptDir, name))] as const);
+			if (sha256(JSON.stringify({ package: bytes, files: inputs })) !== candidate.inputFingerprint)
+				return { status: "failure" };
+			const identity: DigestIdentity = { runId: candidate.runId, project: candidate.project, revision };
+			const committed = commitDigest(options.db, {
+				ownedRoot: options.ownedRoot,
+				digestRoot: options.digestRoot,
+				identity,
+				digest: { text: readFileSync(outcome.outputPath, "utf8"), finish: "stop" },
+				currentFingerprint: options.currentFingerprint(revision) ?? "",
+				expectedFiles: names,
+			});
+			return committed.status === "committed"
+				? { status: "success", artifactPath: committed.path, fingerprint: candidate.fingerprint }
+				: { status: "failure" };
+		},
+	});
+	const results: Array<{ revision: string; status: string; path?: string }> = [];
+	for (const result of dispatched) {
+		const candidate = candidates.find((item) => item.id === result.id);
+		if (!candidate || result.status !== "generated") {
+			if (candidate) results.push({ revision: candidate.revision, status: result.status });
+			continue;
+		}
+		const cleanup = await dispatchCleanup(options.db, candidate.id, {
+			invocation: options.invocation,
+			now: options.now,
+			leaseMs: 30_000,
+			adapter: cleanupAdapter(options.db, {
+				ownedRoot: options.ownedRoot,
+				currentFingerprint: options.currentFingerprint,
+			}),
+		});
+		results.push({ revision: candidate.revision, status: cleanup.status, path: result.path });
+	}
+	return results;
+}
+
+/** Runtime coordinator port; public command integration and review dispatch remain separate. */
 export async function executeSelfLearning(
 	db: DatabaseSync,
 	options: SelfLearningOptions,
