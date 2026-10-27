@@ -1,7 +1,7 @@
 # ADR-003: Traceable books retrieval with local evidence and hosted candidates
 
 ## Status
-Accepted as the PDF-only T1 research decision under the user's explicit scope amendment; pending executor verification before T2. Earlier EPUB feasibility blockers are historical, not current PDF-only blockers.
+Accepted for PDF-only scope, amended by the user's authorized hosted-corpus decision (2026-10-27). The T1 research history below is retained; the T6 amendment supersedes its vector-only/local-only/lazy-rendering boundary. Earlier EPUB feasibility blockers are historical, not current PDF-only blockers.
 
 ## Date
 2026-10-27
@@ -26,6 +26,20 @@ Adopt the researched architecture for the **user-authorized PDF-only first versi
 - Use local lexical candidates only if later evaluation justifies them. Scores are not evidence confidence; local source resolution and agent passage assessment are separate gates. Backend failure, incomplete corpus and insufficient support must remain distinguishable.
 
 PDF-only feasibility and conservative input accounting now pass the T1 research gate; do not proceed to T2 until executor verification. Live equivalence is not falsely claimed. The only binding scope change is the explicitly authorized EPUB deferral; all privacy, provenance, extraction, rendering, retrieval and evaluation requirements remain intact. This record makes no claim of implemented parser accuracy or real retrieval quality.
+
+## Hosted-corpus amendment (T6)
+
+Problem: a second computer cannot resolve vector-only candidates without the local books. Example: deleting an original after successful ingestion would remove lazy rendering and local evidence access. Authorized solution: host passage original/normalized text and citation metadata in Pinecone, render figures once at ingestion and upload them plus a versioned catalog manifest to an existing **private S3-compatible bucket** (Supabase Storage target). Originals are optional thereafter. Do not host original PDFs. Every client still needs identical pinned **local** embeddings; no hosted embedding fallback. Book text/figures now cross a third-party boundary, and requested evidence may additionally reach the agent provider. This changes only the books decision, never workflow-memory storage.
+
+Use native fetch and `node:crypto` SigV4 (no new dependency). Preserve Supabase's S3 endpoint path and path-style bucket addressing; expose only bounded PUT/GET/HEAD and explicit-key delete under the configured library prefix. Do not expose public URLs/ACLs, resource creation, prefix deletion, or a Management API. Reject `sbp_` personal access tokens as S3 credentials. Store SHA-256 metadata and verify GET bytes against caller-pinned hashes; HEAD verifies metadata/size only. Operator must separately confirm private bucket policy because these object APIs cannot establish privacy. AWS published IAM signing and S3 canonical-request vectors and fake loopback servers verify offline behavior, not live Supabase compatibility.
+
+Pinecone records now carry allowlisted text, PDF citations/spans/mappings, headings, source/version/hash/configuration/generation, figure IDs/evidence and structural context. Structured fields are JSON strings inside flat permitted metadata types; >40 KiB is an explicit error, never truncation. No local paths, image bytes, arbitrary caller fields or secrets. Query must request metadata, not vectors. Read-only describe-index validates readiness, serverless/dense/cosine/768, no integrated embeddings and exact configured host before any data operation; no control-plane mutation. All data operations include the dedicated namespace and deletes name <=50 explicit opaque IDs. Adapter bounds, exact environment keys and credentials/error-redaction rules are recorded in [research](../books-rag-research.md#t6-hosted-corpus-amendment-and-adapter-contract).
+
+Single writer publishes generation-based manifests. T7 must verify matching source hash/version/configuration/generation and pinned figure hashes across hosted records and the manifest; incomplete generations report `incomplete_corpus`, not mixed results. A deleted original cannot be freshly re-hashed or re-rendered beyond stored evidence. Local corpus storage remains an ingestion working store/optional cache, not a read-only client's prerequisite. Local lexical candidates are optional and require T8 measurement without that cache.
+
+Before real access, the operator verifies pricing, account entitlement and remaining shared allowances for Pinecone Starter and Supabase Free, existing index/namespace/private bucket, region, corpus estimate and egress. **Supabase Free may pause projects after 7 days of inactivity**; this is backend unavailability, not evidence absence. Public limits/API errors cannot establish zero billing. Do not automatically provision, upgrade, resume via management APIs, install models or spend money. No real cloud/model/account checks were performed in T6. See the research's operator-source links and pending live checks.
+
+The following T1 alternatives/consequences are historical where they conflict with this explicit amendment; hosted extracted text/figures are now approved, hosted originals/cloud embeddings remain forbidden.
 
 ## Alternatives considered
 
