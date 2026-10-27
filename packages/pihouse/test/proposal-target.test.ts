@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import { createProposalTarget } from "../src/workflow/proposal-target.ts";
-import { applyProposal, approveProposal, createProposal } from "../src/workflow/proposals.ts";
+import { applyProposal, approveProposal, createProposal, rollbackProposal } from "../src/workflow/proposals.ts";
 
 test("catalog skill target applies with same-directory CAS and preserves a private backup", async () => {
 	const root = mkdtempSync(join(tmpdir(), "proposal-target-"));
@@ -67,6 +67,150 @@ test("approval and application create a verified receipt against a real skill fi
 		assert.equal(typeof receipt.beforeHash, "string");
 		assert.equal(typeof receipt.afterHash, "string");
 		assert.equal(receipt.validation, true);
+	} finally {
+		db.close();
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("target drift before apply fails without touching user bytes or creating a receipt", async () => {
+	const root = mkdtempSync(join(tmpdir(), "proposal-drift-"));
+	const db = new DatabaseSync(":memory:");
+	db.exec(
+		"CREATE TABLE proposals(id TEXT PRIMARY KEY, state TEXT NOT NULL, payload TEXT NOT NULL); CREATE TABLE receipts(id TEXT PRIMARY KEY, proposal_id TEXT, kind TEXT NOT NULL, payload TEXT NOT NULL)",
+	);
+	try {
+		const skill = join(root, "skills", "build", "sample");
+		mkdirSync(skill, { recursive: true });
+		writeFileSync(
+			join(root, "skills", "catalog.json"),
+			JSON.stringify({ groups: [{ id: "build" }], skills: [{ name: "sample", group: "build" }] }),
+		);
+		const before = "---\nname: sample\n---\nold\n";
+		const userBytes = "---\nname: sample\n---\nuser edit\n";
+		writeFileSync(join(skill, "SKILL.md"), before);
+		const proposal = createProposal(db, {
+			id: "drift",
+			target: "skill:sample",
+			before,
+			after: "---\nname: sample\n---\nnew\n",
+			evidence: ["run"],
+		});
+		approveProposal(db, proposal.id, proposal.version);
+		writeFileSync(join(skill, "SKILL.md"), userBytes);
+		const target = createProposalTarget({
+			repoRoot: root,
+			storeRoot: join(root, "store"),
+			target: proposal.target,
+			proposalId: proposal.id,
+		});
+		assert.equal((await applyProposal(db, proposal.id, target)).state, "failed");
+		assert.equal(readFileSync(join(skill, "SKILL.md"), "utf8"), userBytes);
+		assert.equal(db.prepare("SELECT COUNT(*) AS n FROM receipts WHERE kind = 'application'").get()?.n, 0);
+	} finally {
+		db.close();
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("rollback refuses a real skill file changed after application", async () => {
+	const root = mkdtempSync(join(tmpdir(), "proposal-rollback-"));
+	const db = new DatabaseSync(":memory:");
+	db.exec(
+		"CREATE TABLE proposals(id TEXT PRIMARY KEY, state TEXT NOT NULL, payload TEXT NOT NULL); CREATE TABLE receipts(id TEXT PRIMARY KEY, proposal_id TEXT, kind TEXT NOT NULL, payload TEXT NOT NULL)",
+	);
+	try {
+		const skill = join(root, "skills", "build", "sample");
+		mkdirSync(skill, { recursive: true });
+		writeFileSync(
+			join(root, "skills", "catalog.json"),
+			JSON.stringify({ groups: [{ id: "build" }], skills: [{ name: "sample", group: "build" }] }),
+		);
+		writeFileSync(join(skill, "SKILL.md"), "---\nname: sample\n---\nold\n");
+		const proposal = createProposal(db, {
+			id: "rollback",
+			target: "skill:sample",
+			before: "---\nname: sample\n---\nold\n",
+			after: "---\nname: sample\n---\nnew\n",
+			evidence: ["run"],
+		});
+		approveProposal(db, proposal.id, proposal.version);
+		const target = createProposalTarget({
+			repoRoot: root,
+			storeRoot: join(root, "store"),
+			target: proposal.target,
+			proposalId: proposal.id,
+		});
+		assert.equal((await applyProposal(db, proposal.id, target)).state, "applied");
+		const userBytes = "---\nname: sample\n---\nuser edit\n";
+		writeFileSync(join(skill, "SKILL.md"), userBytes);
+		await assert.rejects(rollbackProposal(db, proposal.id, target), /changed/);
+		assert.equal(readFileSync(join(skill, "SKILL.md"), "utf8"), userBytes);
+	} finally {
+		db.close();
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("memory approved-record target is writable; unsafe kinds and traversal are refused", async () => {
+	const root = mkdtempSync(join(tmpdir(), "proposal-memory-target-"));
+	try {
+		const records = join(root, "approved-records", "preference");
+		mkdirSync(records, { recursive: true });
+		writeFileSync(join(records, "x.md"), "before");
+		const target = createProposalTarget({
+			repoRoot: root,
+			storeRoot: root,
+			target: "memory:preference/x",
+			proposalId: "p",
+		});
+		assert.equal(await target.compareAndSwap("before", "after"), true);
+		assert.equal(await target.read(), "after");
+		assert.throws(() =>
+			createProposalTarget({ repoRoot: root, storeRoot: root, target: "memory:../x", proposalId: "p" }),
+		);
+		assert.throws(() =>
+			createProposalTarget({ repoRoot: root, storeRoot: root, target: "memory:other/x", proposalId: "p" }),
+		);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("a leftover lock fails application with actionable recovery guidance", async () => {
+	const root = mkdtempSync(join(tmpdir(), "proposal-stale-lock-"));
+	const db = new DatabaseSync(":memory:");
+	db.exec(
+		"CREATE TABLE proposals(id TEXT PRIMARY KEY, state TEXT NOT NULL, payload TEXT NOT NULL); CREATE TABLE receipts(id TEXT PRIMARY KEY, proposal_id TEXT, kind TEXT NOT NULL, payload TEXT NOT NULL)",
+	);
+	try {
+		const skill = join(root, "skills", "build", "sample");
+		mkdirSync(skill, { recursive: true });
+		writeFileSync(
+			join(root, "skills", "catalog.json"),
+			JSON.stringify({ groups: [{ id: "build" }], skills: [{ name: "sample", group: "build" }] }),
+		);
+		const before = "---\nname: sample\n---\nold\n";
+		writeFileSync(join(skill, "SKILL.md"), before);
+		const proposal = createProposal(db, {
+			id: "locked",
+			target: "skill:sample",
+			before,
+			after: "---\nname: sample\n---\nnew\n",
+			evidence: ["run"],
+		});
+		approveProposal(db, proposal.id, proposal.version);
+		writeFileSync(join(skill, "SKILL.md.pihouse-lock"), "crashed writer");
+		const target = createProposalTarget({
+			repoRoot: root,
+			storeRoot: join(root, "store"),
+			target: proposal.target,
+			proposalId: proposal.id,
+		});
+		const result = await applyProposal(db, proposal.id, target);
+		assert.equal(result.state, "failed");
+		assert.match(result.reason ?? "", /lock file exists.*verify no application is active.*remove it manually/i);
+		assert.equal(readFileSync(join(skill, "SKILL.md"), "utf8"), before);
 	} finally {
 		db.close();
 		rmSync(root, { recursive: true, force: true });

@@ -83,14 +83,19 @@ export function createProposalTarget(options: ProposalTargetOptions): ScopedTarg
 	const root = skillName ? options.repoRoot : options.storeRoot;
 	const path = safeComponents(root, relative);
 	const backupRoot = join(options.storeRoot, "proposals", options.proposalId);
+	let failure: string | undefined;
 	return {
+		failureReason: () => failure,
 		read: async () => readFileSync(path, "utf8"),
 		compareAndSwap: async (expected, replacement) => {
 			const lock = `${path}.pihouse-lock`;
 			let fd: number;
+			failure = undefined;
 			try {
 				fd = openSync(lock, "wx", 0o600);
 			} catch {
+				// Problem: a crash can leave a lock, but age alone cannot prove its owner is dead. Example: deleting a slow live writer's lock can permit concurrent writes. Solution: fail closed and tell an operator to inspect before removing it.
+				failure = `Proposal target lock file exists at ${lock}; verify no application is active, then remove it manually`;
 				return false;
 			}
 			try {

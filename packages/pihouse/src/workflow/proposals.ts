@@ -176,6 +176,7 @@ export interface ScopedTarget {
 	read(): Promise<string>;
 	compareAndSwap(expected: string, replacement: string): Promise<boolean>;
 	validate(): Promise<boolean>;
+	failureReason?(): string | undefined;
 }
 
 export async function applyProposal(db: DatabaseSync, id: string, target: ScopedTarget): Promise<Proposal> {
@@ -192,7 +193,7 @@ export async function applyProposal(db: DatabaseSync, id: string, target: Scoped
 	try {
 		if ((await target.read()) !== proposal.before) throw new Error("Target changed since approval");
 		if (!(await target.compareAndSwap(proposal.before, proposal.after)))
-			throw new Error("Target changed during application");
+			throw new Error(target.failureReason?.() ?? "Target changed during application");
 		if ((await target.read()) !== proposal.after) throw new Error("Application effect not observed");
 		if (!(await target.validate())) throw new Error("Validation failed");
 		if ((await target.read()) !== proposal.after) throw new Error("Target changed during validation");
