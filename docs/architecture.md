@@ -57,8 +57,9 @@ extensions.
   there, and the open fails clearly when none does. Agents resize and move panes with the cmux MCP (`resize_pane`,
   `move_surface`, `swap_pane`).
 - **Handoff**: `spawn` with `handoff: true` (the planner opening the executor) closes the caller once the new agent is
-  connected and the caller's turn has ended, with its pane (a root's own terminal too), while the new agent and its
-  workers go on.
+  connected and the caller's turn has ended, with its pane (a root's own terminal too), while the new agent goes on. The
+  new agent adopts the caller's live workers: they become its children, their queued results and questions move to it,
+  and it takes the caller's place under the caller's parent (a root's new agent becomes the root). Other agents are untouched.
 - **Messages**: one FIFO queue per agent; the hub prompts an agent only when it is idle, so each message gets its own
   turn and result. A worker's first message is its task, as a person would write it, and its parent's messages arrive
   plain; a message from anyone else starts with `[agent-link] <name>:`. A worker's final answer reaches its parent as

@@ -55,7 +55,7 @@ export function toolDefs(opts: { harnesses: readonly string[]; pull: boolean }):
 					handoff: {
 						type: "boolean",
 						description:
-							"true when the new agent takes over your work (a planner handing the plan to an executor): once it runs and your turn ends, your pane closes; its workers and its results stay with it",
+							"true when the new agent takes over your work (a planner handing the plan to an executor): once it runs and your turn ends, your pane closes; it adopts your live workers (they become its workers, with their queued results and questions) and takes your place under your parent",
 					},
 				},
 				required: ["harness", "task"],
@@ -168,7 +168,7 @@ export function spawnReply(res: { name: string } | { error: string }, pull: bool
 	if ("error" in res) return text(`not spawned: ${res.error}`, true);
 	if (handoff)
 		return text(
-			`spawned ${res.name}, which takes over. Tell the user in one or two lines what ${res.name} does next and end your turn; this pane closes then.`,
+			`spawned ${res.name}, which takes over and adopts your live workers. Tell the user in one or two lines what ${res.name} does next and end your turn; this pane closes then.`,
 		);
 	const later = pull
 		? "Its final answer waits in the hub for inbox()."
