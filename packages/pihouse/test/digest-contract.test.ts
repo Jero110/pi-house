@@ -27,6 +27,17 @@ test("rejects wrong identity, schema, missing or empty sections", () => {
 	assert.equal(validate(value).ok, false);
 });
 
+test("rejects malformed section containers and values", () => {
+	for (const sections of [null, [], "text", 42]) {
+		assert.equal(validate({ ...artifact(), sections }).ok, false);
+	}
+	for (const invalid of [null, [], {}, 42, false]) {
+		assert.equal(validate({ ...artifact(), sections: { ...artifact().sections, participants: invalid } }).ok, false);
+	}
+	assert.equal(validate([]).ok, false);
+	assert.equal(validate(null).ok, false);
+});
+
 test("rejects incomplete finish, malformed JSON and oversized output without truncation", () => {
 	assert.equal(validate(artifact(), "length").ok, false);
 	assert.equal(validate(artifact(), "unknown").ok, false);
