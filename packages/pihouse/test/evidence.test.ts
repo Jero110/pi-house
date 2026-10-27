@@ -9,6 +9,7 @@ import { captureRun } from "../src/workflow/capture.ts";
 import { openMemory } from "../src/workflow/memory.ts";
 import { ACTIVE_MARKER } from "../src/workflow/migration.ts";
 import { renderEvidenceReport, type WorkflowEvidence } from "../src/workflow/report.ts";
+import { appendRoutingDecision } from "../src/workflow/routing-profiles.ts";
 import { openOperationalStore } from "../src/workflow/storage.ts";
 
 test("activated verified capture persists operational rows and repeats idempotently", () => {
@@ -493,4 +494,129 @@ test("capture persists body-free stable revisions and is idempotent", () => {
 		"updatedAt alone is not a source cursor",
 	);
 	assert.equal(JSON.parse(readFileSync(file, "utf8")).revision, 1);
+});
+
+// Routing in captured evidence: the decision that chose a worker stays in the body-free evidence after its raw copies
+// are gone, and an unrouted run keeps the fingerprint it had before routing was recorded.
+function routedRun(home: string): { root: SessionRecord; worker: SessionRecord } {
+	const root: SessionRecord = {
+		id: "root-routed",
+		name: "workflow-planner",
+		parent: null,
+		parentName: null,
+		root: "root-routed",
+		harness: "pihouse",
+		model: null,
+		cwd: home,
+		state: "exited",
+		depth: 0,
+		sessionId: "missing-transcript",
+		transcript: undefined,
+		startedAt: "2026-01-01T00:00:00.000Z",
+		updatedAt: "2026-01-01T00:01:00.000Z",
+	};
+	const worker: SessionRecord = {
+		...root,
+		id: "worker-w2",
+		name: "w-2",
+		parent: root.id,
+		parentName: root.name,
+		depth: 1,
+		model: "anthropic/claude-sonnet-5-5",
+		sessionId: undefined,
+		startedAt: "2026-01-01T00:00:30.000Z",
+	};
+	return { root, worker };
+}
+
+test("a routed worker keeps the decision that chose it in captured evidence, and the report regenerates it", () => {
+	const home = mkdtempSync(join(tmpdir(), "pihouse-evidence-routing-"));
+	try {
+		const { root, worker } = routedRun(home);
+		appendRoutingDecision(home, {
+			time: Date.parse("2026-01-01T00:00:10Z"),
+			profile: "build",
+			task: "T1",
+			agent: "w-2",
+			model: "anthropic/claude-sonnet-5-5",
+			account: "claude",
+			billing: "subscription",
+			reason: "authorized alternative (usage endpoint, observed 5s ago)",
+			failure: "exhausted",
+			checkpoint: null,
+		});
+		const store = openMemory(join(home, "memory"));
+		assert.equal(captureRun([root, worker], root, store, { by: "planner" }), "written");
+		const stored = JSON.parse(readFileSync(join(home, "memory/runs/root-routed/run.json"), "utf8"));
+		const participants = stored.evidence.participants as { id: string; routing?: unknown }[];
+		assert.deepEqual(participants.find((p) => p.id === "worker-w2")?.routing, {
+			profile: "build",
+			model: "anthropic/claude-sonnet-5-5",
+			account: "claude",
+			reason: "authorized alternative (usage endpoint, observed 5s ago)",
+			failure: "exhausted",
+			decidedAt: "2026-01-01T00:00:10.000Z",
+		});
+		assert.equal(
+			participants.some((p) => p.id === "root-routed" && "routing" in p),
+			false,
+			"an unrouted participant carries no routing key",
+		);
+		assert.match(
+			renderEvidenceReport(stored.evidence),
+			/## Routing decisions[\s\S]*\| worker-w2 \| build \| anthropic\/claude-sonnet-5-5 \| anthropic\/claude-sonnet-5-5 \| claude \|/,
+		);
+	} finally {
+		rmSync(home, { recursive: true, force: true });
+	}
+});
+
+test("an unrouted run keeps its evidence fingerprint when a routing journal exists for other agents", () => {
+	const home = mkdtempSync(join(tmpdir(), "pihouse-evidence-fingerprint-"));
+	try {
+		// A verifiable pi JSONL source, so a second capture of the same run is a re-capture, not a deferral.
+		const source = join(home, "native-session.jsonl");
+		writeFileSync(
+			source,
+			`${JSON.stringify({ type: "session", id: "native-fp", cwd: home })}\n${JSON.stringify({ type: "message", id: "message-fp", timestamp: "2026-01-01T00:00:00.000Z", message: { role: "user", content: "synthetic" } })}\n`,
+		);
+		const root: SessionRecord = {
+			id: "root-fingerprint",
+			name: "workflow-planner",
+			parent: null,
+			parentName: null,
+			root: "root-fingerprint",
+			harness: "pihouse",
+			model: null,
+			cwd: home,
+			state: "exited",
+			depth: 0,
+			sessionId: "native-fp",
+			transcript: source,
+			startedAt: "2026-01-01T00:00:00.000Z",
+			updatedAt: "2026-01-01T00:01:00.000Z",
+		};
+		const store = openMemory(join(home, "memory"));
+		assert.equal(captureRun([root], root, store, { by: "planner" }), "written");
+		const file = join(home, "memory/runs/root-fingerprint/run.json");
+		const before = JSON.parse(readFileSync(file, "utf8"));
+		appendRoutingDecision(home, {
+			time: Date.parse("2026-01-01T00:00:10Z"),
+			profile: "build",
+			task: "T1",
+			agent: "someone-else",
+			model: "openai-codex/gpt-6-luna",
+			account: "openai",
+			billing: "subscription",
+			reason: "available",
+			failure: null,
+			checkpoint: null,
+		});
+		assert.equal(captureRun([root], root, store, { by: "planner" }), "written");
+		const after = JSON.parse(readFileSync(file, "utf8"));
+		assert.equal(after.fingerprint, before.fingerprint, "no decision for this run leaves the evidence unchanged");
+		assert.equal(after.revision, before.revision);
+	} finally {
+		rmSync(home, { recursive: true, force: true });
+	}
 });

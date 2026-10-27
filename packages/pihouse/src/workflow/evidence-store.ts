@@ -66,6 +66,8 @@ function participantLineage(participant: WorkflowEvidenceParticipant): Record<st
 		loadedSkills: [...participant.loadedSkills],
 		missing: participant.missing,
 		validation: "unknown",
+		// Only a participant a routing decision chose carries the key; the payload of an unrouted run is unchanged.
+		...(participant.routing ? { routing: participant.routing } : {}),
 	};
 }
 

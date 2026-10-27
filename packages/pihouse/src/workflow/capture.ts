@@ -15,7 +15,15 @@ import { capturedAdmission, cleanedCursors } from "./cleanup.ts";
 import { persistEvidence } from "./evidence-store.ts";
 import type { MemoryStore, RunAgentEntry, RunPackage, RunTranscript } from "./memory.ts";
 import { ACTIVE_MARKER } from "./migration.ts";
-import { newTokens, renderEvidenceReport, type WorkflowEvidence, type WorkflowEvidenceParticipant } from "./report.ts";
+import {
+	newTokens,
+	renderEvidenceReport,
+	routingEvidence,
+	routingFor,
+	type WorkflowEvidence,
+	type WorkflowEvidenceParticipant,
+} from "./report.ts";
+import { readRoutingDecisions } from "./routing-profiles.ts";
 import { buildRun, isExecutor, type RunAgent, type WorkflowRun } from "./run.ts";
 import { inspectJsonlCursor, type JsonlSourceCursor } from "./source-cursor.ts";
 import { openOperationalStore } from "./storage.ts";
@@ -374,8 +382,10 @@ function mergeParticipant(
 					...(a?.toolCalls !== undefined && b?.toolCalls !== undefined ? { toolCalls: a.toolCalls + b.toolCalls } : {}),
 				}
 			: null;
+	const routing = next.routing ?? previous.routing;
 	return {
 		...next,
+		...(routing ? { routing } : {}),
 		taskId: next.taskId ?? previous.taskId,
 		taskTitle: next.taskTitle ?? previous.taskTitle,
 		assignedSkills: [...new Set([...previous.assignedSkills, ...next.assignedSkills])],
@@ -567,6 +577,8 @@ export function captureRunOutcome(
 	const evidenceTimingComplete = pkg.agents.every(
 		(agent) => agent.missing === null && timingKnown(run.agents.find((item) => item.record.id === agent.id)),
 	);
+	// The journal sits beside the memory folder: the store is <pihouse home>/memory (see pihousePaths()).
+	const decisions = readRoutingDecisions(dirname(store.dir)).decisions;
 	let evidence: WorkflowEvidence = {
 		lineage: forkLineage ?? pkg.id,
 		lineageStatus: forkedFrom
@@ -599,6 +611,7 @@ export function captureRunOutcome(
 				const sourceCursor = sourceCursors[id];
 				const continuation = sourceCursor?.sourceKind === "jsonl" && priorCursors?.[id]?.sourceKind === "jsonl";
 				const measuredTiming = timingKnown(runAgent);
+				const decision = runAgent ? routingFor(runAgent.record.name, runAgent.record.startedAt, decisions) : undefined;
 				return {
 					id,
 					parent,
@@ -621,6 +634,8 @@ export function captureRunOutcome(
 								toolCalls: runAgent.summary.toolCalls,
 							}
 						: null,
+					// Only a participant a routing decision chose gets the key, so an unrouted run keeps its fingerprint.
+					...(decision ? { routing: routingEvidence(decision) } : {}),
 				};
 			},
 		),
