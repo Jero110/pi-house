@@ -26,6 +26,7 @@ export const EXTENSIONS = [
 	"workflow.ts",
 	"claude-login.ts",
 	"account-usage.ts",
+	"context-upgrade.ts",
 ].map((f) => fileURLToPath(new URL(`./extensions/${f}`, import.meta.url)));
 
 /** The black, white and lilac theme pihouse runs pi with. */

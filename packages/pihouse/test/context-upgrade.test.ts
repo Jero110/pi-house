@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import extension from "../src/extensions/context-upgrade.ts";
+import { EXTENSIONS } from "../src/paths.ts";
 import { assess, type Profile } from "../src/workflow/context-upgrade.ts";
 
 const profile: Profile = {
@@ -126,4 +127,58 @@ test("manual apply switches once and records the actual native result", async ()
 	assert.ok(entries.some((entry) => (entry.data as { status?: string }).status === "switched"));
 	await command("apply", ctx);
 	assert.equal(calls, 1);
+});
+
+// Problem: a monitor that ships in every session must stay silent for a user who never opted in.
+// Example: an ordinary session has no --context-upgrade-profile; a turn that reaches the context limit must not record
+// a pending upgrade, notify, or ask the model anything.
+// Solution: pihouse registers the extension in every session, and this test runs its handlers with a context whose
+// model calls throw. Only the explicit profile flag turns monitoring on.
+test("pihouse registers the context upgrade monitor in every session", () => {
+	assert.ok(EXTENSIONS.some((e) => e.endsWith("extensions/context-upgrade.ts")));
+});
+
+test("an unconfigured session records nothing, notifies nothing and never calls the model", async () => {
+	const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown>();
+	const entries: unknown[] = [];
+	const notices: string[] = [];
+	const registered: string[] = [];
+	extension({
+		on: (n: string, f: (event: unknown, ctx: unknown) => unknown) => handlers.set(n, f),
+		registerFlag: (name: string) => registered.push(`flag:${name}`),
+		getFlag: () => undefined,
+		registerCommand: (name: string) => registered.push(`command:${name}`),
+		appendEntry: (...args: unknown[]) => entries.push(args),
+	} as unknown as ExtensionAPI);
+	const modelCall = () => {
+		throw new Error("an unconfigured session must not reach the model registry");
+	};
+	const ctx = {
+		model: source,
+		getContextUsage: () => usage,
+		modelRegistry: { find: modelCall, getAvailable: modelCall },
+		sessionManager: { getSessionId: () => "session", getEntries: () => [] },
+		hasUI: true,
+		ui: { notify: (s: string) => notices.push(s) },
+	};
+	await handlers.get("turn_end")?.({}, ctx);
+	await handlers.get("session_before_compact")?.({}, ctx);
+	assert.deepEqual(entries, []);
+	assert.deepEqual(notices, []);
+	assert.deepEqual(registered, ["flag:context-upgrade-profile", "command:context-upgrade"]);
+});
+
+// The help text is what a user sees in pi's flag and command lists. Automatic switching is not implemented, and the
+// text must say so, so nobody expects the monitor to switch models on its own.
+test("the help text says the monitor only reports and that automatic switching is not implemented", () => {
+	const descriptions: string[] = [];
+	extension({
+		on() {},
+		registerFlag: (_name: string, options: { description?: string }) => descriptions.push(options.description ?? ""),
+		getFlag: () => undefined,
+		registerCommand: (_name: string, options: { description?: string }) => descriptions.push(options.description ?? ""),
+		appendEntry() {},
+	} as unknown as ExtensionAPI);
+	assert.equal(descriptions.length, 2);
+	for (const text of descriptions) assert.match(text, /no automatic switching/i);
 });

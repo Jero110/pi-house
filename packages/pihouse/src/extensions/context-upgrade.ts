@@ -6,7 +6,15 @@ const ENTRY = "context-upgrade";
 export default function contextUpgrade(pi: ExtensionAPI) {
 	const attempted = new Set<string>();
 	const noticed = new Set<string>();
-	pi.registerFlag("context-upgrade-profile", { type: "string", description: "Explicit JSON context upgrade profile" });
+	// Problem: a user who sees "context upgrade" in the help may expect the session to switch models by itself.
+	// Example: the session reaches its context limit, and nothing happens until the user runs the command.
+	// Solution: the help says what the monitor does and what it never does. Automatic switching is not implemented: there
+	// is no proven safe point to switch models in the middle of a session.
+	pi.registerFlag("context-upgrade-profile", {
+		type: "string",
+		description:
+			"Explicit JSON context upgrade profile. Opt-in: without it nothing is monitored. Reports a pending upgrade only; no automatic switching",
+	});
 
 	function snapshot(ctx: ExtensionContext) {
 		const profile = parseProfile(pi.getFlag("context-upgrade-profile"));
@@ -79,7 +87,7 @@ export default function contextUpgrade(pi: ExtensionAPI) {
 		monitor(ctx);
 	});
 	pi.registerCommand("context-upgrade", {
-		description: "Apply the explicitly configured pending context upgrade",
+		description: "Apply the configured pending context upgrade once, when you ask; no automatic switching",
 		handler: async (args, ctx) => {
 			if (args.trim() !== "apply") {
 				if (ctx.hasUI) ctx.ui.notify("Usage: /context-upgrade apply", "info");
