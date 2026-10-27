@@ -30,6 +30,8 @@ test("same-timestamp JSONL append verifies the prefix and returns only appended 
 	assert.equal(next.state, "verified");
 	if (next.state !== "verified") return;
 	assert.deepEqual(next.appendedRecordIds, ["two"]);
+	assert.match(next.appendedText, /synthetic two/);
+	assert.doesNotMatch(next.appendedText, /synthetic one/);
 	assert.equal(next.cursor.byteOffset, Buffer.byteLength(`${header}\n${entry("one")}\n${entry("two")}\n`));
 });
 

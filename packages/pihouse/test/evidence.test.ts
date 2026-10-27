@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -168,6 +168,7 @@ test("verified JSONL append advances a revision at the same journal timestamp an
 	assert.equal(captureRun([record], record, store, { by: "planner" }), "written");
 	const file = join(home, "memory/runs/root/run.json");
 	const first = JSON.parse(readFileSync(file, "utf8"));
+	assert.equal(first.evidence.metrics.newTokens, null, "a transcript without usage events is unknown, not zero");
 	assert.equal(captureRun([record], record, store, { by: "planner" }), "written");
 	const repeated = JSON.parse(readFileSync(file, "utf8"));
 	assert.equal(repeated.revision, first.revision, "same source prefix remains idempotent");
@@ -178,8 +179,18 @@ test("verified JSONL append advances a revision at the same journal timestamp an
 	const appended = JSON.parse(readFileSync(file, "utf8"));
 	assert.equal(appended.id, first.id);
 	assert.equal(appended.revision, first.revision + 1);
+	assert.equal(appended.metrics.messages, 2, "structured totals accumulate the delta once");
+	assert.equal(appended.evidence.participants[0].messages, 2);
 	assert.deepEqual(appended.evidence.cursor.root.appendedRecordIds, ["message-2"]);
 	assert.equal(appended.evidence.cursor.root.byteOffset, Buffer.byteLength(readFileSync(source)));
+	const capturedDelta = readFileSync(join(home, "memory/runs/root/transcripts/root.json"), "utf8");
+	assert.match(capturedDelta, /synthetic message-2/);
+	assert.doesNotMatch(capturedDelta, /synthetic message-1/, "discarded source prefix must not be reimported");
+	assert.equal(
+		existsSync(join(home, "memory/runs/root/transcripts/root.jsonl")),
+		false,
+		"old raw transcript copy is not recreated",
+	);
 });
 
 test("truncation and unknown native cursor provenance defer without replacing retained evidence", () => {

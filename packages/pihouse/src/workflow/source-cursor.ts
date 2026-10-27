@@ -11,7 +11,7 @@ export interface JsonlSourceCursor {
 }
 
 export type JsonlCursorInspection =
-	| { state: "verified"; cursor: JsonlSourceCursor; appendedRecordIds: string[] }
+	| { state: "verified"; cursor: JsonlSourceCursor; appendedRecordIds: string[]; appendedText: string }
 	| { state: "deferred"; reason: string };
 
 const fingerprint = (bytes: Buffer): string => createHash("sha256").update(bytes).digest("hex");
@@ -70,6 +70,7 @@ export function inspectJsonlCursor(
 		offset += length + 1;
 	}
 	const appendedRecordIds: string[] = [];
+	const appendedLines: string[] = [];
 	if (previous) {
 		if (previous.sourceKind !== "jsonl" || previous.sourceId !== sourceId)
 			return { state: "deferred", reason: "stored cursor provenance does not match this source" };
@@ -95,6 +96,7 @@ export function inspectJsonlCursor(
 			const id = recordId(record.line);
 			if (id === undefined) return { state: "deferred", reason: "appended JSONL record is invalid" };
 			if (id && !seenIds.has(id)) {
+				appendedLines.push(record.line);
 				appendedRecordIds.push(id);
 				seenIds.add(id);
 			}
@@ -107,6 +109,7 @@ export function inspectJsonlCursor(
 		for (const record of records.slice(1)) {
 			const id = recordId(record.line);
 			if (id && !appendedRecordIds.includes(id)) appendedRecordIds.push(id);
+			appendedLines.push(record.line);
 		}
 	}
 	return {
@@ -127,5 +130,6 @@ export function inspectJsonlCursor(
 							: null,
 		},
 		appendedRecordIds,
+		appendedText: appendedLines.length ? `${appendedLines.join("\n")}\n` : "",
 	};
 }

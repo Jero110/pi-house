@@ -127,7 +127,12 @@ export function pickRoot(
 	);
 }
 
-export function buildRun(records: readonly SessionRecord[], root: SessionRecord, roots?: TranscriptRoots): WorkflowRun {
+export function buildRun(
+	records: readonly SessionRecord[],
+	root: SessionRecord,
+	roots?: TranscriptRoots,
+	transcriptOverrides?: ReadonlyMap<string, Transcript>,
+): WorkflowRun {
 	const tree = treeOf(records, root.id);
 	const roles = assignRoles(tree);
 	let plan: string | undefined;
@@ -143,15 +148,17 @@ export function buildRun(records: readonly SessionRecord[], root: SessionRecord,
 		};
 		if (agent.role === "executor") plan ??= record.task ? PLAN_PATH.exec(record.task)?.[1] : undefined;
 		try {
-			agent.transcript = readTranscript(
-				{
-					harness: record.harness,
-					sessionId: record.sessionId,
-					transcript: record.transcript,
-					worker: record.parent !== null,
-				},
-				roots,
-			);
+			agent.transcript =
+				transcriptOverrides?.get(record.id) ??
+				readTranscript(
+					{
+						harness: record.harness,
+						sessionId: record.sessionId,
+						transcript: record.transcript,
+						worker: record.parent !== null,
+					},
+					roots,
+				);
 			agent.summary = summarize(agent.transcript);
 		} catch (e) {
 			agent.missing = e instanceof Error ? e.message : String(e);

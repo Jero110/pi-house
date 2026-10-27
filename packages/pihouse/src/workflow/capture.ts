@@ -9,10 +9,10 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "
 import { basename, dirname, join } from "node:path";
 import type { SessionRecord } from "agent-link-core";
 import { treeOf } from "agent-link-core";
-import { locateTranscript, type TranscriptRoots } from "agent-transcripts";
+import { locateTranscript, parsePi, type Transcript, type TranscriptRoots, type Usage } from "agent-transcripts";
 import type { MemoryStore, RunAgentEntry, RunPackage, RunTranscript } from "./memory.ts";
-import { newTokens, renderReport } from "./report.ts";
-import { buildRun, isExecutor, type WorkflowRun } from "./run.ts";
+import { newTokens, renderEvidenceReport, type WorkflowEvidence, type WorkflowEvidenceParticipant } from "./report.ts";
+import { buildRun, isExecutor, type RunAgent, type WorkflowRun } from "./run.ts";
 import { inspectJsonlCursor, type JsonlSourceCursor } from "./source-cursor.ts";
 
 export type FlagBy = RunPackage["flaggedBy"];
@@ -183,13 +183,17 @@ function rawOf(harness: string, source: string | undefined): Uint8Array | null {
 /** The package and the files to copy for a run. Pure but for reading the transcripts' raw files. */
 export function packageOf(
 	run: WorkflowRun,
-	opts: { by: FlagBy; reason?: string; now?: Date },
+	opts: { by: FlagBy; reason?: string; now?: Date; includeRaw?: boolean },
 ): { pkg: RunPackage; transcripts: RunTranscript[] } {
 	const transcripts: RunTranscript[] = [];
 	const agents = run.agents.map((a): RunAgentEntry => {
 		const id = a.record.id;
 		if (a.transcript)
-			transcripts.push({ agentId: id, normalized: a.transcript, raw: rawOf(a.record.harness, a.transcript.source) });
+			transcripts.push({
+				agentId: id,
+				normalized: a.transcript,
+				raw: opts.includeRaw === false ? null : rawOf(a.record.harness, a.transcript.source),
+			});
 		const raw = transcripts.find((t) => t.agentId === id)?.raw;
 		return {
 			id,
@@ -251,6 +255,134 @@ type StoredSourceCursor =
 	| (JsonlSourceCursor & { appendedRecordIds: string[] })
 	| { sourceKind: "unknown"; sourceId: string | null; reason: string; appendedRecordIds: [] };
 
+const USAGE_KEYS = ["input", "output", "cacheRead", "cacheWrite"] as const;
+
+function usageEvidence(value: Record<string, unknown>): Partial<Usage> {
+	const usage: Partial<Usage> = {};
+	for (const key of USAGE_KEYS) {
+		const count = value[key];
+		if (typeof count === "number" && Number.isFinite(count)) usage[key] = count;
+	}
+	return usage;
+}
+
+function observedUsage(
+	agent: RunAgent | undefined,
+	value: Record<string, unknown>,
+	continuation: boolean,
+): Partial<Usage> {
+	if (!agent?.transcript || agent.missing) return {};
+	const assistants = agent.transcript.messages.filter((message) => message.role === "assistant");
+	if (assistants.length === 0) return continuation ? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } : {};
+	if (assistants.some((message) => message.usage === undefined)) return {};
+	return usageEvidence(value);
+}
+
+function timingKnown(agent: RunAgent | undefined): boolean {
+	if (!agent?.transcript || agent.missing) return false;
+	return agent.transcript.messages
+		.filter((message) => message.role === "assistant")
+		.every((message) => message.durationMs !== undefined);
+}
+
+function mergeUsage(previous: Partial<Usage>, next: Partial<Usage>): Partial<Usage> {
+	const merged: Partial<Usage> = {};
+	for (const key of USAGE_KEYS) {
+		const oldValue = previous[key];
+		const nextValue = next[key];
+		if (oldValue !== undefined && nextValue !== undefined) merged[key] = oldValue + nextValue;
+	}
+	return merged;
+}
+
+function mergeMetric(previous: number | null, next: number | null): number | null {
+	return previous === null || next === null ? null : previous + next;
+}
+
+function mergeEvidence(
+	previous: StoredPackage | undefined,
+	next: WorkflowEvidence,
+	sourceChanged: boolean,
+): WorkflowEvidence {
+	const oldEvidence = previous?.evidence as WorkflowEvidence | undefined;
+	if (!oldEvidence || !Array.isArray(oldEvidence.participants)) return next;
+	const oldById = new Map(oldEvidence.participants.map((participant) => [participant.id, participant]));
+	const participants = next.participants.map((participant) => {
+		const old = oldById.get(participant.id);
+		const cursor = next.cursor[participant.id];
+		const appendedRecordIds =
+			cursor && typeof cursor === "object" ? Reflect.get(cursor, "appendedRecordIds") : undefined;
+		const hasNewEvidence = Array.isArray(appendedRecordIds) && appendedRecordIds.length > 0;
+		return old ? mergeParticipant(old, participant, hasNewEvidence) : participant;
+	});
+	const usageComplete = participants.every((participant) =>
+		USAGE_KEYS.every((key) => participant.usage[key] !== undefined),
+	);
+	const usage = participants.reduce<Usage>(
+		(total, participant) => ({
+			input: total.input + (participant.usage.input ?? 0),
+			output: total.output + (participant.usage.output ?? 0),
+			cacheRead: total.cacheRead + (participant.usage.cacheRead ?? 0),
+			cacheWrite: total.cacheWrite + (participant.usage.cacheWrite ?? 0),
+		}),
+		{ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	);
+	const activeKnown = participants.every((participant) => participant.activeMs !== null);
+	const messagesKnown = participants.every((participant) => participant.messages !== null);
+	return {
+		...next,
+		participants,
+		metrics: {
+			newTokens: usageComplete ? newTokens(usage) : null,
+			cacheRead: usageComplete ? usage.cacheRead : null,
+			activeMs: activeKnown
+				? participants.reduce((total, participant) => total + (participant.activeMs ?? 0), 0)
+				: null,
+			wallMs: sourceChanged ? null : oldEvidence.metrics.wallMs,
+			agents: participants.length,
+			messages: messagesKnown
+				? participants.reduce((total, participant) => total + (participant.messages ?? 0), 0)
+				: null,
+		},
+	};
+}
+
+function mergeParticipant(
+	previous: WorkflowEvidenceParticipant,
+	next: WorkflowEvidenceParticipant,
+	hasNewEvidence: boolean,
+): WorkflowEvidenceParticipant {
+	const a = previous.summary;
+	const b = next.summary;
+	const summary =
+		a || b
+			? {
+					...(a?.assistantMessages !== undefined && b?.assistantMessages !== undefined
+						? { assistantMessages: a.assistantMessages + b.assistantMessages }
+						: {}),
+					...(a?.slowestMs !== undefined && b?.slowestMs !== undefined
+						? { slowestMs: Math.max(a.slowestMs, b.slowestMs) }
+						: {}),
+					...(a?.failedToolCalls !== undefined && b?.failedToolCalls !== undefined
+						? { failedToolCalls: a.failedToolCalls + b.failedToolCalls }
+						: {}),
+					...(a?.toolCalls !== undefined && b?.toolCalls !== undefined ? { toolCalls: a.toolCalls + b.toolCalls } : {}),
+				}
+			: null;
+	return {
+		...next,
+		taskId: next.taskId ?? previous.taskId,
+		taskTitle: next.taskTitle ?? previous.taskTitle,
+		assignedSkills: [...new Set([...previous.assignedSkills, ...next.assignedSkills])],
+		loadedSkills: [...new Set([...previous.loadedSkills, ...next.loadedSkills])],
+		usage: hasNewEvidence ? mergeUsage(previous.usage, next.usage) : previous.usage,
+		activeMs: hasNewEvidence ? mergeMetric(previous.activeMs, next.activeMs) : previous.activeMs,
+		messages: hasNewEvidence ? mergeMetric(previous.messages, next.messages) : previous.messages,
+		missing: next.missing ?? previous.missing,
+		summary: hasNewEvidence ? summary : previous.summary,
+	};
+}
+
 const runFile = (store: MemoryStore, id: string) => join(store.dir, "runs", id, "run.json");
 
 function readPackage(store: MemoryStore, id: string): StoredPackage | undefined {
@@ -303,6 +435,7 @@ export function captureRun(
 	if (priorCursors && Object.keys(priorCursors).some((id) => !currentIds.has(id))) return "deferred";
 	const sourceCursors: Record<string, StoredSourceCursor> = {};
 	const sourcePaths: Record<string, string> = {};
+	const transcriptOverrides = new Map<string, Transcript>();
 	for (const record of tree) {
 		const prior = priorCursors?.[record.id];
 		if (prior?.sourceKind === "unknown") return "deferred";
@@ -337,8 +470,12 @@ export function captureRun(
 			appendedRecordIds: cursorUnchanged ? prior.appendedRecordIds : inspected.appendedRecordIds,
 		};
 		sourcePaths[record.id] = sourcePath;
+		if (prior?.sourceKind === "jsonl") {
+			const delta = parsePi(inspected.appendedText, sourcePath, record.harness);
+			transcriptOverrides.set(record.id, { ...delta, cwd: record.cwd });
+		}
 	}
-	const run = buildRun(records, root, opts.roots);
+	const run = buildRun(records, root, opts.roots, transcriptOverrides);
 	for (const [id, cursor] of Object.entries(sourceCursors)) {
 		if (cursor.sourceKind !== "jsonl") continue;
 		const record = tree.find((item) => item.id === id);
@@ -352,17 +489,21 @@ export function captureRun(
 		)
 			return "deferred";
 	}
-	const { pkg, transcripts } = packageOf(run, opts);
-	const completeUsage = pkg.agents.every((agent) =>
-		["input", "output", "cacheRead", "cacheWrite"].every(
-			(key) => typeof agent.usage[key] === "number" && Number.isFinite(agent.usage[key]),
-		),
-	);
+	const { pkg, transcripts } = packageOf(run, { ...opts, includeRaw: !previous });
 	const completeSummaries = pkg.agents.every((agent) => agent.missing === null);
 	const rootCursor = sourceCursors[root.id];
 	const forkedFrom = rootCursor?.sourceKind === "jsonl" ? rootCursor.forkedFrom : null;
 	const forkLineage = forkedFrom ? lineageForSession(store, forkedFrom, pkg.project) : undefined;
-	const evidence = {
+	const evidenceUsageComplete = pkg.agents.every((agent) => {
+		const runAgent = run.agents.find((item) => item.record.id === agent.id);
+		const continuation = priorCursors?.[agent.id]?.sourceKind === "jsonl";
+		const usage = observedUsage(runAgent, agent.usage, continuation);
+		return USAGE_KEYS.every((key) => usage[key] !== undefined);
+	});
+	const evidenceTimingComplete = pkg.agents.every(
+		(agent) => agent.missing === null && timingKnown(run.agents.find((item) => item.record.id === agent.id)),
+	);
+	let evidence: WorkflowEvidence = {
 		lineage: forkLineage ?? pkg.id,
 		lineageStatus: forkedFrom
 			? forkLineage
@@ -389,39 +530,81 @@ export function captureRun(
 				activeMs,
 				messages,
 				missing,
-			}) => ({
-				id,
-				parent,
-				role,
-				harness,
-				model,
-				taskId: taskId ?? null,
-				taskTitle: taskTitle ?? null,
-				assignedSkills,
-				loadedSkills,
-				usage,
-				activeMs: missing ? null : activeMs,
-				messages: missing ? null : messages,
-				missing,
-				summary: run.agents.find((item) => item.record.id === id)?.summary
-					? {
-							assistantMessages: run.agents.find((item) => item.record.id === id)?.summary?.assistantMessages,
-							slowestMs: run.agents.find((item) => item.record.id === id)?.summary?.slowestMs,
-							failedToolCalls: run.agents.find((item) => item.record.id === id)?.summary?.failedToolCalls,
-							toolCalls: run.agents.find((item) => item.record.id === id)?.summary?.toolCalls,
-						}
-					: null,
-			}),
+			}) => {
+				const runAgent = run.agents.find((item) => item.record.id === id);
+				const sourceCursor = sourceCursors[id];
+				const continuation = sourceCursor?.sourceKind === "jsonl" && priorCursors?.[id]?.sourceKind === "jsonl";
+				const measuredTiming = timingKnown(runAgent);
+				return {
+					id,
+					parent,
+					role,
+					harness,
+					model,
+					taskId: taskId ?? null,
+					taskTitle: taskTitle ?? null,
+					assignedSkills,
+					loadedSkills,
+					usage: observedUsage(runAgent, usage, continuation),
+					activeMs: missing || !measuredTiming ? null : activeMs,
+					messages: missing ? null : messages,
+					missing,
+					summary: runAgent?.summary
+						? {
+								assistantMessages: runAgent.summary.assistantMessages,
+								...(measuredTiming ? { slowestMs: runAgent.summary.slowestMs } : {}),
+								failedToolCalls: runAgent.summary.failedToolCalls,
+								toolCalls: runAgent.summary.toolCalls,
+							}
+						: null,
+				};
+			},
 		),
 		metrics: {
-			newTokens: completeUsage ? pkg.metrics.newTokens : null,
-			cacheRead: completeUsage ? pkg.metrics.cacheRead : null,
-			activeMs: completeSummaries ? pkg.metrics.activeMs : null,
-			wallMs: completeSummaries ? pkg.metrics.wallMs : null,
+			newTokens: evidenceUsageComplete ? pkg.metrics.newTokens : null,
+			cacheRead: evidenceUsageComplete ? pkg.metrics.cacheRead : null,
+			activeMs: evidenceTimingComplete ? pkg.metrics.activeMs : null,
+			wallMs:
+				completeSummaries &&
+				run.agents.every((agent) => agent.transcript?.startedAt !== undefined && agent.transcript.endedAt !== undefined)
+					? pkg.metrics.wallMs
+					: null,
 			agents: pkg.metrics.agents,
 			messages: completeSummaries ? pkg.metrics.messages : null,
 		},
 		cursor: sourceCursors,
+	};
+	const sourceChanged = Object.entries(sourceCursors).some(([id, cursor]) => {
+		const old = priorCursors?.[id];
+		return (
+			cursor.sourceKind !== "jsonl" ||
+			old?.sourceKind !== "jsonl" ||
+			old.byteOffset !== cursor.byteOffset ||
+			old.prefixFingerprint !== cursor.prefixFingerprint
+		);
+	});
+	evidence = mergeEvidence(previous, evidence, sourceChanged);
+	const evidenceById = new Map(evidence.participants.map((participant) => [participant.id, participant]));
+	pkg.agents = pkg.agents.map((agent) => {
+		const participant = evidenceById.get(agent.id);
+		return participant
+			? {
+					...agent,
+					usage: { ...participant.usage },
+					activeMs: participant.activeMs ?? 0,
+					messages: participant.messages ?? 0,
+					assignedSkills: participant.assignedSkills,
+					loadedSkills: participant.loadedSkills,
+				}
+			: agent;
+	});
+	pkg.metrics = {
+		newTokens: evidence.metrics.newTokens ?? 0,
+		cacheRead: evidence.metrics.cacheRead ?? 0,
+		activeMs: evidence.metrics.activeMs ?? 0,
+		wallMs: evidence.metrics.wallMs ?? 0,
+		agents: evidence.metrics.agents,
+		messages: evidence.metrics.messages ?? 0,
 	};
 	const fingerprint = createHash("sha256").update(JSON.stringify(evidence)).digest("hex");
 	const revision = previous?.fingerprint === fingerprint ? (previous.revision ?? 1) : (previous?.revision ?? 0) + 1;
@@ -434,16 +617,7 @@ export function captureRun(
 		cursor: sourceCursors,
 		...(review ? { review } : {}),
 	};
-	const reportRun = {
-		...run,
-		root: { ...run.root, task: undefined },
-		agents: run.agents.map((agent) => ({
-			...agent,
-			record: { ...agent.record, task: undefined },
-			transcript: undefined,
-		})),
-	};
-	return store.writeRun(stored, transcripts, `${renderReport(reportRun, { messages: false })}\n`);
+	return store.writeRun(stored, transcripts, renderEvidenceReport(evidence));
 }
 
 /** Records in run.json where a review of the run was written. A run not captured has nowhere to record it. */

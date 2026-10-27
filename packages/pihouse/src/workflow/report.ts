@@ -27,6 +27,9 @@ export interface WorkflowEvidenceParticipant {
 
 export interface WorkflowEvidence {
 	lineage: string;
+	lineageStatus?: string;
+	forkProvenance?: string;
+	destructiveEligibility?: string;
 	title: string;
 	project: string;
 	plan: string | null;
@@ -39,7 +42,7 @@ export interface WorkflowEvidence {
 		agents: number;
 		messages: number | null;
 	};
-	cursor: Record<string, string>;
+	cursor: Record<string, unknown>;
 }
 
 const ROLE_ORDER: Role[] = ["planner", "helper", "executor", "worker", "root"];
