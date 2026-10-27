@@ -1,4 +1,4 @@
-import { mkdirSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
@@ -7,6 +7,18 @@ export interface OperationalStore {
 	version: number;
 	fts: { available: boolean; diagnostic?: string };
 	close(): void;
+}
+
+export function backupOperationalState(db: DatabaseSync, artifactRoot: string, destination: string): void {
+	if (existsSync(destination)) throw new Error(`Backup destination already exists: ${destination}`);
+	mkdirSync(destination, { recursive: true, mode: 0o700 });
+	try {
+		writeFileSync(`${destination}/memory.sqlite`, db.serialize(), { flag: "wx", mode: 0o600 });
+		if (existsSync(artifactRoot))
+			cpSync(artifactRoot, `${destination}/documents`, { recursive: true, errorOnExist: true, force: false });
+	} catch (error) {
+		throw new Error(`Operational backup is incomplete at ${destination}; preserve it for inspection`, { cause: error });
+	}
 }
 
 export function openOperationalStore(path: string, options: { fts?: boolean } = {}): OperationalStore {

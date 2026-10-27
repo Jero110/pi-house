@@ -36,6 +36,8 @@ Startup verifies FTS5 availability in the actual runtime. Database and documents
 
 `memory.sqlite` uses `schema_migrations(version, applied_at)` as the migration ledger. Version 1 adds `runs`, immutable `revisions`, `participants`, structured `metrics`, `jobs`, `batches` and `batch_members`, `proposals`, `receipts`, `artifact_commits`, and `cleanup_manifests`. Stable text primary keys are caller-generated; foreign keys are enabled for every connection. Migration DDL is additive and the version ledger update uses a short `BEGIN IMMEDIATE` transaction with rollback on failure. SQLite FTS5 is probed independently and reported as a capability; an unavailable runtime must not trigger index rebuild or cleanup.
 
+`backupOperationalState` writes a serialized SQLite snapshot (all operational tables, including claims, metrics, decisions and receipts) and copies the canonical artifact directory into a new private destination. It refuses an existing destination; on failure it reports the incomplete destination and leaves it for inspection rather than deleting possible evidence. This is a local snapshot primitive, not an automated retention policy.
+
 Canonical artifacts use validated stable IDs, private 0700 directories and 0600 unique temporary files. A hash-bearing sidecar manifest is atomically renamed before/after the canonical artifact; recovery verifies bytes and path containment before reconciling the operational commit row. A hash mismatch is an error, not an empty-memory result.
 
 ## Success criteria / tests first
