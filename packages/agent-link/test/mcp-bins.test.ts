@@ -27,7 +27,7 @@ async function handshake(backend: "cmux" | "tmux", env: NodeJS.ProcessEnv): Prom
 		.sort((a, b) => Number(a.id) - Number(b.id));
 }
 
-test("agent-link-cmux and agent-link-tmux run as processes and serve the seven tools to a spawned agent", async () => {
+test("agent-link-cmux and agent-link-tmux run as processes and serve the eight tools to a spawned agent", async () => {
 	const t = await testHub();
 	try {
 		const root = await pullRoot(t.client);
@@ -40,7 +40,7 @@ test("agent-link-cmux and agent-link-tmux run as processes and serve the seven t
 			const instructions = String((init.result as { instructions?: string }).instructions);
 			assert.match(instructions, /^agent-link: this session is "w"; it was opened by "codex"\./);
 			const tools = (list.result as { tools: Array<{ name: string }> }).tools.map((x) => x.name);
-			assert.deepEqual(tools, ["spawn", "send", "permit", "reply", "status", "cancel", "inbox"]);
+			assert.deepEqual(tools, ["spawn", "send", "permit", "reply", "status", "cancel", "model", "inbox"]);
 		}
 	} finally {
 		await t.stop();
