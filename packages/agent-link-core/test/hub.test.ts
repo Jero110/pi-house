@@ -6,10 +6,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { createHubClient } from "../src/client.ts";
-import { placeOf } from "../src/hub/hub.ts";
+import { type ModelResult, placeOf, type RetryOutcome } from "../src/hub/hub.ts";
 import { readJournal } from "../src/journal.ts";
 import { hubPaths } from "../src/paths.ts";
-import { IDENTITY_ENV, READ_DIRS_ENV, readDirsFromEnv } from "../src/types.ts";
+import { IDENTITY_ENV, READ_DIRS_ENV, readDirsFromEnv, type StopReason } from "../src/types.ts";
 import { echoResponder } from "./fakes/adapter.ts";
 import { fakeProfiles, pullRoot, spawned, type TestHub, testHub, waitFor } from "./fakes/hub.ts";
 
@@ -915,4 +915,116 @@ test("model: an adapter error keeps the model; a pending answer waits for the ad
 		assert.ok(
 			(await inboxTexts(t, root)).some((x) => /could not switch to anthropic\/gone: no API key for anthropic/.test(x)),
 		);
+	}));
+
+/** A pi worker that ran its brief, then a message from its parent that ended with `stop` and `text`. */
+async function workerWithMessage(t: TestHub, stop: StopReason, text: string) {
+	const root = await pullRoot(t.client);
+	const w = await spawned(t, root, "pi", "w");
+	const fake = await waitFor(() => t.kit.byName(w), "adapter");
+	await waitFor(() => fake.inTurn, "brief");
+	fake.finish("brief done");
+	await waitFor(() => state(t, w) === "done", "brief done");
+	const sent = await t.client.send({ from: root, to: w, message: "count the files" });
+	assert.ok(sent.ok);
+	await waitFor(() => fake.inTurn, "message turn");
+	fake.finish(text, stop);
+	await waitFor(() => state(t, w) === stop || (stop === "end_turn" && state(t, w) === "done"), "message turn ended");
+	return { root, w, fake, id: sent.id ?? "" };
+}
+
+const RETRY_MODEL = "anthropic/claude-sonnet-5-5";
+const retryOf = (res: ModelResult | { error: string }): RetryOutcome | undefined =>
+	"retry" in res ? res.retry : undefined;
+
+test("model retry: after a confirmed switch, an idle worker's failed message is queued once, with the adapter's error", () =>
+	withHub(async (t) => {
+		const { root, w, fake, id } = await workerWithMessage(t, "error", "429 rate limit: quota exceeded");
+		const res = await t.client.model({ from: root, to: w, model: RETRY_MODEL, retry: true });
+		assert.deepEqual(res, {
+			status: "applied",
+			model: RETRY_MODEL,
+			previous: "claude-bridge/claude-haiku-5-5",
+			retry: { retried: true, messageId: id, error: "429 rate limit: quota exceeded" },
+		});
+		await waitFor(() => fake.prompts.length === 3, "retry turn");
+		assert.equal(fake.prompts[2]?.id, id, "the same message, same id");
+		assert.equal(fake.prompts[2]?.text, fake.prompts[1]?.text);
+		assert.equal(fake.prompts[1]?.text, "count the files");
+		fake.finish("42 files");
+		await waitFor(() => state(t, w) === "done", "retry done");
+		assert.ok((await inboxTexts(t, root)).some((x) => /finished:\n\n42 files/.test(x)));
+		assert.ok(t.running.hub.log.events({ agent: w }).some((e) => e.kind === "model-retry"));
+	}));
+
+test("model retry: a failed or pending switch never retries the failed message", () =>
+	withHub(async (t) => {
+		const { root, w, fake } = await workerWithMessage(t, "error", "quota exceeded");
+		fake.setModelResult = { error: "unknown model anthropic/nope" };
+		const failed = await t.client.model({ from: root, to: w, model: "anthropic/nope", retry: true });
+		assert.deepEqual(failed, {
+			error: "unknown model anthropic/nope",
+			retry: { retried: false, reason: "the model switch failed, so the failed message was not retried" },
+		});
+		fake.setModelResult = { status: "pending", model: RETRY_MODEL };
+		const pending = await t.client.model({ from: root, to: w, model: RETRY_MODEL, retry: true });
+		assert.deepEqual(pending, {
+			status: "pending",
+			model: RETRY_MODEL,
+			previous: "claude-bridge/claude-haiku-5-5",
+			retry: { retried: false, reason: "the switch is pending, so the failed message was not retried" },
+		});
+		fake.emit({ kind: "model", model: RETRY_MODEL });
+		await new Promise((r) => setTimeout(r, 30));
+		assert.equal(fake.prompts.length, 2, "nothing was queued again");
+		assert.equal(state(t, w), "error");
+	}));
+
+test("model retry: a message is retried once; a repeat, a turn in flight and a later success are not", () =>
+	withHub(async (t) => {
+		const { root, w, fake } = await workerWithMessage(t, "error", "quota exceeded");
+		const first = await t.client.model({ from: root, to: w, model: RETRY_MODEL, retry: true });
+		assert.equal(retryOf(first)?.retried, true);
+		await waitFor(() => fake.inTurn && fake.prompts.length === 3, "retry running");
+
+		const during = await t.client.model({ from: root, to: w, model: RETRY_MODEL, retry: true });
+		assert.equal(retryOf(during)?.retried, false);
+		assert.equal(fake.prompts.length, 3, "a turn in flight is not replayed");
+
+		fake.finish("quota exceeded again", "error");
+		await waitFor(() => state(t, w) === "error", "retry failed");
+		const repeat = await t.client.model({ from: root, to: w, model: RETRY_MODEL, retry: true });
+		assert.match(JSON.stringify(retryOf(repeat)), /already retried once/);
+		assert.equal(fake.prompts.length, 3, "the repeat did not replay the message");
+	}));
+
+test("model retry: an unrelated turn after the failure replaces the failed message, and a successful turn is never repeated", () =>
+	withHub(async (t) => {
+		const { root, w, fake } = await workerWithMessage(t, "error", "quota exceeded");
+		const next = await t.client.send({ from: root, to: w, message: "now list the folders" });
+		assert.ok(next.ok);
+		await waitFor(() => fake.prompts.length === 3, "next turn");
+		const busy = await t.client.model({ from: root, to: w, model: RETRY_MODEL, retry: true });
+		assert.equal(retryOf(busy)?.retried, false, "a turn runs: the old failure is not replayed");
+		assert.equal(fake.prompts.length, 3);
+
+		fake.finish("3 folders");
+		await waitFor(() => state(t, w) === "done", "next done");
+		const later = await t.client.model({ from: root, to: w, model: RETRY_MODEL, retry: true });
+		assert.equal(retryOf(later)?.retried, false);
+		assert.match(JSON.stringify(retryOf(later)), /did not fail/);
+		assert.equal(fake.prompts.length, 3, "the successful turn was not repeated");
+	}));
+
+test("model retry: a worker that exited answers that it must be respawned, and nothing is sent", () =>
+	withHub(async (t) => {
+		const { root, w, fake } = await workerWithMessage(t, "error", "quota exceeded");
+		await t.client.cancel({ from: root, name: w });
+		const res = await t.client.model({ from: root, to: w, model: RETRY_MODEL, retry: true });
+		assert.match(
+			"error" in res ? res.error : "",
+			/w has exited, so its failed message cannot be retried: spawn a new worker to continue its task/,
+		);
+		assert.deepEqual(fake.modelRequests, [], "no switch either");
+		assert.equal(fake.prompts.length, 2);
 	}));

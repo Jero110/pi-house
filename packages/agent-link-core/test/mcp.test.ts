@@ -68,6 +68,12 @@ test("eight tools, each with anthropic/alwaysLoad, with the tested wording", () 
 	assert.match(by("model"), /context.*nears its limit/);
 	assert.match(by("model"), /You decide which model; the tool never picks one/);
 	assert.deepEqual(tools.find((t) => t.name === "model")?.inputSchema.required, ["to", "model"]);
+	assert.deepEqual(Object.keys(tools.find((t) => t.name === "model")?.inputSchema.properties ?? {}), [
+		"to",
+		"model",
+		"retry",
+	]);
+	assert.match(by("model"), /retry: true/);
 	assert.deepEqual(tools[0]?.inputSchema.required, ["harness", "task"]);
 	assert.deepEqual(tools[0]?.inputSchema.properties.harness?.enum, ["claude", "codex", "opencode", "pi"]);
 	const pull = toolDefs({ harnesses: ["claude"], pull: true });
@@ -141,6 +147,13 @@ test("no identity: the server registers once as a pull root named after its clie
 		assert.equal(
 			later.text,
 			"counter is busy: it switches to anthropic/claude-opus-5-5 before its next turn. status shows the model once it did.",
+		);
+		// A retry is refused with its reason when the worker has no failed message; the switch itself still applies.
+		fake.setModelResult = undefined;
+		const plain = await server.tool("model", { to: "counter", model: "anthropic/claude-opus-5-5", retry: true });
+		assert.equal(
+			plain.text,
+			"counter now uses anthropic/claude-opus-5-5 (it was anthropic/claude-sonnet-5-5). The failed message was not sent again: counter's last turn did not fail.",
 		);
 		const bad = await server.tool("model", { to: "counter", model: "opus" });
 		assert.equal(bad.isError, true);

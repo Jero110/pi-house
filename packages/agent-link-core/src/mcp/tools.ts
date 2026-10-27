@@ -1,7 +1,7 @@
 // The tools every harness sees through the agent-link MCP server, their answers and the server
 // instructions. Ported from an earlier hub; the wording that real runs tuned stays:
 // "returns at once", "never call status to wait", exact names.
-import type { InboxEntry, StatusEntry } from "../hub/hub.ts";
+import type { InboxEntry, ModelResult, RetryOutcome, StatusEntry } from "../hub/hub.ts";
 import type { SendResult } from "../hub/queue.ts";
 
 /** The JSON Schema subset the tools use; MCP clients read it as inputSchema. */
@@ -118,12 +118,17 @@ export function toolDefs(opts: { harnesses: readonly string[]; pull: boolean }):
 		{
 			name: "model",
 			description:
-				"Change the model of one of your own workers, without typing into its pane. Use it when a worker needs a different one, for example its context nears its limit and a larger model you are authorized to use exists (a Haiku worker to Sonnet). You decide which model; the tool never picks one. Give the exact <provider>/<id>. A worker that is busy switches before its next turn; one whose harness has no switch, or an unknown or unauthenticated model, is refused and keeps its model.",
+				"Change the model of one of your own workers, without typing into its pane. Use it when a worker needs a different one, for example its context nears its limit and a larger model you are authorized to use exists (a Haiku worker to Sonnet). You decide which model; the tool never picks one. Give the exact <provider>/<id>. A worker that is busy switches before its next turn; one whose harness has no switch, or an unknown or unauthenticated model, is refused and keeps its model. With retry: true, after the switch applies, the message that failed the worker's last turn is sent once more; a pending or failed switch never retries.",
 			inputSchema: {
 				type: "object",
 				properties: {
 					to: { type: "string", description: "Exact worker name, one you launched or below one" },
 					model: { type: "string", description: "Exact <provider>/<id>, e.g. anthropic/claude-sonnet-5-5" },
+					retry: {
+						type: "boolean",
+						description:
+							"true to send the message that failed the worker's last turn once more, after the switch applies; not when the switch is pending or fails, or when the worker is not idle after that failure",
+					},
 				},
 				required: ["to", "model"],
 			},
@@ -193,14 +198,23 @@ export function cancelReply(res: { ok?: boolean; error?: string }, name: string)
 	return res.error ? text(`not cancelled: ${res.error}`, true) : text(`cancelled ${name} and closed its pane`);
 }
 
-export function modelReply(
-	res: { status: "applied" | "pending"; model: string; previous: string | null } | { error: string },
-	to: string,
-): ToolReply {
-	if ("error" in res) return text(`model not changed: ${res.error}`, true);
+export function modelReply(res: ModelResult, to: string): ToolReply {
+	const note = res.retry ? ` ${retryLine(res.retry)}` : "";
+	if ("error" in res)
+		return text(`model not changed: ${res.error}${res.retry ? `. ${retryLine(res.retry)}` : ""}`, true);
 	if (res.status === "pending")
-		return text(`${to} is busy: it switches to ${res.model} before its next turn. status shows the model once it did.`);
-	return text(`${to} now uses ${res.model}${res.previous ? ` (it was ${res.previous})` : ""}`);
+		return text(
+			`${to} is busy: it switches to ${res.model} before its next turn. status shows the model once it did.${note}`,
+		);
+	return text(
+		`${to} now uses ${res.model}${res.previous ? ` (it was ${res.previous})` : ""}${res.retry ? `. ${retryLine(res.retry)}` : ""}`,
+	);
+}
+
+/** What a retry did, in one sentence; the error is the adapter's own text, shown only when it gave one. */
+function retryLine(r: RetryOutcome): string {
+	if (r.retried) return `Its failed message is sent again, once${r.error ? `; it had failed with: ${r.error}` : ""}.`;
+	return `The failed message was not sent again: ${r.reason}.`;
 }
 
 /** One line per agent with its relation to `me`, and a reminder that results come by themselves. */

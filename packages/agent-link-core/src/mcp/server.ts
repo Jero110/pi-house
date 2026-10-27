@@ -188,7 +188,8 @@ export async function runMcpServer(opts: McpServerOptions): Promise<void> {
 				}
 				case "model": {
 					const to = str("to") ?? "";
-					return modelReply(await s.client.model({ from: s.name, to, model: str("model") ?? "" }), to);
+					const retry = args.retry === true;
+					return modelReply(await s.client.model({ from: s.name, to, model: str("model") ?? "", retry }), to);
 				}
 				case "inbox": {
 					const res = await s.client.inbox(s.name);

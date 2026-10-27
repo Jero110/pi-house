@@ -128,6 +128,13 @@ export interface InboxEntry {
 	at: number;
 }
 
+/** What model({ retry: true }) did with the message that failed the worker's last turn. */
+export type RetryOutcome = { retried: true; messageId: string; error?: string } | { retried: false; reason: string };
+
+export type ModelResult =
+	| { status: "applied" | "pending"; model: string; previous: string | null; retry?: RetryOutcome }
+	| { error: string; retry?: RetryOutcome };
+
 /** A report from a harness-side piece (POST /event). */
 export type HarnessEvent = { agent: string; type: string } & Record<string, unknown>;
 
@@ -381,7 +388,16 @@ export class Hub {
 	}
 
 	private newAgent(record: AgentRecord, profile: Profile | undefined): Agent {
-		return { record, profile, ready: false, queue: [], inbox: [], lastText: "", askedParent: false };
+		return {
+			record,
+			profile,
+			ready: false,
+			queue: [],
+			inbox: [],
+			lastText: "",
+			askedParent: false,
+			retried: new Set(),
+		};
 	}
 
 	private createAdapter(agent: Agent, factory: AdapterFactory) {
@@ -519,6 +535,8 @@ export class Hub {
 			this.log.messageTurnEnd(msg.id);
 		}
 		if (agent.closing || agent.record.state === "exited") return;
+		// A turn that succeeded, or one the user started in the pane, supersedes the failed message; a failed turn replaces it.
+		agent.lastFailed = msg && res.stopReason === "error" ? { msg, error: res.text.trim() || undefined } : undefined;
 		const result = agent.replyText ?? (res.text.trim() ? res.text : agent.lastText);
 		agent.replyText = undefined;
 		this.log.event(name, "turn-end", { stopReason: res.stopReason, length: result.length, message: msg?.id });
@@ -771,17 +789,22 @@ export class Hub {
 	/**
 	 * Changes the model of a worker, on behalf of an agent above it. The adapter does the switch through its harness's
 	 * own path; the record and the journal follow what it reports ("applied" now, "pending" via a model update).
+	 * With retry, an applied switch sends the message that failed the worker's last turn once more (retryFailed).
 	 */
-	async model(req: {
-		from: string;
-		to: string;
-		model: string;
-	}): Promise<{ status: "applied" | "pending"; model: string; previous: string | null } | { error: string }> {
+	async model(req: { from: string; to: string; model: string; retry?: boolean }): Promise<ModelResult> {
 		const target = this.registry.get(req.to);
 		if (!target) return { error: this.registry.unknownAgent(req.to, req.from) };
 		if (!this.registry.isAncestor(req.from, req.to))
 			return { error: `${req.from} cannot change the model of ${req.to}: only its parent (or an agent above it) can.` };
-		if (target.record.state === "exited" || target.closing) return { error: `${req.to} has exited` };
+		// Problem: an exited worker's failed message can never be sent again, and "has exited" alone does not say so.
+		// Example: a parent that retried a quota failure after cancelling the worker waited for a retry that never came.
+		// Solution: a retry against an exited worker says the worker must be respawned.
+		if (target.record.state === "exited" || target.closing)
+			return {
+				error: req.retry
+					? `${req.to} has exited, so its failed message cannot be retried: spawn a new worker to continue its task`
+					: `${req.to} has exited`,
+			};
 		if (!isExactModel(req.model))
 			return {
 				error: `the model must be an exact <provider>/<id> (e.g. anthropic/claude-sonnet-5-5), not ${JSON.stringify(req.model)}`,
@@ -796,9 +819,41 @@ export class Hub {
 			res = { error: errorText(e) };
 		}
 		this.log.event(req.to, "model", { by: req.from, model: req.model, ...res });
-		if ("error" in res) return res;
-		if (res.status === "applied") this.setRecordModel(target, res.model);
-		return { status: res.status, model: res.model, previous };
+		if (!("error" in res) && res.status === "applied") this.setRecordModel(target, res.model);
+		if (!req.retry) return "error" in res ? res : { status: res.status, model: res.model, previous };
+		// Problem: a switch that failed or is still pending must not send the failed message again. Example: a quota
+		// failure, then a switch that the harness only applies before its next turn: the retry would run on the old model.
+		// Solution: only an applied switch retries; the outcome says why not otherwise.
+		const retry =
+			"error" in res
+				? skipped("the model switch failed, so the failed message was not retried")
+				: res.status === "applied"
+					? this.retryFailed(target)
+					: skipped("the switch is pending, so the failed message was not retried");
+		this.log.event(req.to, "model-retry", { by: req.from, ...retry });
+		return "error" in res ? { error: res.error, retry } : { status: res.status, model: res.model, previous, retry };
+	}
+
+	/**
+	 * Sends the message that failed the worker's last turn once more, through the normal queue. Only an idle worker
+	 * whose last turn failed qualifies. Problem: a retry sent after the worker ran another turn replays a task the
+	 * parent may already have dropped. Example: a failed "count files", then "list folders" succeeds; a retry
+	 * after that must not run "count files" again. Solution: the failed message stays until a turn succeeds, and
+	 * only the error state of an idle worker, with a message not yet retried, qualifies.
+	 */
+	private retryFailed(agent: Agent): RetryOutcome {
+		const name = agent.record.name;
+		const failed = agent.lastFailed;
+		if (!failed) return skipped(`${name}'s last turn did not fail`);
+		if (agent.record.state !== "error" || agent.inflight || agent.closing)
+			return skipped(
+				`${name} is ${agent.record.state}: only an idle worker whose last turn failed gets the message again`,
+			);
+		const { msg } = failed;
+		if (agent.retried.has(msg.id)) return skipped(`the failed message ${msg.id} was already retried once`);
+		agent.retried.add(msg.id);
+		this.enqueue(agent, { id: msg.id, from: msg.from, text: msg.text, kind: msg.kind });
+		return { retried: true, messageId: msg.id, ...(failed.error !== undefined && { error: failed.error }) };
 	}
 
 	private setRecordModel(agent: Agent, model: string): void {
@@ -918,6 +973,10 @@ export class Hub {
 		const roots = [...this.registry.agents.values()].filter((a) => !a.record.parent);
 		await Promise.all(roots.map((r) => this.closeAgent(r)));
 	}
+}
+
+function skipped(reason: string): RetryOutcome {
+	return { retried: false, reason };
 }
 
 function statusEntry(a: Agent): StatusEntry {

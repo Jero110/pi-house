@@ -22,6 +22,13 @@ export interface Agent {
 	replyText?: string;
 	/** The last agent_message text of the current turn, for a prompt() that resolves without text. */
 	lastText: string;
+	/**
+	 * The message whose turn failed last, with the error the adapter reported (none when it reported no text).
+	 * Kept until a turn succeeds or ends without a message; model({ retry: true }) sends it again.
+	 */
+	lastFailed?: { msg: QueuedMessage; error?: string };
+	/** Message ids already sent again by a retry: a message is retried once. */
+	retried: Set<string>;
 	/** The current turn asked the parent with send: its turn end repeats the question and is held. */
 	askedParent: boolean;
 	/** The held turn end; it still reaches the parent if the agent exits before answering again. */
