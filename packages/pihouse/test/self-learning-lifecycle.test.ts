@@ -19,7 +19,7 @@ import { DIGEST_SECTIONS } from "../src/workflow/digest-contract.ts";
 import { digestCommand, type LearningDeps, selfLearningCommand } from "../src/workflow/learning-commands.ts";
 import { openMemory } from "../src/workflow/memory.ts";
 import { migrateLegacyStore } from "../src/workflow/migration.ts";
-import { getProposal, rollbackProposal } from "../src/workflow/proposals.ts";
+import { getProposal, rollbackProposal, shortVersion } from "../src/workflow/proposals.ts";
 import { openOperationalStore } from "../src/workflow/storage.ts";
 
 interface ChildRecord {
@@ -331,6 +331,7 @@ test("connected lifecycle captures, retries one failed digest, reviews and appli
 
 		const store = openOperationalStore(join(f.memory, "memory.sqlite"), { fts: false, legacy: true });
 		let proposalId = "";
+		let listedVersion = "";
 		try {
 			const row = store.db
 				.prepare("SELECT id, payload FROM proposals")
@@ -341,6 +342,7 @@ test("connected lifecycle captures, retries one failed digest, reviews and appli
 			assert.ok(row);
 			proposalId = String(row.id);
 			const proposal = getProposal(store.db, proposalId);
+			listedVersion = shortVersion(proposal.version);
 			assert.equal(proposal.state, "open");
 			assert.equal(proposal.evidence.length, 3, "independent run evidence merges into the same proposal");
 		} finally {
@@ -351,7 +353,11 @@ test("connected lifecycle captures, retries one failed digest, reviews and appli
 		mkdirSync(join(f.memory, "approved-records", "preference"), { recursive: true });
 		writeFileSync(target, "existing preference");
 		// Approval itself uses the public command so it applies against a real temporary target and records its receipt.
-		const approved = await proposalCommand("approve", [proposalId], { memory: f.memory, repoRoot: f.root });
+		// A merged proposal approves only with the version the user listed; approve without one refuses it.
+		const approved = await proposalCommand("approve", [proposalId, listedVersion], {
+			memory: f.memory,
+			repoRoot: f.root,
+		});
 		assert.equal(approved.level, "info");
 		assert.match(approved.text, /Applied .*Receipt recorded/);
 		assert.equal(readFileSync(target, "utf8"), "Run focused tests before committing.");

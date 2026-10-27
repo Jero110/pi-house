@@ -47,6 +47,14 @@ export type ProposalIdResolution =
 	| { status: "none" }
 	| { status: "ambiguous"; matches: string[] };
 
+/**
+ * The version as `proposals` shows it and `approve <id> <version>` accepts it: the first 8 hex digits, enough to tell
+ * the displayed form from a later one in practice. The full version stays the comparison key.
+ */
+export function shortVersion(version: string): string {
+	return version.slice(0, 8);
+}
+
 export function listProposals(db: DatabaseSync, options: { states?: ProposalState[]; limit?: number } = {}) {
 	const limit = options.limit ?? 50;
 	if (!Number.isInteger(limit) || limit < 1 || limit > 100)
@@ -65,6 +73,7 @@ export function listProposals(db: DatabaseSync, options: { states?: ProposalStat
 			id: value.id,
 			target: value.target,
 			state: String(row.state) as ProposalState,
+			version: shortVersion(value.version),
 			...(value.kind ? { kind: value.kind } : {}),
 			...(value.scope ? { scope: value.scope } : {}),
 			supportingRuns,

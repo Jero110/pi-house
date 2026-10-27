@@ -47,6 +47,7 @@ import {
 	rejectProposal,
 	resolveProposalId,
 	type ScopedTarget,
+	shortVersion,
 } from "../workflow/proposals.ts";
 import { renderReport } from "../workflow/report.ts";
 import { buildRun, pickRoot, type WorkflowRun } from "../workflow/run.ts";
@@ -68,7 +69,7 @@ export const WORKFLOW_COMMANDS = [
 	{ usage: "self-learning (digest, scan and review agents; model quota)", completions: ["self-learning"] },
 	{ usage: "ask <question>", completions: ["ask "] },
 	{ usage: "proposals", completions: ["proposals"] },
-	{ usage: "approve <id>", completions: ["approve "] },
+	{ usage: "approve <id> [version]", completions: ["approve "] },
 	{ usage: "reject <id> [reason]", completions: ["reject "] },
 ] as const;
 
@@ -360,7 +361,7 @@ const NO_REASON = "No reason given";
 const NOT_ACTIVE =
 	"The proposal store is not active yet, so nothing changed. These commands never migrate the workflow memory.";
 const PROPOSAL_USAGE: Record<Exclude<ProposalCommand, "proposals">, string> = {
-	approve: "usage: /workflow approve <id>",
+	approve: "usage: /workflow approve <id> [version]",
 	reject: "usage: /workflow reject <id> [reason]",
 };
 
@@ -421,20 +422,53 @@ function outcome(db: DatabaseSync, proposal: Proposal): CommandResult {
 	};
 }
 
+/** A version prefix as typed: hex only, so a stray word is usage rather than a prefix that matches nothing. */
+const VERSION_PREFIX = /^[0-9a-f]{1,64}$/i;
+
+/** What changed since creation, in terms a person can check: the evidence count and how often it was revised. */
+function revisedSummary(proposal: Proposal): string {
+	const runs = new Set(proposal.evidence).size;
+	const revisions = proposal.history?.length ?? 0;
+	return `${runs} supporting run${runs === 1 ? "" : "s"}, revised ${revisions} time${revisions === 1 ? "" : "s"}`;
+}
+
 /**
  * Approves the displayed proposal, then applies it. An approved proposal is applied without a second approval; an
  * interrupted one (applying) is recovered to failed, so it is never applied twice.
+ * Problem: approve read the proposal and pinned whatever version it found, so a run merged after `proposals` listed it
+ * was approved unseen. Example: listed with 1 run; a second run merges in; `approve <id>` approves the 2-run version.
+ * Solution: `approve <id> <version>` approves only the version the user saw. Without a version, only a proposal that was
+ * never revised is approved, and the reply names the version; a revised one refuses and names the version to pass.
  */
-async function approve(db: DatabaseSync, proposal: Proposal, deps: ProposalDeps): Promise<CommandResult> {
+async function approve(
+	db: DatabaseSync,
+	proposal: Proposal,
+	deps: ProposalDeps,
+	shown: string | undefined,
+): Promise<CommandResult> {
 	const target = targetFor(proposal, deps);
 	if (proposal.state === "applying") return outcome(db, await recoverApplying(db, proposal.id, target));
-	if (proposal.state === "open") approveProposal(db, proposal.id, proposal.version);
-	else if (proposal.state !== "approved")
+	if (proposal.state !== "open" && proposal.state !== "approved")
 		return {
 			level: "warning",
 			text: `${proposal.id} is ${proposal.state}; only open or approved proposals can be approved.`,
 		};
-	return outcome(db, await applyProposal(db, proposal.id, target));
+	const current = shortVersion(proposal.version);
+	if (shown !== undefined && !VERSION_PREFIX.test(shown)) return { level: "warning", text: PROPOSAL_USAGE.approve };
+	if (shown !== undefined && !proposal.version.startsWith(shown.toLowerCase()))
+		return {
+			level: "warning",
+			text: `${proposal.id} is now version ${current}, not ${shown}. Nothing was approved. It has ${revisedSummary(proposal)} since creation; review it, then run /workflow approve ${proposal.id} ${current}.`,
+		};
+	if (shown === undefined && proposal.state === "open" && proposal.history?.length)
+		return {
+			level: "warning",
+			text: `${proposal.id} has changed since it was created (version ${current}, ${revisedSummary(proposal)}). Nothing was approved. Review it, then run /workflow approve ${proposal.id} ${current}.`,
+		};
+	const approvedNow = proposal.state === "open";
+	if (approvedNow) approveProposal(db, proposal.id, proposal.version);
+	const result = outcome(db, await applyProposal(db, proposal.id, target));
+	return approvedNow ? { ...result, text: `${result.text} Approved version ${current}.` } : result;
 }
 
 /** The bounded list: one line per proposal, with the same fields for every state. */
@@ -444,10 +478,10 @@ function listText(db: DatabaseSync): string {
 	const lines = rows.map((row) => {
 		const legacy = getProposal(db, row.id).before === "" ? " (legacy hypothesis: no verified before-state)" : "";
 		const runs = `${row.supportingRuns} run${row.supportingRuns === 1 ? "" : "s"}`;
-		return `${row.id.slice(0, 8)}  ${row.kind ?? "-"}  ${row.scope ?? "-"}  ${row.target}  ${row.state}${legacy}  ${runs}  next: ${row.nextAction}`;
+		return `${row.id.slice(0, 8)}  ${row.kind ?? "-"}  ${row.scope ?? "-"}  ${row.target}  ${row.state}${legacy}  version ${row.version}  ${runs}  next: ${row.nextAction}`;
 	});
 	if (rows.length === PROPOSAL_LIST_LIMIT) lines.push(`The first ${PROPOSAL_LIST_LIMIT} proposals are shown.`);
-	return ["Proposals: id, kind, scope, target, state, supporting runs, next action", ...lines].join("\n");
+	return ["Proposals: id, kind, scope, target, state, version, supporting runs, next action", ...lines].join("\n");
 }
 
 /**
@@ -470,6 +504,7 @@ export async function proposalCommand(
 		if (command === "proposals") return { level: "info", text: listText(store.db) };
 		const [prefix = "", ...rest] = args;
 		if (!prefix) return { level: "warning", text: PROPOSAL_USAGE[command] };
+		if (command === "approve" && rest.length > 1) return { level: "warning", text: PROPOSAL_USAGE.approve };
 		const found = resolveProposalId(store.db, prefix);
 		if (found.status === "none")
 			return { level: "warning", text: `No proposal matches "${prefix}". /workflow proposals lists them.` };
@@ -479,7 +514,7 @@ export async function proposalCommand(
 			const rejected = rejectProposal(store.db, found.proposal.id, rest.join(" ").trim() || NO_REASON);
 			return { level: "info", text: `Rejected ${rejected.id}: ${rejected.reason}.` };
 		}
-		return await approve(store.db, found.proposal, deps);
+		return await approve(store.db, found.proposal, deps, rest[0]);
 	} catch (error) {
 		return { level: "warning", text: messageOf(error) };
 	} finally {
@@ -565,7 +600,7 @@ export default function workflow(pi: ExtensionAPI): void {
 	});
 	pi.registerCommand("workflow", {
 		description:
-			"report [--last]: what the last run did · save [reason] · digest (launches a separate model agent; costs model quota) · self-learning (launches digest, scan and review agents; costs model quota) · ask <question> · proposals · approve <id> · reject <id> [reason]",
+			"report [--last]: what the last run did · save [reason] · digest (launches a separate model agent; costs model quota) · self-learning (launches digest, scan and review agents; costs model quota) · ask <question> · proposals · approve <id> [version] · reject <id> [reason]",
 		getArgumentCompletions: (prefix) =>
 			WORKFLOW_COMMANDS.flatMap((c) => [...c.completions])
 				.filter((c) => c.startsWith(prefix))

@@ -8,7 +8,7 @@ import test from "node:test";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import workflow, { proposalCommand, USAGE, WORKFLOW_COMMANDS } from "../src/extensions/workflow.ts";
 import { migrateLegacyStore } from "../src/workflow/migration.ts";
-import { approveProposal, createProposal, getProposal } from "../src/workflow/proposals.ts";
+import { approveProposal, createProposal, getProposal, mergeEvidence } from "../src/workflow/proposals.ts";
 import { openOperationalStore } from "../src/workflow/storage.ts";
 
 /** A temp home whose workflow memory is an activated (empty) store, and a temp repo with a one-skill catalog. */
@@ -413,6 +413,131 @@ test("approve on an interrupted application recovers it to failed and leaves the
 			/^Not applied: p-int is failed: Recovered interrupted application; observed target state: before/,
 		);
 		assert.equal(readFileSync(recordPath, "utf8"), "x", "the target is not touched");
+	} finally {
+		f.cleanup();
+	}
+});
+
+/** An open memory proposal whose record holds its before-state; the record path is returned for file checks. */
+function openMemoryProposal(memory: string, id: string, evidence: string[]) {
+	const recordPath = join(memory, "approved-records", "preference", "tests.md");
+	mkdirSync(join(memory, "approved-records", "preference"), { recursive: true });
+	writeFileSync(recordPath, "x");
+	const db = openStore(memory);
+	try {
+		return {
+			proposal: createProposal(db.db, { id, target: "memory:preference/tests", before: "x", after: "y", evidence }),
+			recordPath,
+		};
+	} finally {
+		db.close();
+	}
+}
+
+test("proposals shows each proposal's short version, the prefix approve accepts", async () => {
+	const f = fixture();
+	try {
+		const { proposal } = openMemoryProposal(f.memory, "p-show", ["r1"]);
+		const result = await proposalCommand("proposals", [], { memory: f.memory, repoRoot: f.repoRoot });
+		const lines = result.text.split("\n");
+		assert.match(lines[0] ?? "", /state, version, supporting runs, next action/);
+		const line = lines.find((l) => l.includes("p-show")) ?? "";
+		assert.match(line, new RegExp(`open  version ${proposal.version.slice(0, 8)}  1 run  next: approve or reject`));
+	} finally {
+		f.cleanup();
+	}
+});
+
+test("approve with the listed version applies it and names the version it approved", async () => {
+	const f = fixture();
+	try {
+		const { proposal, recordPath } = openMemoryProposal(f.memory, "p-pin", ["r1"]);
+		const short = proposal.version.slice(0, 8);
+		const result = await proposalCommand("approve", ["p-pin", short], { memory: f.memory, repoRoot: f.repoRoot });
+		assert.equal(result.level, "info");
+		assert.match(result.text, /^Applied p-pin to memory:preference\/tests\. Receipt recorded/);
+		assert.match(result.text, new RegExp(`Approved version ${short}\\.$`));
+		assert.equal(readFileSync(recordPath, "utf8"), "y");
+	} finally {
+		f.cleanup();
+	}
+});
+
+test("approve with a version that is no longer current refuses, names the current version and changes nothing", async () => {
+	const f = fixture();
+	try {
+		const { proposal, recordPath } = openMemoryProposal(f.memory, "p-stale", ["r1"]);
+		const listed = proposal.version.slice(0, 8);
+		const db = openStore(f.memory);
+		const merged = mergeEvidence(db.db, "p-stale", ["r2"], { kind: "merge", explanation: "a second run agrees" });
+		db.close();
+		const result = await proposalCommand("approve", ["p-stale", listed], { memory: f.memory, repoRoot: f.repoRoot });
+		assert.equal(result.level, "warning");
+		assert.match(result.text, new RegExp(`now version ${merged.version.slice(0, 8)}, not ${listed}`));
+		assert.match(result.text, /Nothing was approved/);
+		assert.match(result.text, /2 supporting runs, revised 1 time/);
+		const check = openStore(f.memory);
+		try {
+			assert.equal(getProposal(check.db, "p-stale").state, "open");
+		} finally {
+			check.close();
+		}
+		assert.equal(readFileSync(recordPath, "utf8"), "x", "the target is untouched");
+	} finally {
+		f.cleanup();
+	}
+});
+
+test("approve without a version refuses a proposal that changed since creation and names the version to pass", async () => {
+	const f = fixture();
+	try {
+		const { recordPath } = openMemoryProposal(f.memory, "p-merged", ["r1"]);
+		const db = openStore(f.memory);
+		const merged = mergeEvidence(db.db, "p-merged", ["r2"], { kind: "merge", explanation: "a second run agrees" });
+		db.close();
+		const result = await proposalCommand("approve", ["p-merged"], { memory: f.memory, repoRoot: f.repoRoot });
+		assert.equal(result.level, "warning");
+		assert.match(result.text, /has changed since it was created/);
+		assert.match(result.text, new RegExp(`approve p-merged ${merged.version.slice(0, 8)}\\.`));
+		assert.match(result.text, /Nothing was approved/);
+		const check = openStore(f.memory);
+		try {
+			assert.equal(getProposal(check.db, "p-merged").state, "open");
+		} finally {
+			check.close();
+		}
+		assert.equal(readFileSync(recordPath, "utf8"), "x");
+	} finally {
+		f.cleanup();
+	}
+});
+
+test("approve without a version approves a proposal that never changed and names the version it approved", async () => {
+	const f = fixture();
+	try {
+		const { proposal, recordPath } = openMemoryProposal(f.memory, "p-unchanged", ["r1"]);
+		const result = await proposalCommand("approve", ["p-unchanged"], { memory: f.memory, repoRoot: f.repoRoot });
+		assert.equal(result.level, "info");
+		assert.match(result.text, new RegExp(`Approved version ${proposal.version.slice(0, 8)}\\.$`));
+		assert.equal(readFileSync(recordPath, "utf8"), "y");
+	} finally {
+		f.cleanup();
+	}
+});
+
+test("approve with a version that is not hex prints usage and changes nothing", async () => {
+	const f = fixture();
+	try {
+		openMemoryProposal(f.memory, "p-usage", ["r1"]);
+		const result = await proposalCommand("approve", ["p-usage", "zz"], { memory: f.memory, repoRoot: f.repoRoot });
+		assert.equal(result.level, "warning");
+		assert.equal(result.text, "usage: /workflow approve <id> [version]");
+		const check = openStore(f.memory);
+		try {
+			assert.equal(getProposal(check.db, "p-usage").state, "open");
+		} finally {
+			check.close();
+		}
 	} finally {
 		f.cleanup();
 	}
