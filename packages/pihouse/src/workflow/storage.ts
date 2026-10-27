@@ -21,7 +21,22 @@ export function backupOperationalState(db: DatabaseSync, artifactRoot: string, d
 	}
 }
 
-export function openOperationalStore(path: string, options: { fts?: boolean } = {}): OperationalStore {
+/**
+ * Schema v2 (T5), additive: the live index after a legacy migration, rejected fingerprints, per-item legacy
+ * records (coverage and deletion authority) and the migration ledger.
+ * Problem: a JSON index read and written in two steps loses one of two concurrent updates; example: two panes add an
+ * idea at once. Solution: after activation the index lives in these tables and each mutation is one BEGIN IMMEDIATE.
+ */
+const SCHEMA_V2 = `CREATE TABLE IF NOT EXISTS index_entries(id TEXT PRIMARY KEY, seq INTEGER NOT NULL, payload TEXT NOT NULL);
+ CREATE TABLE IF NOT EXISTS rejected_fingerprints(fingerprint TEXT PRIMARY KEY);
+ CREATE TABLE IF NOT EXISTS flags(key TEXT PRIMARY KEY, source_sha256 TEXT NOT NULL, payload TEXT NOT NULL);
+ CREATE TABLE IF NOT EXISTS legacy_records(id TEXT PRIMARY KEY, kind TEXT NOT NULL, rel_path TEXT, source_sha256 TEXT, legacy INTEGER NOT NULL DEFAULT 1, coverage TEXT NOT NULL, deletion_authority TEXT, payload TEXT NOT NULL DEFAULT '{}');
+ CREATE TABLE IF NOT EXISTS legacy_migrations(manifest_hash TEXT NOT NULL, state TEXT NOT NULL, at TEXT NOT NULL, PRIMARY KEY(manifest_hash, state));`;
+
+export function openOperationalStore(
+	path: string,
+	options: { fts?: boolean; legacy?: boolean } = {},
+): OperationalStore {
 	mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
 	const db = new DatabaseSync(path);
 	db.exec("PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;");
@@ -49,6 +64,22 @@ export function openOperationalStore(path: string, options: { fts?: boolean } = 
 			throw error;
 		}
 	}
+	let version = 1;
+	if (options.legacy) {
+		db.exec("BEGIN IMMEDIATE");
+		try {
+			db.exec(SCHEMA_V2);
+			db.prepare("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (2, ?)").run(
+				new Date().toISOString(),
+			);
+			db.exec("COMMIT");
+			version = 2;
+		} catch (error) {
+			db.exec("ROLLBACK");
+			db.close();
+			throw error;
+		}
+	}
 	let fts: OperationalStore["fts"] = { available: false, diagnostic: "FTS5 capability check was not completed" };
 	if (options.fts !== false) {
 		try {
@@ -59,5 +90,5 @@ export function openOperationalStore(path: string, options: { fts?: boolean } = 
 			fts = { available: false, diagnostic: `SQLite FTS5 is unavailable: ${String(error)}` };
 		}
 	}
-	return { db, version: 1, fts, close: () => db.close() };
+	return { db, version, fts, close: () => db.close() };
 }

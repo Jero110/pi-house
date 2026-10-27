@@ -3,6 +3,9 @@
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import type { DatabaseSync } from "node:sqlite";
+import { ACTIVE_MARKER } from "./migration.ts";
+import { openOperationalStore } from "./storage.ts";
 
 /** Size limits in chars (about chars/4 tokens), in one place; tests hold the engine to them. */
 export const LIMITS = {
@@ -238,11 +241,37 @@ export function openMemory(dir: string, opts: { now?: () => Date } = {}): Memory
 	const abs = (rel: string) => join(dir, rel);
 	const indexFile = abs("index.json");
 
+	/**
+	 * Problem: load() then save() on index.json loses one of two concurrent updates; example: two panes add an idea at
+	 * once. Solution: after a migration the index lives in memory.sqlite and every store call is one BEGIN IMMEDIATE.
+	 * A corrupt or missing database is an error, never an empty memory and never a fallback to the JSON backup.
+	 */
+	const db = existsSync(abs(ACTIVE_MARKER)) ? openActiveDatabase(abs("memory.sqlite")) : null;
 	const load = (): IndexFile => {
+		if (db) {
+			const rows = db.prepare("SELECT payload FROM index_entries ORDER BY seq").all() as { payload: string }[];
+			const rej = db.prepare("SELECT fingerprint FROM rejected_fingerprints ORDER BY rowid").all() as {
+				fingerprint: string;
+			}[];
+			return {
+				schema: 1,
+				entries: rows.map((r) => JSON.parse(r.payload) as IndexEntry),
+				rejected: rej.map((r) => r.fingerprint),
+			};
+		}
 		const f = readJson<Partial<IndexFile>>(indexFile);
 		return { schema: 1, entries: f?.entries ?? [], rejected: f?.rejected ?? [] };
 	};
-	const save = (f: IndexFile) => writeJson(indexFile, f);
+	const save = (f: IndexFile) => {
+		if (!db) return writeJson(indexFile, f);
+		db.exec("DELETE FROM index_entries; DELETE FROM rejected_fingerprints;");
+		const ins = db.prepare("INSERT INTO index_entries(id, seq, payload) VALUES (?, ?, ?)");
+		f.entries.forEach((e, i) => {
+			ins.run(e.id, i, JSON.stringify(e));
+		});
+		const rej = db.prepare("INSERT OR IGNORE INTO rejected_fingerprints(fingerprint) VALUES (?)");
+		for (const fp of f.rejected) rej.run(fp);
+	};
 	/** Insert or replace by id. */
 	const upsert = (entry: IndexEntry): IndexEntry => {
 		const f = load();
@@ -662,5 +691,46 @@ export function openMemory(dir: string, opts: { now?: () => Date } = {}): Memory
 			return use;
 		},
 	};
-	return store;
+	return db ? transactional(store, db) : store;
+}
+
+function openActiveDatabase(path: string): DatabaseSync {
+	if (!existsSync(path)) {
+		throw new Error(`${path} is missing but the store was migrated to it; restore it from migration-backup`);
+	}
+	try {
+		const { db } = openOperationalStore(path, { fts: false, legacy: true });
+		const active = db.prepare("SELECT 1 FROM legacy_migrations WHERE state = 'active'").get();
+		if (!active) throw new Error("no active migration row");
+		return db;
+	} catch (error) {
+		throw new Error(`${path} is corrupt or not an activated store; it is not treated as empty`, { cause: error });
+	}
+}
+
+/** Every public call runs inside one write transaction; nested calls (a method using `store.x`) join the outer one. */
+function transactional(store: MemoryStore, db: DatabaseSync): MemoryStore {
+	let depth = 0;
+	const out: Record<string, unknown> = { ...store };
+	for (const [name, fn] of Object.entries(store)) {
+		if (typeof fn !== "function") continue;
+		const wrapped = (...args: unknown[]) => {
+			if (depth > 0) return fn(...args);
+			db.exec("BEGIN IMMEDIATE");
+			depth++;
+			try {
+				const result = fn(...args);
+				db.exec("COMMIT");
+				return result;
+			} catch (error) {
+				db.exec("ROLLBACK");
+				throw error;
+			} finally {
+				depth--;
+			}
+		};
+		out[name] = wrapped;
+		(store as unknown as Record<string, unknown>)[name] = wrapped;
+	}
+	return out as unknown as MemoryStore;
 }

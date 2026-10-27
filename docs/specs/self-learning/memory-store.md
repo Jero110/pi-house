@@ -40,6 +40,14 @@ Startup verifies FTS5 availability in the actual runtime. Database and documents
 
 Canonical artifacts use validated stable IDs, private 0700 directories and 0600 unique temporary files. A hash-bearing sidecar manifest is atomically renamed before/after the canonical artifact; recovery verifies bytes and path containment before reconciling the operational commit row. A hash mismatch is an error, not an empty-memory result.
 
+## Legacy migration schema v2 (T5)
+
+`migrateLegacyStore(dir)` (`workflow/migration.ts`) is an explicit entry point; nothing calls it automatically. Order: (1) copy every legacy file (`index.json`, `flags.json`, `workflow-memory.md`, `runs/`, `digests/`, `batches/`, `consulted/`, `ideas/`, `proposals/`, `archive/`) into `migration-backup.incomplete/files/` with a `manifest.json` (path, sha256, bytes; manifest hash), then rename to `migration-backup/`. A leftover `.incomplete` directory is verified against a fresh manifest of the live files: finished if it matches, else removed and restarted. A completed backup is never rewritten; if live bytes drift from it before activation the run stops with a diagnosed error. (2) One `BEGIN IMMEDIATE` transaction imports from the backup bytes, all `INSERT OR IGNORE` by original id, and records `legacy_migrations(manifest_hash, 'imported')`. (3) A separate `'active'` row and the `migration-active.json` marker activate the store.
+
+Schema v2 tables (additive): `index_entries(id, seq, payload)` (live index), `rejected_fingerprints`, `flags`, `legacy_records(id, kind, rel_path, source_sha256, legacy, coverage, deletion_authority, payload)`, `legacy_migrations`. Every imported run is `legacy=1`, `coverage='legacy-unknown'`, `deletion_authority='none'`; a short old digest is never deletion authority and no transcript is reread. Legacy `applied` proposals import as `legacy-applied-unverified` with no receipt. Consulted/idea rows keep the index summary, the file summary and the body sha256.
+
+After activation `openMemory` reads and writes the index through SQLite, one `BEGIN IMMEDIATE` per store call, so concurrent writers lose nothing. A missing or corrupt `memory.sqlite` is an error, never an empty memory or a JSON fallback. `index.json` and the backup remain as export only.
+
 ## Success criteria / tests first
 
 - Two independent processes cannot claim the same revision or lose another capture's update.
