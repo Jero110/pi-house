@@ -27,8 +27,16 @@ the format; you rarely need it.
 
 ## Step 1: Dispatch
 
-- A task is ready when every task that blocks it is done and verified. Dispatch ready tasks in plan order; run the
-  ones the plan marks parallel at the same time (at most 4 agents at once).
+- **Look for safe parallel work by default**, at startup and after each result; do not wait for the user to request it.
+  A task is ready only when every task that blocks it is done and verified. Dispatch ready tasks in plan order,
+  running independent ready tasks concurrently (at most 4 agents at once). Before dispatch, check both prerequisite
+  independence and file ownership; separate worktrees isolate edits but do not make dependent tasks independent.
+- Problem: waiting for one worker can leave unrelated ready work idle. Example: an isolated renderer check can run
+  while a storage worker finishes, but a migration that needs its unfinished schema cannot. Solution: record the
+  independence check and owned files in the ledger, then dispatch only the work that can safely proceed. If the plan
+  explicitly requires linear execution, honor it unless the user authorizes an amendment; record that amendment and
+  its dependency/file-independence evidence before changing the schedule. Never bypass a blocker or claim an early
+  independent slice satisfies the whole dependent task.
 - **Every task goes to its own agent with agent-link `spawn`**, with exactly the plan's `harness` and `model` (leave
   `model` unset only when the plan says `default`) and `name` = the task's agent name. A task assigned to "executor"
   you do yourself.
@@ -37,8 +45,9 @@ the format; you rarely need it.
   it prints; never pass the words, as pi matches them loosely and can pick a provider that is not configured. If an
   agent fails with "Provider is not configured", the model was not an exact id: fix it and spawn again.
 - Parallel tasks in the same repository each get their own git worktree, so they never edit the same checkout:
-  `git worktree add ../<repo>-<task> -b pihouse/<task>` and pass it as the spawn `cwd`. Linear tasks work in the main
-  checkout.
+  `git worktree add ../<repo>-<task> -b pihouse/<task>` and pass it as the spawn `cwd`. Verify workspace package links
+  resolve within that worktree, not back into the primary checkout. Assign disjoint owned files; defer shared-file
+  wiring and resolve isolated integration conflicts yourself. Linear tasks work in the main checkout.
 - Results arrive by themselves as messages. After spawning, end your turn; never wait, sleep or poll `status`.
 - The planner handed off to you and its pane closed: you are the left pane, and agent-link stacks every agent you
   spawn in one column to your right, at even heights, never as tabs. Keep that column short: once a task's result is
