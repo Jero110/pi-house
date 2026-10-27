@@ -62,3 +62,68 @@ export function rejectProposal(db: DatabaseSync, id: string, reason: string): Pr
 	if (!["open", "approved"].includes(proposal.state)) throw new Error("Proposal cannot be rejected");
 	return transition(db, proposal, "rejected", reason);
 }
+
+// The caller must provide an atomic, target-scoped compare-and-swap. A read followed
+// by an ordinary write can overwrite an edit made between those operations.
+export interface ScopedTarget {
+	read(): Promise<string>;
+	compareAndSwap(expected: string, replacement: string): Promise<boolean>;
+	validate(): Promise<boolean>;
+}
+
+export async function applyProposal(db: DatabaseSync, id: string, target: ScopedTarget): Promise<Proposal> {
+	let proposal = getProposal(db, id);
+	if (proposal.state !== "approved") throw new Error("Proposal is not approved");
+	proposal = transition(db, proposal, "applying");
+	try {
+		if ((await target.read()) !== proposal.before) throw new Error("Target changed since approval");
+		if (!(await target.compareAndSwap(proposal.before, proposal.after)))
+			throw new Error("Target changed during application");
+		if ((await target.read()) !== proposal.after) throw new Error("Application effect not observed");
+		if (!(await target.validate())) throw new Error("Validation failed");
+		if ((await target.read()) !== proposal.after) throw new Error("Target changed during validation");
+		db.exec("BEGIN IMMEDIATE");
+		try {
+			const applied = transition(db, proposal, "applied");
+			db.prepare("INSERT INTO receipts(id, proposal_id, kind, payload) VALUES (?, ?, ?, ?)").run(
+				id,
+				id,
+				"application",
+				JSON.stringify({
+					version: proposal.version,
+					target: proposal.target,
+					beforeHash: hashBytes(proposal.before),
+					afterHash: hashBytes(proposal.after),
+					validation: true,
+				}),
+			);
+			db.exec("COMMIT");
+			return applied;
+		} catch (error) {
+			db.exec("ROLLBACK");
+			throw error;
+		}
+	} catch (error) {
+		return transition(db, proposal, "failed", String(error));
+	}
+}
+
+export async function rollbackProposal(db: DatabaseSync, id: string, target: ScopedTarget): Promise<void> {
+	const proposal = getProposal(db, id);
+	if (proposal.state !== "applied") throw new Error("Proposal is not applied");
+	const receipt = db
+		.prepare("SELECT payload FROM receipts WHERE id = ? AND proposal_id = ? AND kind = 'application'")
+		.get(id, id);
+	if (!receipt || typeof receipt.payload !== "string") throw new Error("Application receipt missing");
+	const recorded = JSON.parse(receipt.payload) as { version: string; beforeHash: string; afterHash: string };
+	if (
+		recorded.version !== proposal.version ||
+		recorded.beforeHash !== hashBytes(proposal.before) ||
+		recorded.afterHash !== hashBytes(proposal.after)
+	)
+		throw new Error("Receipt mismatch");
+	if ((await target.read()) !== proposal.after || !(await target.compareAndSwap(proposal.after, proposal.before)))
+		throw new Error("Target changed; rollback refused");
+	if ((await target.read()) !== proposal.before) throw new Error("Rollback effect not observed");
+	transition(db, proposal, "superseded", "Rolled back");
+}
