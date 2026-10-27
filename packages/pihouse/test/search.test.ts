@@ -5,7 +5,13 @@ import { join } from "node:path";
 import test from "node:test";
 import { openMemory, type RunPackage } from "../src/workflow/memory.ts";
 import { migrateLegacyStore } from "../src/workflow/migration.ts";
-import { reconcileSearch, searchDocuments, searchMemory, syncSearchIndex } from "../src/workflow/search.ts";
+import {
+	reconcileSearch,
+	searchDocuments,
+	searchMemory,
+	syncSearchIndex,
+	syncSearchStore,
+} from "../src/workflow/search.ts";
 import { openOperationalStore } from "../src/workflow/storage.ts";
 
 test("reconciles canonical documents and searches only authorized active trusted scope", () => {
@@ -273,6 +279,87 @@ test("syncSearchIndex surfaces a body that no longer matches its committed hash"
 			.run(join(dir, "digests/r1.md"), "0".repeat(64));
 		store.close();
 		assert.throws(() => syncSearchIndex(dir), /hash mismatch.*digest:r1/i);
+	} finally {
+		cleanup();
+	}
+});
+
+test("a second writer cannot interleave between the comparison and the write of a reconciliation", () => {
+	const { dir, cleanup } = activated();
+	const first = openOperationalStore(join(dir, "memory.sqlite"), { legacy: true });
+	const second = openOperationalStore(join(dir, "memory.sqlite"), { legacy: true });
+	try {
+		syncSearchIndex(dir);
+		writeFileSync(join(dir, "digests/r1.md"), "---\nsummary: digest summary\n---\n\nNow about supernova.");
+		second.db.exec("PRAGMA busy_timeout = 0");
+		let secondRan = false;
+		let secondError = "";
+		syncSearchStore(first, dir, {
+			beforeWrite: () => {
+				try {
+					syncSearchStore(second, dir);
+					secondRan = true;
+				} catch (error) {
+					secondError = String(error);
+				}
+			},
+		});
+		assert.equal(secondRan, false, "the second reconciliation ran between the first one's comparison and write");
+		assert.match(secondError, /locked|busy/i);
+		const counts = first.db
+			.prepare(
+				"SELECT (SELECT count(*) FROM search_documents) AS docs, (SELECT count(*) FROM search_fts) AS fts, (SELECT count(DISTINCT id) FROM search_fts) AS ids",
+			)
+			.get();
+		assert.equal(Number(counts?.docs), Number(counts?.fts), "one derived row per document");
+		assert.equal(Number(counts?.fts), Number(counts?.ids), "no duplicate FTS rows");
+		assert.equal(searchMemory(dir, "supernova", { project: "p", trusts: ["derived"] }).length, 1);
+	} finally {
+		first.close();
+		second.close();
+		cleanup();
+	}
+});
+
+test("a search row without its metadata row is repaired incrementally, not by a full rebuild", () => {
+	const { dir, cleanup } = activated();
+	try {
+		syncSearchIndex(dir);
+		const store = openOperationalStore(join(dir, "memory.sqlite"), { legacy: true });
+		store.db.prepare("INSERT INTO jobs(id,state,payload) VALUES ('j','failed','x')").run();
+		store.db.prepare("DELETE FROM search_documents WHERE id = 'digest:r1'").run();
+		store.close();
+		const result = syncSearchIndex(dir);
+		assert.deepEqual([result.mode, result.indexed, result.removed], ["incremental", 1, 0]);
+		assert.equal(searchMemory(dir, "quasar", { project: "p", trusts: ["derived"] }).length, 1);
+		const after = openOperationalStore(join(dir, "memory.sqlite"), { legacy: true });
+		try {
+			assert.equal(after.db.prepare("SELECT payload FROM jobs WHERE id='j'").get()?.payload, "x");
+		} finally {
+			after.close();
+		}
+	} finally {
+		cleanup();
+	}
+});
+
+test("a metadata row without its search row is repaired incrementally, operational rows unchanged", () => {
+	const { dir, cleanup } = activated();
+	try {
+		syncSearchIndex(dir);
+		const store = openOperationalStore(join(dir, "memory.sqlite"), { legacy: true });
+		store.db.prepare("INSERT INTO jobs(id,state,payload) VALUES ('j','failed','x')").run();
+		store.db.prepare("DELETE FROM search_fts WHERE id = 'digest:r1'").run();
+		store.close();
+		const result = syncSearchIndex(dir);
+		assert.deepEqual([result.mode, result.indexed, result.removed], ["incremental", 1, 0]);
+		assert.equal(searchMemory(dir, "quasar", { project: "p", trusts: ["derived"] }).length, 1);
+		const after = openOperationalStore(join(dir, "memory.sqlite"), { legacy: true });
+		try {
+			assert.equal(after.db.prepare("SELECT payload FROM jobs WHERE id='j'").get()?.payload, "x");
+		} finally {
+			after.close();
+		}
 	} finally {
 		cleanup();
 	}

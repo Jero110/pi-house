@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { isAbsolute, join, resolve, sep } from "node:path";
+import type { DatabaseSync } from "node:sqlite";
 import type { IndexEntry } from "./memory.ts";
 import { ACTIVE_MARKER } from "./migration.ts";
 import { type OperationalStore, openOperationalStore } from "./storage.ts";
@@ -179,9 +180,35 @@ export function syncSearchIndex(memoryDir: string, options: { full?: boolean } =
 	const root = resolve(memoryDir);
 	const store = openActivated(root);
 	try {
-		return syncOpen(store, root, options.full === true);
+		return syncSearchStore(store, root, { full: options.full === true });
 	} finally {
 		store.close();
+	}
+}
+
+/**
+ * Problem: the comparison ran before BEGIN IMMEDIATE, so another writer could change the index between the read and the
+ * write, and this write then acted on a stale view. Example: process A reads "document X unchanged"; process B re-indexes
+ * X; A commits its stale "unchanged" and the index no longer matches the document.
+ * Solution: take the write lock first, then read the inventory, the committed hashes and the derived rows, and write,
+ * all in one transaction. A second writer that cannot take the lock gets a busy error and changes nothing.
+ * `beforeWrite` runs inside that transaction after the comparison; tests use it to try a second writer at that point.
+ */
+export function syncSearchStore(
+	store: OperationalStore,
+	memoryDir: string,
+	options: { full?: boolean; beforeWrite?: () => void } = {},
+): SyncResult {
+	const root = resolve(memoryDir);
+	const db = store.db;
+	db.exec("BEGIN IMMEDIATE");
+	try {
+		const result = syncLocked(store, root, options.full === true, options.beforeWrite);
+		db.exec("COMMIT");
+		return result;
+	} catch (error) {
+		db.exec("ROLLBACK");
+		throw error;
 	}
 }
 
@@ -195,14 +222,46 @@ interface StoredRow {
 	trust: string;
 	date: string;
 	provenance: string;
+}
+
+interface StoredText {
+	/** Rows in search_fts for this id; anything but one is damage and is reindexed. */
+	copies: number;
 	title: string;
 	summary: string;
 }
 
-function unchanged(old: StoredRow | undefined, v: Verified): boolean {
+interface StoredIndex {
+	documents: Map<string, StoredRow>;
+	text: Map<string, StoredText>;
+}
+
+/** The derived rows as stored. Null when the search tables are missing or unreadable, which calls for a rebuild. */
+function storedIndex(db: DatabaseSync): StoredIndex | null {
+	try {
+		const rows = db
+			.prepare("SELECT id,hash,path,kind,project,status,trust,date,provenance FROM search_documents")
+			.all() as unknown as StoredRow[];
+		const texts = db
+			.prepare(
+				"SELECT id, count(*) AS copies, min(title) AS title, min(summary) AS summary FROM search_fts GROUP BY id",
+			)
+			.all() as unknown as (StoredText & { id: string })[];
+		return {
+			documents: new Map(rows.map((r) => [r.id, r])),
+			text: new Map(texts.map((r) => [r.id, { copies: r.copies, title: r.title, summary: r.summary }])),
+		};
+	} catch {
+		return null;
+	}
+}
+
+function unchanged(old: StoredRow | undefined, text: StoredText | undefined, v: Verified): boolean {
 	const d = v.doc;
 	return (
 		old !== undefined &&
+		text !== undefined &&
+		text.copies === 1 &&
 		old.hash === v.hash &&
 		old.path === d.path &&
 		old.kind === d.kind &&
@@ -211,12 +270,12 @@ function unchanged(old: StoredRow | undefined, v: Verified): boolean {
 		old.trust === d.trust &&
 		old.date === d.date &&
 		old.provenance === d.provenance &&
-		old.title === d.title &&
-		old.summary === d.summary
+		text.title === d.title &&
+		text.summary === d.summary
 	);
 }
 
-function syncOpen(store: OperationalStore, root: string, full: boolean): SyncResult {
+function syncLocked(store: OperationalStore, root: string, full: boolean, beforeWrite?: () => void): SyncResult {
 	const db = store.db;
 	const entries = (db.prepare("SELECT payload FROM index_entries ORDER BY seq").all() as { payload: string }[]).map(
 		(r) => JSON.parse(r.payload) as IndexEntry,
@@ -235,48 +294,35 @@ function syncOpen(store: OperationalStore, root: string, full: boolean): SyncRes
 		const expected = committed.get(v.doc.path);
 		if (expected !== undefined && expected !== v.hash) throw new Error(`Document hash mismatch: ${v.doc.id}`);
 	}
-	let existing: Map<string, StoredRow> | null = null;
-	if (!full) {
-		try {
-			const rows = db
-				.prepare("SELECT d.*, f.title, f.summary FROM search_documents d JOIN search_fts f ON f.id = d.id")
-				.all() as unknown as StoredRow[];
-			const count = Number(db.prepare("SELECT count(*) AS n FROM search_fts").get()?.n);
-			if (count === rows.length) existing = new Map(rows.map((r) => [r.id, r]));
-		} catch {
-			existing = null;
-		}
+	const stored = full ? null : storedIndex(db);
+	beforeWrite?.();
+	if (!stored) {
+		db.exec(`DROP TABLE IF EXISTS search_fts; DROP TABLE IF EXISTS search_documents; ${SEARCH_SCHEMA}`);
+		for (const v of verified) insertDocument(store, v);
+		return { mode: "full", indexed: verified.length, removed: 0, unchanged: 0 };
 	}
-	db.exec("BEGIN IMMEDIATE");
-	try {
-		if (!existing) {
-			db.exec(`DROP TABLE IF EXISTS search_fts; DROP TABLE IF EXISTS search_documents; ${SEARCH_SCHEMA}`);
-			for (const v of verified) insertDocument(store, v);
-			db.exec("COMMIT");
-			return { mode: "full", indexed: verified.length, removed: 0, unchanged: 0 };
-		}
-		const keep = new Set(verified.map((v) => v.doc.id));
-		let removed = 0;
-		for (const id of existing.keys()) {
-			if (keep.has(id)) continue;
-			db.prepare("DELETE FROM search_fts WHERE id = ?").run(id);
-			db.prepare("DELETE FROM search_documents WHERE id = ?").run(id);
-			removed++;
-		}
-		let indexed = 0;
-		for (const v of verified) {
-			if (unchanged(existing.get(v.doc.id), v)) continue;
-			db.prepare("DELETE FROM search_fts WHERE id = ?").run(v.doc.id);
-			db.prepare("DELETE FROM search_documents WHERE id = ?").run(v.doc.id);
-			insertDocument(store, v);
-			indexed++;
-		}
-		db.exec("COMMIT");
-		return { mode: "incremental", indexed, removed, unchanged: verified.length - indexed };
-	} catch (error) {
-		db.exec("ROLLBACK");
-		throw error;
+	const keep = new Set(verified.map((v) => v.doc.id));
+	let removed = 0;
+	for (const id of stored.documents.keys()) {
+		if (keep.has(id)) continue;
+		db.prepare("DELETE FROM search_fts WHERE id = ?").run(id);
+		db.prepare("DELETE FROM search_documents WHERE id = ?").run(id);
+		removed++;
 	}
+	// A search row without its document row is derived debris: drop it here, and the loop below indexes the document
+	// again if it is still inventoried. Only derived tables are written; operational rows are never touched.
+	for (const id of stored.text.keys()) {
+		if (!stored.documents.has(id)) db.prepare("DELETE FROM search_fts WHERE id = ?").run(id);
+	}
+	let indexed = 0;
+	for (const v of verified) {
+		if (unchanged(stored.documents.get(v.doc.id), stored.text.get(v.doc.id), v)) continue;
+		db.prepare("DELETE FROM search_fts WHERE id = ?").run(v.doc.id);
+		db.prepare("DELETE FROM search_documents WHERE id = ?").run(v.doc.id);
+		insertDocument(store, v);
+		indexed++;
+	}
+	return { mode: "incremental", indexed, removed, unchanged: verified.length - indexed };
 }
 
 /** Sync (unless told not to) and search an activated store; the scope is the trusted launch scope. */
@@ -290,7 +336,7 @@ export function searchMemory(
 	const root = resolve(memoryDir);
 	const store = openActivated(root);
 	try {
-		if (options.sync !== false) syncOpen(store, root, false);
+		if (options.sync !== false) syncSearchStore(store, root);
 		return searchDocuments(store, query, scope, limit);
 	} finally {
 		store.close();
