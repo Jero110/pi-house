@@ -19,6 +19,7 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
+import { pihousePaths } from "../paths.ts";
 import { type Candidate, type Failure, type Observation, type Profile, type RoutingResult, route } from "./routing.ts";
 
 export const ROUTING_PROFILES_VERSION = 1;
@@ -221,6 +222,23 @@ export function chooseRoute(input: ChooseInput): Choice {
 		checkpoint: input.checkpoint,
 	});
 	return { status: "routed", profile: profile.id, profileHash: loaded.hash, result };
+}
+
+export interface ConfiguredChooseInput extends Omit<ChooseInput, "loaded"> {
+	/** Where PIHOUSE_HOME and HOME come from; the process environment by default. */
+	env?: NodeJS.ProcessEnv;
+}
+
+/**
+ * The one entry a caller needs: reads <pihouseHome>/routing-profiles.json, then chooses as chooseRoute() does.
+ * Problem: every caller that located and loaded the file itself could read a different home or skip the loader.
+ * Example: a worker launched with PIHOUSE_HOME=/tmp/h must route with /tmp/h/routing-profiles.json, not ~/.pihouse.
+ * Solution: the home comes from pihousePaths(), the same place every other pihouse file is found. The file is read
+ * on every call, so an edit applies to the next decision; no extension or binding is registered here.
+ */
+export function chooseConfiguredRoute(input: ConfiguredChooseInput): Choice {
+	const { env = process.env, ...rest } = input;
+	return chooseRoute({ ...rest, loaded: loadRoutingProfiles(routingProfilesPath(pihousePaths(env).home)) });
 }
 
 /** What a paused decision leaves behind: the body and its hash, both in one private file. */

@@ -15,6 +15,7 @@ import type { Observation, Profile } from "../src/workflow/routing.ts";
 import {
 	type Choice,
 	checkpointPause,
+	chooseConfiguredRoute,
 	chooseRoute,
 	type LoadedProfiles,
 	loadRoutingProfiles,
@@ -467,4 +468,26 @@ test("a rate-limited usage endpoint is a rate pause, not exhaustion, and writes 
 	} finally {
 		usage.close();
 	}
+});
+
+test("the configured entry reads routing-profiles.json from PIHOUSE_HOME and routes with it", () => {
+	const home = mkdtempSync(join(tmpdir(), "pihouse-home-"));
+	const env = { PIHOUSE_HOME: home, HOME: "/nonexistent-home" };
+	const { registry } = fakeRegistry([{ provider: "openai-codex", id: "gpt-6-luna", authed: true }]);
+	const args = {
+		env,
+		registry,
+		profileId: "coding",
+		fixed: FIXED,
+		observations: [fresh("openai", "available")],
+		now: NOW,
+		maxAgeMs: 60_000,
+	};
+	assert.deepEqual(chooseConfiguredRoute(args), { status: "fixed", model: FIXED, reason: "no routing profiles file" });
+	const text = JSON.stringify(file([{ ...codingRaw, candidates: [lunaCandidate] }]));
+	writeFileSync(join(home, "routing-profiles.json"), text);
+	const choice = chooseConfiguredRoute(args);
+	if (choice.status !== "routed" || choice.result.status !== "selected") assert.fail("expected a selected candidate");
+	assert.equal(choice.profileHash, createHash("sha256").update(text).digest("hex"));
+	assert.equal(choice.result.candidate.model, "gpt-6-luna");
 });
