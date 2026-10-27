@@ -40,6 +40,14 @@ the format; you rarely need it.
 - **Every task goes to its own agent with agent-link `spawn`**, with exactly the plan's `harness` and `model` (leave
   `model` unset only when the plan says `default`) and `name` = the task's agent name. A task assigned to "executor"
   you do yourself.
+- **Check usage before every spawn.** Call `account_usage` before each `spawn`, and once before a batch of parallel
+  spawns. Never spawn on an account it reports `exhausted`. `stale` or `unknown` is not proof of exhaustion: you may
+  spawn, but watch that agent's first result.
+- **When the plan's model cannot be used** (its account is `exhausted`, or a worker fails with a quota, rate or auth
+  error), pick an alternative the plan or the user authorized; never an unconfigured account or API billing. Record it
+  in the ledger as `ASSUMED:` (or `AMENDED:` when it changes a plan Decision). Then spawn on the alternative, or, for a
+  live worker, use agent-link's `model` tool: `retry: true` after a failed turn, `interrupt: true` only when waiting is
+  worse than cutting the current turn.
 - **A model must be an exact id.** If a plan's model is words instead of `<provider>/<model-id>`, resolve it first with
   `PIHOUSE_NO_LINK=1 pihouse --list-models <words>` (it lists only providers the user is logged in to) and spawn with the id
   it prints; never pass the words, as pi matches them loosely and can pick a provider that is not configured. If an

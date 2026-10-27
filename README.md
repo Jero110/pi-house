@@ -156,6 +156,10 @@ you@host  ~/project  Sonnet 5.5  effort: high  ctx: 32%
   Code only writes that file if your status line script does; see
   [Claude Code's status line docs](https://code.claude.com/docs/en/statusline) for the `rate_limits` it passes in.
 - **ChatGPT:** with a ChatGPT login (`/login`, `openai-codex`) the windows come from OpenAI's usage endpoint.
+- **`account_usage` tool:** every pihouse agent can call it to read the same numbers before spawning: per logged-in
+  account, each window with percent used and reset, how old the observation is, and `available`, `exhausted`, `stale`
+  or `unknown`. Unknown is never shown as 0% or available. No model call; tokens never appear in the answer. The executor
+  checks it before each spawn.
 - **Active account:** the one whose model you are using is named in the accent color.
 - **Other logins and API keys:** no windows, so the line below the session shows its tokens and cost.
 - Narrow terminals drop the least important parts of the first line first; an account line never merges with another.
