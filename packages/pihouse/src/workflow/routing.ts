@@ -82,11 +82,11 @@ export function route(input: Input): RoutingResult {
 			reasons.push({ candidate, reason });
 			continue;
 		}
-		const failure = input.failures?.find(
-			(item) => item.provider === candidate.provider && item.account === candidate.account,
-		);
+		// Quota and failures belong to the account: two providers behind one login (openai-codex and azure on
+		// "openai") share one usage window, so matching on the provider too would leave the candidate unknown.
+		const failure = input.failures?.find((item) => item.account === candidate.account);
 		const observation = input.observations
-			.filter((item) => item.provider === candidate.provider && item.account === candidate.account)
+			.filter((item) => item.account === candidate.account)
 			.sort((a, b) => b.observedAt - a.observedAt)[0];
 		const age = observation ? now - observation.observedAt : NaN;
 		reason =

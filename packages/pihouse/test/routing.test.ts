@@ -101,3 +101,18 @@ test("polling deduplicates in-flight account requests and applies bounded backof
 	assert.equal((await pollAccount(state, "provider", "a", 101, fetch)).status, "backoff");
 	assert.equal(calls, 1);
 });
+
+test("quota belongs to the account, so providers behind one login share its observation", () => {
+	// Problem: a ChatGPT login serves openai-codex models; usage is read per account as "openai".
+	// Example: candidate openai-codex/gpt-6-luna on account "openai" never matched its observation, so it was "unknown".
+	const shared: Candidate = { ...terra, provider: "openai-codex", model: "gpt-6-luna", account: "openai" };
+	const sharedProfile: Profile = { ...profile, candidates: [shared] };
+	const result = route({
+		profile: sharedProfile,
+		resolved: [{ candidate: shared, credentials: true, modelAvailable: true }],
+		observations: [{ provider: "openai", account: "openai", state: "available", observedAt: 100, source: "fake" }],
+		now: 110,
+		maxAgeMs: 20,
+	});
+	assert.equal(result.status, "selected");
+});
