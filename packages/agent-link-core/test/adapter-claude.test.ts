@@ -556,3 +556,11 @@ test("the permit hook prints nothing when nobody answers in time or no adapter l
 		await c.done();
 	}
 });
+
+test("Claude has no model switch through agent-link: setModel says why and changes nothing", async () => {
+	const adapter = createClaudeAdapter({ log: () => {}, guard: () => ({ action: "allow" }), depth: 1 });
+	const res = await adapter.setModel?.("anthropic/claude-sonnet-5-5");
+	assert.ok(res && "error" in res);
+	assert.match(res.error, /Claude Code takes its model from --model at launch/);
+	assert.match(res.error, /messaging socket carries user messages only/);
+});

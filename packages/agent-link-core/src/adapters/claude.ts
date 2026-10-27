@@ -43,6 +43,7 @@ import type {
 	PromptRequest,
 	PromptResponse,
 	SessionUpdate,
+	SetModelResult,
 	StopReason,
 } from "../types.ts";
 
@@ -631,6 +632,18 @@ export function createClaudeAdapter(deps: AdapterDeps, opts: ClaudeOptions = {})
 		},
 
 		idle: () => !gone && !pending && status === "idle",
+
+		/**
+		 * Checked against claude 2.1.310: the model is `--model` at launch, and the messaging socket carries user messages
+		 * only (frames: auth, user). A /model command sent as a message is a message to the model, not a switch, and typing
+		 * it into the pane is what this tool must never do.
+		 */
+		async setModel(): Promise<SetModelResult> {
+			return {
+				error:
+					"Claude Code takes its model from --model at launch and agent-link's messaging socket carries user messages only, so it cannot be changed from outside; cancel it and spawn a new worker with the model",
+			};
+		},
 
 		async cancel(): Promise<void> {
 			// The messaging socket has no cancel: Escape in the pane interrupts the turn, as for the user.

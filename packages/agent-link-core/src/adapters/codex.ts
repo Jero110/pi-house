@@ -30,6 +30,7 @@ import type {
 	PromptRequest,
 	PromptResponse,
 	SessionUpdate,
+	SetModelResult,
 	StopReason,
 } from "../types.ts";
 import { IDENTITY_ENV, PLACE_ENV, READ_DIRS_ENV } from "../types.ts";
@@ -518,6 +519,19 @@ export function createCodexAdapter(deps: AdapterDeps, options: CodexAdapterOptio
 
 		idle(): boolean {
 			return !!threadId && !closed && !pending && state === "idle";
+		},
+
+		/**
+		 * Checked against codex 0.163.0 (app-server generate-json-schema): turn/start takes `model` ("Override the model
+		 * for this turn and subsequent turns") as a bare model id, and model/list names ids with no provider. A
+		 * `<provider>/<id>` cannot be verified against that, and mapping it by guesswork could switch to the wrong
+		 * model, so the switch stays unsupported until Codex documents a provider.
+		 */
+		async setModel(): Promise<SetModelResult> {
+			return {
+				error:
+					"Codex's app-server takes a bare model id (turn/start model) with no provider, so <provider>/<id> cannot be checked against it; cancel it and spawn a new worker with the model",
+			};
 		},
 
 		async cancel(): Promise<void> {

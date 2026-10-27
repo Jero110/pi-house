@@ -64,6 +64,15 @@ async function fakeOpencode() {
 			if (path === "/session" && req.method === "GET") return json([]);
 			if (path === "/session" && req.method === "POST") return json({ id: SID, title: body.title });
 			if (path === "/tui/select-session") return json(true);
+			// GET /config/providers lists the connected providers and their models (checked against opencode 1.19.3).
+			if (path === "/config/providers")
+				return json({
+					providers: [
+						{ id: "opencode", models: { "glm-5.3-flash-free": {}, "big-pickle": {} } },
+						{ id: "openrouter", models: { "anthropic/claude-sonnet-5-5": {} } },
+					],
+					default: { opencode: "big-pickle" },
+				});
 			if (path === `/session/${SID}/message`) return json(messages);
 			if (path === `/session/${SID}/prompt_async`) {
 				res.statusCode = 204;
@@ -438,4 +447,64 @@ test("permit answers an opencode question with several options picked, sending t
 	assert.deepEqual(await adapter.answer?.("1, kioto"), { answered: "Tokio — 2 días, Kioto — 1 día" });
 	assert.deepEqual(oc.requests.find((r) => r.path === "/question/que1/reply")?.body, { answers: [["Tokio", "Kioto"]] });
 	await until(() => updates.at(-1)?.kind === "state" && (updates.at(-1) as { state: string }).state === "busy", "busy");
+});
+
+/** The model of each prompt_async the fake server received, in order. */
+const sentModels = (oc: Awaited<ReturnType<typeof fakeOpencode>>) =>
+	oc.requests.filter((r) => r.path.endsWith("/prompt_async")).map((r) => (r.body as { model: unknown }).model);
+
+test("opencode setModel checks the connected providers, then the next prompt_async carries the new model", async () => {
+	const { oc, adapter, updates } = await started();
+	assert.deepEqual(await adapter.setModel?.("opencode/nope"), { error: "opencode does not offer opencode/nope" });
+	assert.deepEqual(await adapter.setModel?.("zen/big-pickle"), { error: "opencode does not offer zen/big-pickle" });
+	assert.deepEqual(await adapter.setModel?.("opencode/big-pickle"), {
+		status: "applied",
+		model: "opencode/big-pickle",
+	});
+	assert.deepEqual(await adapter.setModel?.("openrouter/anthropic/claude-sonnet-5-5"), {
+		status: "applied",
+		model: "openrouter/anthropic/claude-sonnet-5-5",
+	});
+	oc.onPrompt.push(() => {
+		oc.status("busy");
+		oc.reply("ok");
+		oc.status("idle");
+		oc.idle();
+	});
+	await adapter.prompt({ id: "m1", from: "agent-link", text: "go" });
+	assert.deepEqual(sentModels(oc), [{ providerID: "openrouter", modelID: "anthropic/claude-sonnet-5-5" }]);
+	assert.deepEqual(
+		updates.filter((u) => u.kind === "model"),
+		[],
+		"applied answers carry the model; no update is needed",
+	);
+});
+
+test("opencode setModel while a turn runs is pending: the running request keeps its model, the next prompt uses the new one", async () => {
+	const { oc, adapter, updates } = await started();
+	oc.onPrompt.push(() => oc.status("busy"));
+	const first = adapter.prompt({ id: "m1", from: "agent-link", text: "go" });
+	await until(() => sentModels(oc).length === 1, "the first prompt");
+	assert.deepEqual(await adapter.setModel?.("opencode/big-pickle"), {
+		status: "pending",
+		model: "opencode/big-pickle",
+	});
+	assert.deepEqual(sentModels(oc), [{ providerID: "opencode", modelID: "glm-5.3-flash-free" }]);
+	oc.reply("ok");
+	oc.status("idle");
+	oc.idle();
+	await first;
+	oc.onPrompt.length = 0;
+	oc.onPrompt.push(() => {
+		oc.status("busy");
+		oc.reply("again");
+		oc.status("idle");
+		oc.idle();
+	});
+	await adapter.prompt({ id: "m2", from: "agent-link", text: "next" });
+	assert.deepEqual(sentModels(oc).at(-1), { providerID: "opencode", modelID: "big-pickle" });
+	assert.deepEqual(
+		updates.filter((u) => u.kind === "model"),
+		[{ kind: "model", model: "opencode/big-pickle" }],
+	);
 });

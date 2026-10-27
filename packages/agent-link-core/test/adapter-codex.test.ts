@@ -390,3 +390,11 @@ test("close kills the app-server, cancels a pending prompt and is idempotent", a
 		false,
 	);
 });
+
+test("Codex setModel says why it cannot: turn/start takes a bare model id, no provider to check <provider>/<id> against", async () => {
+	const adapter = createCodexAdapter({ log: () => {}, guard: () => ({ action: "allow" }), depth: 1 });
+	const res = await adapter.setModel?.("openai/gpt-5.5");
+	assert.ok(res && "error" in res);
+	assert.match(res.error, /bare model id/);
+	assert.match(res.error, /no provider/);
+});

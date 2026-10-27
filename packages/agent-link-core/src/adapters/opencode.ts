@@ -18,6 +18,7 @@ import type {
 	PromptRequest,
 	PromptResponse,
 	SessionUpdate,
+	SetModelResult,
 	StopReason,
 } from "../types.ts";
 
@@ -161,6 +162,8 @@ export function createOpencodeAdapter(deps: AdapterDeps, opts: OpencodeOptions =
 	};
 	let port = 0;
 	let model = "";
+	/** A model switch asked while a turn ran: the next prompt() sends it, so the running request is not touched. */
+	let nextModel: string | undefined;
 	let title = "";
 	let session = "";
 	let pane: PaneHandle | undefined;
@@ -485,6 +488,11 @@ export function createOpencodeAdapter(deps: AdapterDeps, opts: OpencodeOptions =
 			if (pending) throw new Error("opencode: a prompt is already in flight");
 			// A pane turn that had not ended is folded into this one.
 			paneTurn = false;
+			if (nextModel) {
+				model = nextModel;
+				nextModel = undefined;
+				emit({ kind: "model", model });
+			}
 			const result = new Promise<PromptResponse>((resolve) => {
 				pending = { req, sentAt: Date.now(), busy: false, first: false, cancelledAt: 0, resolve };
 			});
@@ -502,6 +510,33 @@ export function createOpencodeAdapter(deps: AdapterDeps, opts: OpencodeOptions =
 		},
 
 		idle: () => !gone && !!session && !pending && !busy && !asking,
+
+		/**
+		 * opencode's HTTP API takes the model with every message (prompt_async `model`, OpenAPI of opencode 1.19.3), and
+		 * GET /config/providers lists the connected providers with their models. So a switch is the model of the next
+		 * message, checked against that list; the TUI's own model picker is not touched.
+		 */
+		async setModel(next: string): Promise<SetModelResult> {
+			if (gone || !session) return { error: "opencode is not running" };
+			const { providerID, modelID } = splitModel(next);
+			let offered = false;
+			try {
+				const res = (await api("/config/providers")) as { providers?: Array<{ id?: string; models?: object }> };
+				offered = (res.providers ?? []).some(
+					(p) => p.id === providerID && !!p.models && Object.hasOwn(p.models, modelID),
+				);
+			} catch (e) {
+				return { error: `opencode could not list its models: ${e instanceof Error ? e.message : String(e)}` };
+			}
+			if (!offered) return { error: `opencode does not offer ${next}` };
+			if (pending || busy || asking) {
+				nextModel = next;
+				return { status: "pending", model: next };
+			}
+			model = next;
+			nextModel = undefined;
+			return { status: "applied", model: next };
+		},
 
 		async cancel(): Promise<void> {
 			const p = pending;
