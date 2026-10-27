@@ -375,9 +375,37 @@ export class Pinecone {
 				assertPassageId(match.id);
 				const metadata = record(match.metadata) as PineconeMetadata;
 				hostedMetadata(metadata);
-				if (metadata.generation !== options.generation)
-					throw new AdapterError("identity_mismatch", "Pinecone returned a stale index generation");
+				// Candidate identity is checked against the committed manifest by
+				// search, so one stale candidate is dropped with diagnostics rather
+				// than hiding valid evidence behind a whole-query failure.
 				return { id: match.id, score: match.score, metadata };
+			});
+		});
+	}
+	/** Exact-ID reads support hosted resolution and bounded visibility checks.
+	 * Missing IDs are explicit omissions (eventual consistency), never fabricated. */
+	async fetch(ids: readonly string[], expected: unknown): Promise<readonly PineconeMatch[]> {
+		assertEmbeddingIdentity(expected);
+		boundedInteger(ids.length, 1, 8, "Pinecone fetch batch");
+		const requested = [...ids];
+		requested.forEach(assertPassageId);
+		return this.exclusive(async () => {
+			await this.verify();
+			await this.throttle("query");
+			const query = new URLSearchParams({ namespace: this.options.namespace });
+			for (const id of requested) query.append("ids", id);
+			const result = record(await this.call(this.host, `/vectors/fetch?${query}`));
+			if (result.namespace !== this.options.namespace)
+				throw new AdapterError("identity_mismatch", "Pinecone fetch namespace mismatch");
+			const vectors = record(result.vectors);
+			if (Object.keys(vectors).some((id) => !requested.includes(id)))
+				throw new AdapterError("identity_mismatch", "Pinecone fetch returned an unrequested ID");
+			return Object.entries(vectors).map(([id, value]) => {
+				const vector = record(value);
+				if (vector.id !== id) throw new AdapterError("identity_mismatch", "Pinecone fetch ID mismatch");
+				const metadata = record(vector.metadata) as PineconeMetadata;
+				hostedMetadata(metadata);
+				return { id, score: 0, metadata };
 			});
 		});
 	}

@@ -176,6 +176,9 @@ test("dotenv/config errors name keys but never echo credential values", () => {
 		S3_BUCKET_PRIVATE_CONFIRMED: "true",
 		S3_PRIVATE_PROBE_KEY: "library/private-probe",
 	};
+	const { S3_PRIVATE_PROBE_KEY: _probe, ...withoutProbe } = env;
+	assert.equal(loadConfig({ env: withoutProbe }).objects.privateProbeKey, "library/_private-probe");
+	assert.equal(loadConfig({ env }).objects.privateProbeKey, "library/private-probe");
 	assert.equal(loadConfig({ env }).objects.bucket, "books");
 	assert.equal(loadConfig({ env }).objects.privateBucketConfirmed, true);
 	assert.throws(() => loadConfig({ env: { ...env, S3_BUCKET_PRIVATE_CONFIRMED: "false" } }), /PRIVATE_CONFIRMED/u);

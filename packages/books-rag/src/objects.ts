@@ -66,7 +66,7 @@ export interface ObjectOptions extends HttpOptions {
 	readonly secretAccessKey: string;
 	/** The operator must verify bucket privacy, plan and remaining allowances. */
 	readonly privateBucketConfirmed: true;
-	readonly privateProbeKey: string;
+	readonly privateProbeKey?: string;
 	readonly maxRequests?: number;
 	readonly maxUploadBytes?: number;
 }
@@ -76,14 +76,14 @@ export interface ObjectReceipt {
 	readonly bytes: number;
 }
 export class Objects {
-	private readonly options: ObjectOptions;
+	private readonly options: ObjectOptions & { readonly privateProbeKey: string };
 	private readonly base: URL;
 	private readonly queue: BoundedQueue;
 	private readonly verification: VerificationCache;
 	private requests = 0;
 	private uploaded = 0;
 	constructor(options: ObjectOptions) {
-		this.options = { ...options };
+		this.options = { ...options, privateProbeKey: options.privateProbeKey ?? `${options.prefix}_private-probe` };
 		this.queue = new BoundedQueue(options.queueWaitMs);
 		this.verification = new VerificationCache(options.verificationTtlMs);
 		this.base = endpoint(options.endpoint);
@@ -105,7 +105,39 @@ export class Objects {
 		}
 		boundedInteger(options.maxRequests ?? 10000, 1, 10000, "S3 run requests");
 		boundedInteger(options.maxUploadBytes ?? 100000000, 1, 100000000, "S3 run upload bytes");
-		this.key(options.privateProbeKey);
+		this.key(this.options.privateProbeKey);
+	}
+	libraryKey(name: string): string {
+		const key = `${this.options.prefix}${name}`;
+		this.key(key);
+		return key;
+	}
+	/** Writer bootstrap: fixed non-sensitive bytes only, before any corpus upload.
+	 * Readers never call this; they only perform the anonymous refusal probe. */
+	async prepareWriter(): Promise<void> {
+		const bytes = Buffer.from("books-rag private canary v1\n");
+		await this.call(
+			"PUT",
+			this.options.privateProbeKey,
+			{
+				"content-type": "application/json",
+				"x-amz-meta-sha256": hash(bytes),
+			},
+			bytes,
+			true,
+		);
+		await this.verification.verify(() => this.verifyPrivate(), true);
+	}
+	/** Mutable catalog/lease discovery trusts the configured authenticated endpoint,
+	 * not an external hash. Subsequent evidence reads use manifest-pinned hashes.
+	 * Only a genuine 404 means absent; outages are never empty catalogs. */
+	async discover(key: string): Promise<{ readonly bytes: Buffer; readonly hash: Sha256 } | null> {
+		const result = await this.call("GET", key, {}, undefined, false, true);
+		if (result.status === 404) return null;
+		const digest = `sha256:${hash(result.bytes)}` as Sha256;
+		if (`sha256:${result.headers.get("x-amz-meta-sha256")}` !== digest)
+			throw new AdapterError("identity_mismatch", "Discovered object hash mismatch");
+		return { bytes: result.bytes, hash: digest };
 	}
 	private key(key: string): URL {
 		if (
@@ -134,12 +166,14 @@ export class Objects {
 		key: string,
 		headers: Record<string, string>,
 		bytes?: Buffer,
+		bootstrap = false,
+		allowMissing = false,
 	): Promise<Awaited<ReturnType<typeof requestBytes>>> {
 		const url = this.key(key);
 		return this.queue.run(async () => {
 			if (++this.requests > (this.options.maxRequests ?? 10000))
 				throw new AdapterError("resource_limit", "S3 run request budget exhausted");
-			await this.verification.verify(() => this.verifyPrivate());
+			if (!bootstrap) await this.verification.verify(() => this.verifyPrivate());
 			try {
 				return await requestBytes(
 					() => ({
@@ -161,6 +195,7 @@ export class Objects {
 					}),
 					2 * 1024 * 1024,
 					this.options,
+					allowMissing ? { acceptedStatuses: [404] } : {},
 				);
 			} catch (error) {
 				return this.verification.recheck(error, () => this.verifyPrivate());

@@ -34,6 +34,49 @@ test("SigV4 matches the published AWS IAM ListUsers example, byte-for-byte", () 
 	assert.equal(result.signature, "5d672d79c15b13162d9279b0855cfba6789a8edb4c82c400e06b5924a6f2b5d7");
 });
 
+test("default probe is read-only on reader machines; discovery distinguishes absent objects from corruption", async (t) => {
+	const calls: string[] = [];
+	let corrupt = false;
+	const server = createServer((req, res) => {
+		calls.push(`${req.method} ${req.url}`);
+		assert.equal(req.method, "GET");
+		if (!req.headers.authorization) {
+			assert.equal(req.url, "/books/library/_private-probe");
+			res.statusCode = 403;
+			res.end();
+			return;
+		}
+		if (req.url?.endsWith("missing")) {
+			res.statusCode = 404;
+			res.end();
+			return;
+		}
+		res.setHeader("x-amz-meta-sha256", createHash("sha256").update("{}").digest("hex"));
+		res.end(corrupt ? "changed" : "{}");
+	});
+	server.listen(0, "127.0.0.1");
+	await new Promise<void>((resolve) => server.once("listening", resolve));
+	t.after(() => {
+		server.closeAllConnections();
+		server.close();
+	});
+	const client = new Objects({
+		endpoint: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
+		region: "us-east-1",
+		bucket: "books",
+		prefix: "library/",
+		...example,
+		privateBucketConfirmed: true,
+		retries: 0,
+	});
+	assert.equal(await client.discover(client.libraryKey("missing")), null);
+	assert.equal((await client.discover(client.libraryKey("catalog.json")))?.bytes.toString(), "{}");
+	assert.equal(calls[0], "GET /books/library/_private-probe");
+	assert.ok(calls.every((call) => call.startsWith("GET")));
+	corrupt = true;
+	await assert.rejects(client.discover(client.libraryKey("catalog.json")), /hash mismatch/u);
+});
+
 test("S3 canonical request matches the published AWS S3 GET object example", () => {
 	// https://docs.aws.amazon.com/AmazonS3/latest/API/sig-v4-header-based-auth.html
 	const result = signV4({

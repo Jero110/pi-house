@@ -101,7 +101,7 @@ export function loadConfig(options: { readonly env?: NodeJS.ProcessEnv; readonly
 			secretAccessKey: credential("S3_SECRET_ACCESS_KEY"),
 			prefix: required("S3_LIBRARY_PREFIX"),
 			privateBucketConfirmed: true,
-			privateProbeKey: required("S3_PRIVATE_PROBE_KEY"),
+			privateProbeKey: env.S3_PRIVATE_PROBE_KEY ?? `${required("S3_LIBRARY_PREFIX")}_private-probe`,
 		},
 	};
 }

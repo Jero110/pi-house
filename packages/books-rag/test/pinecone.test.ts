@@ -251,7 +251,7 @@ test("Pinecone transient retries are bounded and quota 429 is not retried; error
 	assert.equal(count, 4);
 });
 
-test("Pinecone queues concurrent work and re-probes malformed/stale query results", async (t) => {
+test("Pinecone queues work, re-probes malformed results, and leaves stale-candidate manifest checks to search", async (t) => {
 	let host = "";
 	let release: (() => void) | undefined;
 	let hold = true;
@@ -314,6 +314,7 @@ test("Pinecone queues concurrent work and re-probes malformed/stale query result
 	await assert.rejects(client.query(vector, embeddingIdentity, { generation }), /JSON/u);
 	assert.equal(probes, beforeMismatch + 1);
 	mode = "stale";
-	await assert.rejects(client.query(vector, embeddingIdentity, { generation }), /stale/u);
-	assert.equal(probes, beforeMismatch + 2);
+	const stale = await client.query(vector, embeddingIdentity, { generation });
+	assert.equal(stale[0]?.metadata.generation, "0".repeat(32));
+	assert.equal(probes, beforeMismatch + 1);
 });
