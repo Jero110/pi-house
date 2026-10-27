@@ -12,6 +12,8 @@ Approved specifications: `/Users/jeronimo.deli/Desktop/other/Vs/pi-house/CAPABIL
 
 The user explicitly permitted a PDF-only first version ("si queires slo para pdfs"). EPUB ingestion, archive/spine locators and assets are deferred; non-PDF inputs must fail explicitly. This supersedes only the earlier EPUB-format requirements, not privacy, provenance, source hashes, structural extraction, figure rendering, path/asset safety, bounded retrieval or evaluation requirements. T1 may select the verified PDF.js/canvas pair and conservative fail-closed input budget. No EPUB dependency research or T2 implementation follows this amendment; executor verification of T1 is still required.
 
+The user's subsequent clarification requires the **full PDF-only pipeline and T1–T11**, not an extraction-only spike. Mandatory offline end-to-end tests must cover synthetic PDF ingest → structural chunks → index via fake local-embedding/Pinecone endpoints → search → verified read → next-page figure, plus unrelated-query abstention and failure/privacy/output-budget cases. The supplied PDF pages 169–174 local check remains required when the input is available. Real local-model/Pinecone/client smoke checks run only with already available compatible prerequisites and verified allowed resources; otherwise report them pending. No provisioning, downloads, payments or original/text uploads are authorized. EPUB implementation and EPUB-specific testing are deferred; generic unsupported-format rejection remains required without building an EPUB parser or fixture suite.
+
 ## Decisions (binding)
 
 - Approximately 20 PDF books for this version; EPUB deferred by explicit user authorization. Text retrieval, not visual similarity search.
@@ -238,7 +240,7 @@ Acceptance:
 - [ ] Document exact current client setup/removal commands or config fragments, using `node <absolute checkout>/packages/books-rag/src/mcp.ts`; inspect current client docs/settings format before claiming compatibility.
 - [ ] Explain that all clients need the same local store; remote agents cannot resolve evidence solely from Pinecone. No hidden startup ingestion or library injection.
 - [ ] Document environment variables chosen in T6, prerequisites, pricing verification, failure recovery, model-version rebuilds, extraction gaps, translation/vision costs, and private backups.
-- [ ] Offline integration demonstrates search→read→next-page figure and unrelated-query abstention with fake endpoints. Transport image/text support and client compatibility claims name actual test scope.
+- [ ] Offline end-to-end integration starts from a synthetic PDF and exercises ingest→structural chunks→index via fake local-embedding/Pinecone endpoints→search→verified read→next-page figure, plus unrelated-query abstention. Do not substitute preseeded passages/vectors for the whole ingestion/indexing path. Include backend/runtime failure, missing/changed source, incomplete corpus, privacy-exclusion and text/image/output-budget cases. Assert source/version/location integrity and bounded explicit errors throughout. No real APIs, paid tokens, supplied-book content or downloads in automated tests. Transport image/text support and client compatibility claims name actual test scope.
 - [ ] Clearly distinguish automated contract tests, local PDF inspection, optional real-model measurements, and manual client checks not yet run. Preserve the supplied PDF and unrelated configurations.
 
 Validation: `node --test packages/books-rag/test/integration.test.ts && node packages/books-rag/src/cli.ts evaluate --synthetic && npm run check && npm test`.
@@ -254,7 +256,7 @@ Objective: verify the approved contract and report the evidence and remaining op
 
 Acceptance:
 - [ ] Inspect staged/committed scope, dependencies, file-read safety, metadata leaks, output budgets, stale sources, partial indexing, warning-free commands, and no paid/external calls in tests.
-- [ ] Re-run full validation and synthetic evaluation; check evaluation is not tautological and figure/source assertions correspond to actual returned metadata.
+- [ ] Re-run full validation, synthetic evaluation and the complete offline PDF ingest→chunks→fake-endpoint index→search→read→next-page figure integration, including abstention/failure/privacy/budget cases. Check evaluation is not tautological and figure/source assertions correspond to actual returned metadata. An extraction/render spike alone cannot complete T1–T11.
 - [ ] Review local PDF diagnostics and explicitly name any absent real-model/Pinecone/client smoke evidence. Core violations block completion; optional operator checks are labeled pending.
 - [ ] Record critical/major findings with file/line and reproduction. Executor sends scoped fixes to builder, revalidates, then requests review; two failed fix attempts stop BLOCKED.
 - [ ] Final report names worktree/branch, local commits, selected skills, effective models, test results, measured versus unmeasured quality, and precise operator setup steps. No merge into the dirty source checkout or remote action.
@@ -271,6 +273,7 @@ npm run check
 npm test
 node packages/books-rag/src/cli.ts --help
 node packages/books-rag/src/cli.ts evaluate --synthetic
+node --test packages/books-rag/test/integration.test.ts
 node packages/books-rag/dev/inspect-pdf.ts --input '/Users/jeronimo.deli/Downloads/generative-ai-design-patterns-solutions-to-common-challenges-when-building-genai-agents-and-applications-1.pdf' --pages 169-174
 git diff --check
 ```
@@ -281,7 +284,7 @@ Current baseline before plan execution: specification-only changes passed `npm r
 
 ## Out of scope
 
-- EPUB ingestion, archive/spine/anchor locators and EPUB assets: deferred by explicit user authorization for the PDF-only first version. Reject rather than partially ingest unsupported formats; this does not remove PDF path/asset safety checks.
+- EPUB implementation, EPUB-specific testing, archive/spine/anchor locators and EPUB assets: deferred by explicit user authorization for the PDF-only first version. Reject rather than partially ingest unsupported formats; this does not remove PDF path/asset safety checks.
 - OCR/scanned-book pipeline, vision embeddings, visual similarity queries, LLM summaries/descriptions during ingestion, GraphRAG, RAPTOR, or a wiki rewrite.
 - Hosted original text/figures, remote multiuser access/authentication, cross-machine corpus synchronization, and integrated PDF/EPUB viewing.
 - Automatic Pinecone account/resource creation, plan upgrades, payments, cloud embedding fallback, and large model downloads.
