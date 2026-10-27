@@ -1,7 +1,7 @@
 // The tools every harness sees through the agent-link MCP server, their answers and the server
 // instructions. Ported from an earlier hub; the wording that real runs tuned stays:
 // "returns at once", "never call status to wait", exact names.
-import type { InboxEntry, ModelResult, RetryOutcome, StatusEntry } from "../hub/hub.ts";
+import type { InboxEntry, InterruptOutcome, ModelResult, RetryOutcome, StatusEntry } from "../hub/hub.ts";
 import type { SendResult } from "../hub/queue.ts";
 
 /** The JSON Schema subset the tools use; MCP clients read it as inputSchema. */
@@ -118,7 +118,7 @@ export function toolDefs(opts: { harnesses: readonly string[]; pull: boolean }):
 		{
 			name: "model",
 			description:
-				"Change the model of one of your own workers, without typing into its pane. Use it when a worker needs a different one, for example its context nears its limit and a larger model you are authorized to use exists (a Haiku worker to Sonnet). You decide which model; the tool never picks one. Give the exact <provider>/<id>. A worker that is busy switches before its next turn; one whose harness has no switch, or an unknown or unauthenticated model, is refused and keeps its model. With retry: true, after the switch applies, the message that failed the worker's last turn is sent once more; a pending or failed switch never retries.",
+				"Change the model of one of your own workers, without typing into its pane. Use it when a worker needs a different one, for example its context nears its limit and a larger model you are authorized to use exists (a Haiku worker to Sonnet). You decide which model; the tool never picks one. Give the exact <provider>/<id>. A worker that is busy switches before its next turn; one whose harness has no switch, or an unknown or unauthenticated model, is refused and keeps its model. With retry: true, after the switch applies, the message that failed the worker's last turn is sent once more; a pending or failed switch never retries. With interrupt: true, a worker that is working or asking gets its running turn cancelled, switched, and its task continued with one message (its own history kept, the task not sent again); an idle worker just switches. interrupt and retry cannot be combined.",
 			inputSchema: {
 				type: "object",
 				properties: {
@@ -128,6 +128,11 @@ export function toolDefs(opts: { harnesses: readonly string[]; pull: boolean }):
 						type: "boolean",
 						description:
 							"true to send the message that failed the worker's last turn once more, after the switch applies; not when the switch is pending or fails, or when the worker is not idle after that failure",
+					},
+					interrupt: {
+						type: "boolean",
+						description:
+							"true to cancel the running turn of a working or asking worker, switch it, and continue its task on the new model; an idle worker just switches. Not with retry",
 					},
 				},
 				required: ["to", "model"],
@@ -199,16 +204,20 @@ export function cancelReply(res: { ok?: boolean; error?: string }, name: string)
 }
 
 export function modelReply(res: ModelResult, to: string): ToolReply {
-	const note = res.retry ? ` ${retryLine(res.retry)}` : "";
-	if ("error" in res)
-		return text(`model not changed: ${res.error}${res.retry ? `. ${retryLine(res.retry)}` : ""}`, true);
+	const tail = [res.retry && retryLine(res.retry), res.interrupt && interruptLine(res.interrupt)].filter(Boolean);
+	if ("error" in res) return text(`model not changed: ${res.error}${tail.map((t) => `. ${t}`).join("")}`, true);
 	if (res.status === "pending")
 		return text(
-			`${to} is busy: it switches to ${res.model} before its next turn. status shows the model once it did.${note}`,
+			`${to} is busy: it switches to ${res.model} before its next turn. status shows the model once it did.${tail.map((t) => ` ${t}`).join("")}`,
 		);
 	return text(
-		`${to} now uses ${res.model}${res.previous ? ` (it was ${res.previous})` : ""}${res.retry ? `. ${retryLine(res.retry)}` : ""}`,
+		`${to} now uses ${res.model}${res.previous ? ` (it was ${res.previous})` : ""}${tail.map((t) => `. ${t}`).join("")}`,
 	);
+}
+
+/** What an interrupt did with the running turn, in one sentence. */
+function interruptLine(r: InterruptOutcome): string {
+	return r.continued ? "Its turn was cancelled and it continues its task." : `Its task was not continued: ${r.reason}.`;
 }
 
 /** What a retry did, in one sentence; the error is the adapter's own text, shown only when it gave one. */

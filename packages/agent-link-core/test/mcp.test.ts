@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { test } from "node:test";
 import { clientHarness, placeFromEnv, runMcpServer } from "../src/mcp/server.ts";
-import { PULL_REMINDER, toolDefs } from "../src/mcp/tools.ts";
+import { modelReply, PULL_REMINDER, toolDefs } from "../src/mcp/tools.ts";
 import { pullRoot, testHub, waitFor } from "./fakes/hub.ts";
 
 type Json = Record<string, unknown>;
@@ -72,8 +72,10 @@ test("eight tools, each with anthropic/alwaysLoad, with the tested wording", () 
 		"to",
 		"model",
 		"retry",
+		"interrupt",
 	]);
 	assert.match(by("model"), /retry: true/);
+	assert.match(by("model"), /interrupt: true/);
 	assert.deepEqual(tools[0]?.inputSchema.required, ["harness", "task"]);
 	assert.deepEqual(tools[0]?.inputSchema.properties.harness?.enum, ["claude", "codex", "opencode", "pi"]);
 	const pull = toolDefs({ harnesses: ["claude"], pull: true });
@@ -155,6 +157,9 @@ test("no identity: the server registers once as a pull root named after its clie
 			plain.text,
 			"counter now uses anthropic/claude-opus-5-5 (it was anthropic/claude-sonnet-5-5). The failed message was not sent again: counter's last turn did not fail.",
 		);
+		// An idle worker with interrupt: true gets a plain switch, and nothing is continued.
+		const idle = await server.tool("model", { to: "counter", model: "anthropic/claude-sonnet-5-5", interrupt: true });
+		assert.equal(idle.text, "counter now uses anthropic/claude-sonnet-5-5 (it was anthropic/claude-opus-5-5)");
 		const bad = await server.tool("model", { to: "counter", model: "opus" });
 		assert.equal(bad.isError, true);
 		assert.match(bad.text, /^model not changed: .*exact <provider>\/<id>/);
@@ -258,5 +263,82 @@ test("spawn offers the user's own profiles from the agent-link home, like the hu
 		await server.end();
 		await t.stop();
 		rmSync(home, { recursive: true, force: true });
+	}
+});
+
+test("model interrupt: the answer says whether the task continues, and why it does not", () => {
+	const replyText = (res: Parameters<typeof modelReply>[0], to: string) => modelReply(res, to).content[0]?.text;
+	const applied = {
+		status: "applied" as const,
+		model: "anthropic/claude-sonnet-5-5",
+		previous: "anthropic/claude-haiku-5-5",
+	};
+	assert.equal(
+		replyText({ ...applied, interrupt: { continued: true, messageId: "m1" } }, "w"),
+		"w now uses anthropic/claude-sonnet-5-5 (it was anthropic/claude-haiku-5-5). Its turn was cancelled and it continues its task.",
+	);
+	assert.equal(
+		replyText({ ...applied, interrupt: { continued: false, reason: "w did not stop in time" } }, "w"),
+		"w now uses anthropic/claude-sonnet-5-5 (it was anthropic/claude-haiku-5-5). Its task was not continued: w did not stop in time.",
+	);
+	const refused = modelReply(
+		{
+			error: "unknown model anthropic/nope",
+			interrupt: { continued: false, reason: "the model switch failed, so the turn was not interrupted" },
+		},
+		"w",
+	);
+	assert.equal(refused.isError, true);
+	assert.equal(
+		refused.content[0]?.text,
+		"model not changed: unknown model anthropic/nope. Its task was not continued: the model switch failed, so the turn was not interrupted.",
+	);
+});
+
+test("model interrupt through the MCP server: a parent's busy worker is cancelled and continued, and the answer says so", async () => {
+	const t = await testHub();
+	try {
+		const root = await pullRoot(t.client);
+		const lead = await t.client.spawn({
+			from: root,
+			harness: "claude",
+			task: "lead task",
+			name: "lead",
+			backend: "cmux",
+		});
+		assert.ok("name" in lead);
+		const leadFake = await waitFor(() => t.kit.byName("lead"), "lead adapter");
+		await waitFor(() => leadFake.inTurn, "lead brief");
+		const sub = await t.client.spawn({
+			from: "lead",
+			harness: "pi",
+			task: "count files",
+			name: "sub",
+			backend: "cmux",
+		});
+		assert.ok("name" in sub);
+		const fake = await waitFor(() => t.kit.byName("sub"), "sub adapter");
+		await waitFor(() => fake.inTurn, "sub brief");
+
+		// The server acts as lead, the parent of sub.
+		const server = mcp({ backend: "cmux", env: leadFake.spec?.env ?? {} });
+		try {
+			await server.rpc("initialize", init("claude-code"));
+			const cut = await server.tool("model", { to: "sub", model: "anthropic/claude-sonnet-5-5", interrupt: true });
+			assert.equal(cut.isError, false);
+			assert.equal(
+				cut.text,
+				"sub now uses anthropic/claude-sonnet-5-5 (it was claude-bridge/claude-haiku-5-5). Its turn was cancelled and it continues its task.",
+			);
+			await waitFor(() => fake.prompts.length === 2, "continuation");
+			assert.deepEqual(
+				[fake.prompts[1]?.from, fake.prompts[1]?.text],
+				["lead", "Continue the task from where you stopped; your model changed to anthropic/claude-sonnet-5-5."],
+			);
+		} finally {
+			await server.end();
+		}
+	} finally {
+		await t.stop();
 	}
 });
