@@ -123,18 +123,16 @@ test("execution defers cleanup when the run becomes active after digest commit",
 				invocation: "x",
 				now: Date.now,
 				worker: async (job) => {
-					writeFileSync(
-						job.outputPath,
-						JSON.stringify({
-							schemaVersion: 1,
-							runId: "run-one",
-							project: "fixture",
-							revision: job.revision,
-							sections,
-						}),
-					);
+					const output = JSON.stringify({
+						schemaVersion: 1,
+						runId: "run-one",
+						project: "fixture",
+						revision: job.revision,
+						sections,
+					});
+					writeFileSync(job.outputPath, output);
 					active = true;
-					return { status: "success", outputPath: job.outputPath };
+					return { status: "success", outputPath: job.outputPath, outputText: output };
 				},
 			},
 			[candidate],
@@ -205,9 +203,15 @@ test("verified synthetic digest execution commits then fences cleanup against a 
 				invocation: "manual-1",
 				now: Date.now,
 				worker: async (job) => {
-					const output = { schemaVersion: 1, runId: "run-one", project: "fixture", revision: job.revision, sections };
-					writeFileSync(job.outputPath, JSON.stringify(output));
-					return { status: "success", outputPath: job.outputPath };
+					const output = JSON.stringify({
+						schemaVersion: 1,
+						runId: "run-one",
+						project: "fixture",
+						revision: job.revision,
+						sections,
+					});
+					writeFileSync(job.outputPath, output);
+					return { status: "success", outputPath: job.outputPath, outputText: output };
 				},
 			},
 			[candidate],

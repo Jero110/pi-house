@@ -192,7 +192,7 @@ export async function executeDigest(
 				ownedRoot: options.ownedRoot,
 				digestRoot: options.digestRoot,
 				identity,
-				digest: { text: outcome.outputText ?? readFileSync(outcome.outputPath, "utf8"), finish: "stop" },
+				digest: { text: outcome.outputText, finish: "stop" },
 				currentFingerprint: options.currentFingerprint(revision) ?? "",
 				expectedFiles: names,
 			});

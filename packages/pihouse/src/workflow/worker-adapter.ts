@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { lstatSync, readFileSync, unlinkSync } from "node:fs";
+import { linkSync, lstatSync, readFileSync, unlinkSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { createHubClient, type HubClient, identityFromEnv, readJournal } from "agent-link-core";
 import { validateDigest } from "./digest-contract.ts";
@@ -29,11 +29,31 @@ export interface WorkerAdapterOptions {
 }
 
 export type WorkerResult =
-	| { status: "success"; outputPath: string; outputText?: string }
+	| { status: "success"; outputPath: string; outputText: string }
 	| { status: "failure" | "cancelled" | "deferred" };
 
 function safe(value: string): boolean {
 	return /^[a-z0-9][a-z0-9._-]{0,127}$/i.test(value);
+}
+
+/**
+ * Publish the validated attempt bytes at the job's final path. Problem: the attempt file is removed after reading, so
+ * returning its path hands the caller a missing file. Example: a scan reads artifact.path and fails with ENOENT.
+ * Solution: a hard link is atomic and never replaces an existing path, so a different artifact is never clobbered;
+ * identical bytes already there count as published, and a symbolic link or a non-file is refused.
+ */
+function publishOutput(attemptPath: string, finalPath: string, text: string): boolean {
+	try {
+		const existing = lstatSync(finalPath, { throwIfNoEntry: false });
+		if (existing) {
+			if (!existing.isFile() || existing.isSymbolicLink()) return false;
+			return readFileSync(finalPath, "utf8") === text;
+		}
+		linkSync(attemptPath, finalPath);
+		return true;
+	} catch {
+		return false;
+	}
 }
 
 export function observedTerminalReason(path: string | undefined): "stop" | "failure" {
@@ -154,8 +174,9 @@ export function createWorkerAdapter(options: WorkerAdapterOptions): (job: Worker
 					return { status: "failure" };
 				}
 				await options.client.cancel({ from: options.from, name: spawned.name });
+				const published = reason === "stop" && publishOutput(outputPath, job.outputPath, outputText);
 				removeAttemptOutput();
-				return reason === "stop" ? { status: "success", outputPath, outputText } : { status: "failure" };
+				return published ? { status: "success", outputPath: job.outputPath, outputText } : { status: "failure" };
 			}
 			await wait(Math.min(pollMs, Math.max(0, deadline - now())));
 		}
