@@ -224,7 +224,7 @@ Acceptance:
 - [ ] Inspect supplied PDF locally only, with original path from common.md, focusing on pages 169–174 and a real table if identified. Save only compact diagnostics/locations and no commercial-book content to tracked artifacts. A missing input is a clearly reported unavailable operator check.
 - [ ] Optional real-model/Pinecone evaluation is explicitly not run unless compatible already-installed local weights and a verified allowed index are available. Missing prerequisites remain visible as unvalidated live retrieval, not fake success.
 
-Validation: `node --test packages/books-rag/test/evaluation.test.ts && npm run check && npm test`; local extraction check: `node packages/books-rag/dev/inspect-pdf.ts --input '/Users/jeronimo.deli/Downloads/generative-ai-design-patterns-solutions-to-common-challenges-when-building-genai-agents-and-applications-1.pdf' --pages 169-174`.
+Validation: `node --test packages/books-rag/test/evaluation.test.ts && npm run check && npm test`; local extraction check: `node packages/books-rag/dev/inspect-pdf.ts --input '/Users/jeronimo.deli/Desktop/books/generative-ai-design-patterns-solutions-to-common-challenges-when-building-genai-agents-and-applications-1.pdf' --pages 169-174`.
 Stop when: mandatory synthetic and available local gates pass with honest limitations, or report BLOCKED after two failed attempts. Never declare real retrieval quality validated without real measurements.
 
 ### T9: Expose the bounded read-only MCP and CLI
