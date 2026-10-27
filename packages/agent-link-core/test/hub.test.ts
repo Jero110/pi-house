@@ -147,6 +147,198 @@ test("handoff from a root closes the root's own terminal, named by its registere
 		assert.notEqual(state(t, "executor"), "exited");
 	}));
 
+// Handoff adoption: the caller's live workers move to the agent that takes over, before the caller closes. Problem: a
+// planner handed off with two workers still running, and the executor that took over could not message, cancel, permit
+// or switch them: their parent had closed. Example: "routing-4" kept working and its result went to an exited planner.
+// Solution: the successor adopts them, and their results, questions and held answers reach it.
+
+test("handoff: the successor adopts the caller's live workers, so it can message, cancel, permit and switch their model", () =>
+	withHub(async (t) => {
+		const root = await pullRoot(t.client);
+		const planner = await spawned(t, root, "pi", "planner");
+		const p = await waitFor(() => t.kit.byName(planner), "planner adapter");
+		await waitFor(() => p.inTurn, "planner turn");
+		const kept = await spawned(t, planner, "pi", "routing");
+		const asked = await spawned(t, planner, "claude", "learning");
+		const routing = await waitFor(() => t.kit.byName(kept), "routing adapter");
+		const learning = await waitFor(() => t.kit.byName(asked), "learning adapter");
+		await waitFor(() => learning.inTurn, "learning brief");
+		const res = await t.client.spawn({
+			from: planner,
+			harness: "claude",
+			task: "run the plan",
+			name: "executor",
+			backend: "cmux",
+			handoff: true,
+		});
+		assert.deepEqual(res, { name: "executor" });
+		const exec = await waitFor(() => t.kit.byName("executor"), "executor adapter");
+		await waitFor(() => exec.inTurn, "executor brief turn");
+
+		p.finish("handed off to executor");
+		await waitFor(() => state(t, planner) === "exited", "planner closed");
+
+		const reg = t.running.hub.registry;
+		assert.equal(reg.get(kept)?.record.parent, "executor", "the workers are re-parented to the successor");
+		assert.equal(reg.get(asked)?.record.parent, "executor");
+		assert.equal(reg.get("executor")?.record.parent, root, "the successor takes the caller's place under its parent");
+		const names = (await t.client.status("executor")).agents.map((a) => a.name).sort();
+		assert.deepEqual(names, [root, asked, kept].sort(), "status of the successor lists them");
+
+		const sent = await t.client.send({ from: "executor", to: kept, message: "status?" });
+		assert.equal(sent.ok, true, "the successor may message the worker it adopted");
+		assert.equal(state(t, planner), "exited", "the caller is gone, the message still reaches the worker");
+		routing.finish("brief routing");
+		await waitFor(() => routing.prompts.length === 2, "routing gets the message after its brief");
+		assert.equal(routing.prompts[1]?.text, "status?", "a parent's message reads like its user's");
+
+		const ask = {
+			kind: "permission" as const,
+			questions: [{ question: "external_directory: /p/docs/*", options: ["Allow once", "Reject"] }],
+		};
+		routing.answerResult = { answered: "Allow once" };
+		routing.emit({ kind: "state", state: "asking", detail: "external_directory: /p/docs/*", ask });
+		const permitted = await t.client.permit({ from: "executor", to: kept, choice: "1" });
+		assert.deepEqual(permitted, { ok: true, answered: "Allow once" }, "the successor answers the worker's ask");
+
+		const model = await t.client.model({ from: "executor", to: kept, model: "anthropic/claude-sonnet-5-5" });
+		assert.ok("status" in model && model.status === "applied", "the successor switches its model");
+		assert.deepEqual(routing.modelRequests, ["anthropic/claude-sonnet-5-5"]);
+
+		const cancelled = await t.client.cancel({ from: "executor", name: asked });
+		assert.deepEqual(cancelled, { ok: true }, "the successor cancels a worker");
+		await waitFor(() => state(t, asked) === "exited", "learning cancelled");
+	}));
+
+test("handoff: results of adopted workers reach the successor once, queued ones included, never the caller or the root", () =>
+	withHub(async (t) => {
+		const root = await pullRoot(t.client);
+		const planner = await spawned(t, root, "pi", "planner");
+		const p = await waitFor(() => t.kit.byName(planner), "planner adapter");
+		await waitFor(() => p.inTurn, "planner turn");
+		const early = await spawned(t, planner, "pi", "early");
+		const late = await spawned(t, planner, "pi", "late");
+		const earlyFake = await waitFor(() => t.kit.byName(early), "early adapter");
+		const lateFake = await waitFor(() => t.kit.byName(late), "late adapter");
+		await waitFor(() => earlyFake.inTurn && lateFake.inTurn, "worker briefs");
+		await t.client.spawn({
+			from: planner,
+			harness: "claude",
+			task: "run the plan",
+			name: "executor",
+			backend: "cmux",
+			handoff: true,
+		});
+		const exec = await waitFor(() => t.kit.byName("executor"), "executor adapter");
+		await waitFor(() => exec.inTurn, "executor brief turn");
+
+		// The early worker answers while the planner still runs: its result waits in the planner's queue.
+		earlyFake.finish("early result");
+		await waitFor(() => state(t, early) === "done", "early done");
+		p.finish("handed off to executor");
+		await waitFor(() => state(t, planner) === "exited", "planner closed");
+
+		// The late worker answers after the handoff.
+		lateFake.finish("late result");
+		await waitFor(() => state(t, late) === "done", "late done");
+
+		exec.finish("brief done");
+		await waitFor(() => exec.prompts.length === 2, "the queued result reaches the successor");
+		exec.finish("ack early");
+		await waitFor(() => exec.prompts.length === 3, "the later result reaches the successor");
+		exec.finish("ack late");
+		const texts = exec.prompts.map((m) => m.text);
+		assert.equal(texts.filter((x) => x.includes("early result")).length, 1, "the queued result once");
+		assert.equal(texts.filter((x) => x.includes("late result")).length, 1, "the later result once");
+		// The root is the successor's parent now: it hears the successor's results, never the workers' (they went to the successor).
+		const rootTexts = await inboxTexts(t, root);
+		assert.deepEqual(
+			rootTexts.filter((x) => /early result|late result/.test(x)),
+			[],
+			"the workers' results did not reach the root",
+		);
+		assert.equal(exec.maxConcurrent, 1);
+	}));
+
+test("handoff: an unrelated agent's children stay where they are", () =>
+	withHub(async (t) => {
+		const root = await pullRoot(t.client);
+		const planner = await spawned(t, root, "pi", "planner");
+		const p = await waitFor(() => t.kit.byName(planner), "planner adapter");
+		await waitFor(() => p.inTurn, "planner turn");
+		const sibling = await spawned(t, root, "pi", "sibling");
+		const sub = await spawned(t, sibling, "pi", "sub");
+		await waitFor(() => t.kit.byName(sub)?.inTurn, "sub brief");
+		await t.client.spawn({
+			from: planner,
+			harness: "claude",
+			task: "run the plan",
+			name: "executor",
+			backend: "cmux",
+			handoff: true,
+		});
+		const exec = await waitFor(() => t.kit.byName("executor"), "executor adapter");
+		await waitFor(() => exec.inTurn, "executor brief turn");
+		p.finish("handed off to executor");
+		await waitFor(() => state(t, planner) === "exited", "planner closed");
+
+		const reg = t.running.hub.registry;
+		assert.equal(reg.get(sub)?.record.parent, sibling, "the sibling's child keeps its parent");
+		assert.equal(reg.get(sibling)?.record.parent, root);
+		assert.notEqual(state(t, sibling), "exited");
+		assert.notEqual(state(t, sub), "exited");
+		assert.deepEqual(
+			(await t.client.status("executor")).agents.map((a) => a.name),
+			[root],
+			"the successor adopted nobody and sees only its parent",
+		);
+	}));
+
+test("handoff from a root: the successor becomes the root, adopts the worker and the journal says so", () =>
+	withHub(async (t) => {
+		const reg = await t.client.register({
+			harness: "codex",
+			cwd: tmpdir(),
+			pull: true,
+			backend: "cmux",
+			place: { surface: "surface:45" },
+		});
+		assert.ok("name" in reg);
+		if (!("name" in reg)) return;
+		const worker = await spawned(t, reg.name, "pi", "worker");
+		await waitFor(() => t.kit.byName(worker)?.inTurn, "worker brief");
+		await t.client.spawn({
+			from: reg.name,
+			harness: "claude",
+			task: "run the plan",
+			name: "executor",
+			backend: "cmux",
+			handoff: true,
+		});
+		await waitFor(() => state(t, reg.name) === "exited", "root closed once the executor connected");
+		assert.ok(t.backend.closed.has("surface:45"), "the root's own terminal closed");
+
+		const hub = t.running.hub;
+		assert.equal(hub.registry.get("executor")?.record.parent, null, "the successor is a root now");
+		assert.equal(hub.registry.get(worker)?.record.parent, "executor");
+		assert.deepEqual(
+			(await t.client.status("executor")).agents.map((a) => a.name),
+			[worker],
+		);
+		assert.deepEqual(await hub.reply({ from: "executor", result: "x" }), {
+			ok: false,
+			error: "you are a root agent: no parent receives a result. Tell the user directly.",
+		});
+		assert.equal((await t.client.send({ from: worker, to: "executor", message: "hi" })).ok, true);
+
+		assert.equal(journalOf(t, "executor")?.parent, null);
+		assert.equal(journalOf(t, "executor")?.parentName, null);
+		const successor = journalOf(t, "executor");
+		assert.equal(journalOf(t, worker)?.parent, successor?.id);
+		assert.equal(journalOf(t, worker)?.parentName, "executor");
+		assert.equal(journalOf(t, worker)?.root, successor?.id, "the tree's root is the successor now");
+	}));
+
 test("a harness installed after the hub started is learned on its first use, with no restart", async () => {
 	const late = fakeProfiles().get("pi");
 	assert.ok(late);

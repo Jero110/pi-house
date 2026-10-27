@@ -383,8 +383,8 @@ export class Hub {
 	 * Problem: a planner that handed the plan to an executor stayed open next to it, and closing it closed its
 	 * whole tree. Example: the executor and its workers squeezed into half a screen next to the planner.
 	 * Solution: spawn with handoff marks the caller; when the new agent
-	 * is connected and the caller is idle, the caller closes with its pane (a root's terminal too) and its tree
-	 * goes on. Messages to it from then on are dropped, as for any agent that exited.
+	 * is connected and the caller is idle, the caller closes with its pane (a root's terminal too); its live workers
+	 * are adopted by the agent that takes over (adopt). Messages to it from then on are dropped, as for any agent that exited.
 	 */
 	private tryHandoff(caller: Agent): void {
 		const h = caller.handoff;
@@ -399,8 +399,73 @@ export class Hub {
 		const busy = !caller.record.pull && (state === "working" || state === "asking" || state === "starting");
 		if (!to.ready || busy) return;
 		caller.handedOff = true;
-		this.log.event(caller.record.name, "handed-off", { to: h.to });
+		const adopted = this.adopt(caller, to);
+		this.log.event(caller.record.name, "handed-off", { to: h.to, adopted });
 		void this.closeAgent(caller);
+	}
+
+	/**
+	 * The agent that takes over stands where the caller stood, and adopts the caller's live workers with their queued
+	 * messages. Returns the names of the adopted workers.
+	 * Problem: a planner handed off with two workers still running, and the executor could not message, cancel, permit or
+	 * switch them: their parent had closed. Example: "routing-4" finished, and its result waited for the planner, which
+	 * exited, so nobody read it. Solution: before the caller closes, its live children other than the successor move to the
+	 * successor, and every message queued for the caller from them moves too (the same message, not sent again), so each
+	 * is delivered once. A message the successor queued for the caller goes to the caller's parent, which now stands where
+	 * the caller stood; a root has no parent, so there such a message is dropped, as any notice for a root is.
+	 */
+	private adopt(caller: Agent, to: Agent): string[] {
+		const successor = to.record.name;
+		const heir = caller.record.parent ? this.registry.get(caller.record.parent) : undefined;
+		const workers = this.registry
+			.children(caller.record.name)
+			.filter((c) => c !== to && c.record.state !== "exited" && !c.closing);
+		const adoptedNames = new Set(workers.map((w) => w.record.name));
+		const moves = (m: QueuedMessage) => adoptedNames.has(m.from) || m.from === successor;
+		const moved = [...caller.queue, ...caller.inbox].filter(moves);
+		caller.queue = caller.queue.filter((m) => !moves(m));
+		caller.inbox = caller.inbox.filter((m) => !moves(m));
+
+		// The successor takes the caller's parent (none for a root), so the tree keeps its shape and the same agent answers
+		// for it. Example: a planner under the user's root hands off; the executor's results go to the same root.
+		to.record.parent = caller.record.parent;
+		for (const w of workers) {
+			w.record.parent = successor;
+			this.log.event(w.record.name, "adopted", { by: successor, from: caller.record.name });
+		}
+		for (const m of moved) {
+			if (m.from !== successor) {
+				this.place(to, m);
+				this.log.event(successor, "message-adopted", { id: m.id, from: m.from });
+			} else if (heir && heir.record.state !== "exited" && !heir.closing) {
+				this.place(heir, m);
+				this.log.event(heir.record.name, "message-adopted", { id: m.id, from: m.from });
+			} else
+				this.log.event(successor, "notice-dropped", { kind: m.kind, reason: heir ? "parent exited" : "no parent" });
+		}
+		for (const a of this.subtree(to)) {
+			const parent = a.record.parent ? this.registry.get(a.record.parent) : undefined;
+			this.journalUpdate(a, {
+				parent: parent?.journalId ?? null,
+				parentName: a.record.parent,
+				root: this.rootJournalId(a) ?? a.journalId,
+			});
+		}
+		this.pump(to);
+		if (heir) this.pump(heir);
+		return [...adoptedNames];
+	}
+
+	/** Puts a message that already exists on an agent's queue, or its inbox for a pull agent: moved, not sent again. */
+	private place(to: Agent, m: QueuedMessage): void {
+		if (to.record.pull) {
+			to.inbox.push(m);
+			this.publish(to.record.name, m);
+		} else to.queue.push(m);
+	}
+
+	private subtree(agent: Agent): Agent[] {
+		return [agent, ...this.registry.children(agent.record.name).flatMap((c) => this.subtree(c))];
 	}
 
 	private newAgent(record: AgentRecord, profile: Profile | undefined): Agent {

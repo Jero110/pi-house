@@ -55,7 +55,7 @@ export interface Agent {
 	retry?: ReturnType<typeof setTimeout>;
 	/** spawn with handoff: the agent that takes over, and the backend of this agent's pane. */
 	handoff?: { to: string; backend: BackendName };
-	/** Handed off: it closed with its pane, and its tree went on. */
+	/** Handed off: it closed with its pane; its live workers went to the agent that took over (Hub.adopt). */
 	handedOff?: boolean;
 }
 
