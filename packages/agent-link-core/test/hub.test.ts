@@ -1028,3 +1028,171 @@ test("model retry: a worker that exited answers that it must be respawned, and n
 		assert.deepEqual(fake.modelRequests, [], "no switch either");
 		assert.equal(fake.prompts.length, 2);
 	}));
+
+// Model interrupt (model({ interrupt: true })): a busy worker's turn is cancelled, its model switched, and one
+// continuation sent to the same agent. The cancelled task itself is never sent again.
+const INTERRUPT = { interruptMs: 300 };
+const CONTINUE = "Continue the task from where you stopped; your model changed to anthropic/claude-sonnet-5-5.";
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** A pi worker whose brief turn still runs: the state an interrupt needs. */
+async function busyWorker(t: TestHub) {
+	const root = await pullRoot(t.client);
+	const w = await spawned(t, root, "pi", "w");
+	const fake = await waitFor(() => t.kit.byName(w), "adapter");
+	await waitFor(() => fake.inTurn, "brief turn");
+	return { root, w, fake };
+}
+
+test("model interrupt: a busy worker's turn is cancelled, its model switched, and one continuation reaches the same agent", () =>
+	withHub(async (t) => {
+		const { root, w, fake } = await busyWorker(t);
+		const res = await t.client.model({ from: root, to: w, model: RETRY_MODEL, interrupt: true });
+		assert.deepEqual(res, {
+			status: "applied",
+			model: RETRY_MODEL,
+			previous: "claude-bridge/claude-haiku-5-5",
+			interrupt: { continued: true, messageId: fake.prompts[1]?.id ?? "" },
+		});
+		assert.equal(fake.prompts.length, 2, "one continuation; the cancelled task was not sent again");
+		assert.equal(fake.prompts[0]?.text, "task of w");
+		assert.deepEqual([fake.prompts[1]?.from, fake.prompts[1]?.text], [root, CONTINUE]);
+		assert.equal(fake.calls.filter((c) => c === "cancel").length, 1);
+
+		fake.finish("42 files");
+		await waitFor(() => state(t, w) === "done", "continuation done");
+		const results = (await inboxTexts(t, root)).filter((x) => /finished/.test(x));
+		assert.equal(results.length, 1, "the cancelled turn reports nothing: the continuation's result is the only one");
+		assert.match(results[0] ?? "", /42 files/);
+	}, INTERRUPT));
+
+test("model interrupt: a switch the harness refuses leaves the turn running and cancels nothing", () =>
+	withHub(async (t) => {
+		const { root, w, fake } = await busyWorker(t);
+		fake.setModelResult = { error: "unknown model anthropic/nope" };
+		const res = await t.client.model({ from: root, to: w, model: "anthropic/nope", interrupt: true });
+		assert.deepEqual(res, {
+			error: "unknown model anthropic/nope",
+			interrupt: { continued: false, reason: "the model switch failed, so the turn was not interrupted" },
+		});
+		assert.ok(!fake.calls.includes("cancel"), "a refused switch never cancels the turn");
+		assert.ok(fake.inTurn);
+		assert.equal(fake.prompts.length, 1);
+	}, INTERRUPT));
+
+test("model interrupt: an idle worker switches as any idle switch, with no continuation", () =>
+	withHub(async (t) => {
+		const root = await pullRoot(t.client);
+		const w = await spawned(t, root, "pi", "w");
+		const fake = await waitFor(() => t.kit.byName(w), "adapter");
+		await waitFor(() => fake.inTurn, "brief turn");
+		fake.finish("brief done");
+		await waitFor(() => state(t, w) === "done", "brief done");
+		const res = await t.client.model({ from: root, to: w, model: RETRY_MODEL, interrupt: true });
+		assert.deepEqual(res, { status: "applied", model: RETRY_MODEL, previous: "claude-bridge/claude-haiku-5-5" });
+		await sleep(30);
+		assert.equal(fake.prompts.length, 1, "nothing was sent to the worker");
+		assert.ok(!fake.calls.includes("cancel"));
+	}, INTERRUPT));
+
+test("model interrupt: a second interrupt or a plain switch while one runs is refused; only one continuation is sent", () =>
+	withHub(async (t) => {
+		const { root, w, fake } = await busyWorker(t);
+		fake.ignoreCancel = true;
+		const first = t.client.model({ from: root, to: w, model: RETRY_MODEL, interrupt: true });
+		await waitFor(() => fake.calls.includes("cancel"), "cancel sent");
+
+		const again = await t.client.model({ from: root, to: w, model: RETRY_MODEL, interrupt: true });
+		assert.match("error" in again ? again.error : "", /already being interrupted/);
+		const plain = await t.client.model({ from: root, to: w, model: "anthropic/claude-opus-5-5" });
+		assert.match("error" in plain ? plain.error : "", /already being interrupted/);
+		assert.deepEqual(fake.modelRequests, [RETRY_MODEL], "only the first switch reached the adapter");
+
+		fake.finish("", "cancelled");
+		const res = await first;
+		assert.match(JSON.stringify(res), /"continued":true/);
+		await sleep(30);
+		assert.equal(fake.prompts.length, 2, "exactly one continuation");
+		assert.equal(fake.prompts[1]?.text, CONTINUE);
+	}, INTERRUPT));
+
+test("model interrupt: a turn that does not stop in time is not continued, and the answer says so", () =>
+	withHub(async (t) => {
+		const { root, w, fake } = await busyWorker(t);
+		fake.ignoreCancel = true;
+		const res = await t.client.model({ from: root, to: w, model: RETRY_MODEL, interrupt: true });
+		assert.ok("status" in res);
+		assert.equal(res.model, RETRY_MODEL);
+		assert.match(JSON.stringify(res.interrupt), /"continued":false/);
+		assert.match(JSON.stringify(res.interrupt), /did not stop in time, so its task was not continued/);
+		await sleep(30);
+		assert.equal(fake.prompts.length, 1, "no continuation after a timeout");
+	}, INTERRUPT));
+
+test("model interrupt: a turn that ends on its own during the switch is reported once and never continued", () =>
+	withHub(async (t) => {
+		const { root, w, fake } = await busyWorker(t);
+		fake.onSetModel = () => fake.finish("finished first");
+		const res = await t.client.model({ from: root, to: w, model: RETRY_MODEL, interrupt: true });
+		assert.ok("status" in res);
+		assert.match(JSON.stringify(res.interrupt), /ended on its own before the cancel, so there was nothing to continue/);
+		assert.ok(!fake.calls.includes("cancel"), "nothing to cancel: the turn was over");
+		await sleep(30);
+		assert.equal(fake.prompts.length, 1, "no continuation");
+		const results = (await inboxTexts(t, root)).filter((x) => /finished first/.test(x));
+		assert.equal(results.length, 1, "its real result reaches the parent once");
+	}, INTERRUPT));
+
+test("model interrupt: a pending switch confirmed later continues once; messages queued meanwhile wait behind the continuation", () =>
+	withHub(async (t) => {
+		const { root, w, fake } = await busyWorker(t);
+		fake.setModelResult = { status: "pending", model: RETRY_MODEL };
+		const first = t.client.model({ from: root, to: w, model: RETRY_MODEL, interrupt: true });
+		await waitFor(() => fake.calls.includes("cancel"), "cancel sent");
+		const sent = await t.client.send({ from: root, to: w, message: "then list the folders" });
+		assert.ok(sent.ok);
+		await sleep(60);
+		assert.equal(fake.prompts.length, 1, "the fence holds the queue until the switch is confirmed");
+
+		fake.emit({ kind: "model", model: RETRY_MODEL });
+		const res = await first;
+		assert.match(JSON.stringify(res), /"continued":true/);
+		await waitFor(() => fake.prompts.length === 2, "continuation");
+		assert.equal(fake.prompts[1]?.text, CONTINUE, "the continuation runs before the queued message");
+
+		fake.finish("continued");
+		await waitFor(() => fake.prompts.length === 3, "queued message");
+		assert.equal(fake.prompts[2]?.text, "then list the folders");
+	}, INTERRUPT));
+
+test("model interrupt: an asking worker's turn is cancelled the same way", () =>
+	withHub(async (t) => {
+		const { root, w, fake } = await busyWorker(t);
+		fake.emit({ kind: "state", state: "asking", detail: "permission to delete the build folder" });
+		await waitFor(() => state(t, w) === "asking", "asking");
+		const res = await t.client.model({ from: root, to: w, model: RETRY_MODEL, interrupt: true });
+		assert.match(JSON.stringify(res), /"continued":true/);
+		assert.equal(fake.prompts.length, 2);
+		assert.equal(fake.prompts[1]?.text, CONTINUE);
+	}, INTERRUPT));
+
+test("model interrupt: retry and interrupt cannot be combined, and nothing reaches the adapter", () =>
+	withHub(async (t) => {
+		const { root, w, fake } = await busyWorker(t);
+		const res = await t.client.model({ from: root, to: w, model: RETRY_MODEL, retry: true, interrupt: true });
+		assert.match("error" in res ? res.error : "", /retry and interrupt cannot be combined/);
+		assert.deepEqual(fake.modelRequests, []);
+		assert.ok(!fake.calls.includes("cancel"));
+	}, INTERRUPT));
+
+test("model interrupt: an exited worker says it must be respawned, and nothing is sent", () =>
+	withHub(async (t) => {
+		const { root, w, fake } = await busyWorker(t);
+		await t.client.cancel({ from: root, name: w });
+		const res = await t.client.model({ from: root, to: w, model: RETRY_MODEL, interrupt: true });
+		assert.match(
+			"error" in res ? res.error : "",
+			/w has exited, so its turn cannot be continued: spawn a new worker to continue its task/,
+		);
+		assert.deepEqual(fake.modelRequests, []);
+	}, INTERRUPT));

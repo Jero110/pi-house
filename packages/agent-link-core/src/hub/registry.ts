@@ -1,6 +1,6 @@
 // The tree of agents the hub runs: names, parents, who may talk to whom and what status shows to whom.
 // The hub keeps it in memory; the event log (src/log.ts) keeps its history.
-import type { AgentAdapter, AgentRecord, BackendName, PendingAsk, PlaceHint, Profile } from "../types.ts";
+import type { AgentAdapter, AgentRecord, BackendName, PendingAsk, PlaceHint, Profile, StopReason } from "../types.ts";
 import type { QueuedMessage } from "./queue.ts";
 
 /** One agent as the hub tracks it: its record plus what the queue and result routing need. */
@@ -29,6 +29,11 @@ export interface Agent {
 	lastFailed?: { msg: QueuedMessage; error?: string };
 	/** Message ids already sent again by a retry: a message is retried once. */
 	retried: Set<string>;
+	/**
+	 * A model switch that interrupts the running turn is in progress (model({ interrupt: true })): the queue waits meanwhile.
+	 * `stop` is how the interrupted turn ended, once it did.
+	 */
+	interrupt?: { stop?: StopReason };
 	/** The current turn asked the parent with send: its turn end repeats the question and is held. */
 	askedParent: boolean;
 	/** The held turn end; it still reaches the parent if the agent exits before answering again. */

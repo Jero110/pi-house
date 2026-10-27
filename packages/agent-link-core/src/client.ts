@@ -56,7 +56,13 @@ export interface HubClient {
 	agents(): Promise<{ agents: Array<StatusEntry & { backend?: BackendName; pane?: string; startedAt: number }> }>;
 	cancel(body: { from: string; name: string }): Promise<{ ok?: boolean; error?: string }>;
 	/** Changes the model of a worker (Hub.model); `status` "pending" means it applies before the worker's next turn. */
-	model(body: { from: string; to: string; model: string; retry?: boolean }): Promise<ErrorOr<ModelResult>>;
+	model(body: {
+		from: string;
+		to: string;
+		model: string;
+		retry?: boolean;
+		interrupt?: boolean;
+	}): Promise<ErrorOr<ModelResult>>;
 	inbox(agent: string): Promise<{ messages: InboxEntry[]; error?: string }>;
 	event(body: { agent: string; type: string } & Record<string, unknown>): Promise<{ ok: boolean; error?: string }>;
 	/** Server-sent messages for `agent`, until close(). */

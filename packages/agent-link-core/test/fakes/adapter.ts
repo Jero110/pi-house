@@ -64,9 +64,12 @@ export class FakeAdapter implements AgentAdapter {
 	/** What setModel() was asked for, in order; setModelResult is the answer (default: applied). */
 	readonly modelRequests: string[] = [];
 	setModelResult?: SetModelResult;
+	/** Runs inside setModel(), before it answers: e.g. the running turn ends on its own during the switch. */
+	onSetModel?: (model: string) => void;
 
 	async setModel(model: string): Promise<SetModelResult> {
 		this.modelRequests.push(model);
+		this.onSetModel?.(model);
 		return this.setModelResult ?? { status: "applied", model };
 	}
 
@@ -121,9 +124,12 @@ export class FakeAdapter implements AgentAdapter {
 		return !this.busy && !this.turn;
 	}
 
+	/** A harness that ignores the interrupt: cancel() leaves the turn running. */
+	ignoreCancel = false;
+
 	async cancel(): Promise<void> {
 		this.calls.push("cancel");
-		if (this.turn) this.finish("", "cancelled");
+		if (this.turn && !this.ignoreCancel) this.finish("", "cancelled");
 	}
 
 	async close(): Promise<void> {

@@ -24,6 +24,7 @@ export interface StartHubOptions {
 	guard?: (command: string, depth: number) => GuardVerdict;
 	startup?: { timeoutMs?: number; pollMs?: number };
 	idlePollMs?: number;
+	interruptMs?: number;
 	pidPollMs?: number;
 }
 
@@ -225,7 +226,13 @@ async function handle(hub: Hub, token: string, req: IncomingMessage, res: Server
 			return json(
 				res,
 				200,
-				await hub.model({ from: str("from"), to: str("to"), model: str("model"), retry: body.retry === true }),
+				await hub.model({
+					from: str("from"),
+					to: str("to"),
+					model: str("model"),
+					retry: body.retry === true,
+					interrupt: body.interrupt === true,
+				}),
 			);
 		case "/event":
 			return json(res, 200, hub.event(body as HarnessEvent));

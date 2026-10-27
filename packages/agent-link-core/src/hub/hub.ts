@@ -28,6 +28,7 @@ import type {
 	PromptResponse,
 	SessionUpdate,
 	SetModelResult,
+	StopReason,
 } from "../types.ts";
 import {
 	askNotice,
@@ -82,6 +83,12 @@ export interface HubOptions {
 	startup?: { timeoutMs?: number; pollMs?: number };
 	/** How often to try delivery again while an adapter is not idle. */
 	idlePollMs?: number;
+	/**
+	 * How long model({ interrupt: true }) waits for the cancelled turn to end and the switch to apply. Problem: a harness
+	 * that ignores the cancel would hold the interrupt forever. Example: an opencode abort still running after 20 s. Solution:
+	 * the wait is bounded and the answer says the task was not continued.
+	 */
+	interruptMs?: number;
 	/** How often to check that registered root processes still run. */
 	pidPollMs?: number;
 }
@@ -131,9 +138,18 @@ export interface InboxEntry {
 /** What model({ retry: true }) did with the message that failed the worker's last turn. */
 export type RetryOutcome = { retried: true; messageId: string; error?: string } | { retried: false; reason: string };
 
+/** What model({ interrupt: true }) did with the running turn: its task continues, or the reason it does not. */
+export type InterruptOutcome = { continued: true; messageId: string } | { continued: false; reason: string };
+
 export type ModelResult =
-	| { status: "applied" | "pending"; model: string; previous: string | null; retry?: RetryOutcome }
-	| { error: string; retry?: RetryOutcome };
+	| {
+			status: "applied" | "pending";
+			model: string;
+			previous: string | null;
+			retry?: RetryOutcome;
+			interrupt?: InterruptOutcome;
+	  }
+	| { error: string; retry?: RetryOutcome; interrupt?: InterruptOutcome };
 
 /** A report from a harness-side piece (POST /event). */
 export type HarnessEvent = { agent: string; type: string } & Record<string, unknown>;
@@ -499,7 +515,10 @@ export class Hub {
 	 */
 	private pump(agent: Agent): void {
 		const { adapter } = agent;
-		if (!adapter || !agent.ready || agent.closing || agent.inflight || !agent.queue.length) return;
+		// Problem: a queued message sent while an interrupt cancels and switches would run on the old model, before its
+		// continuation. Example: "list the folders" queued behind a cancelled turn runs before the switch is confirmed.
+		// Solution: the queue waits; the interrupt lifts the fence when it ends, and the continuation goes first.
+		if (!adapter || !agent.ready || agent.closing || agent.inflight || agent.interrupt || !agent.queue.length) return;
 		if (agent.record.state === "exited") return;
 		if (!adapter.idle()) {
 			agent.retry ??= setTimeout(() => {
@@ -540,6 +559,15 @@ export class Hub {
 		const result = agent.replyText ?? (res.text.trim() ? res.text : agent.lastText);
 		agent.replyText = undefined;
 		this.log.event(name, "turn-end", { stopReason: res.stopReason, length: result.length, message: msg?.id });
+		// An interrupt waits for this turn to end, and records how it ended (interruptModel decides what follows).
+		if (agent.interrupt) agent.interrupt.stop = res.stopReason;
+		// Problem: a cancelled turn reported as a result, then its continuation reported too, gives the parent two answers
+		// for one task. Example: "count the files" cancelled, then continued to "42 files". Solution: the cancelled turn ends
+		// quietly; its continuation reports the result.
+		if (agent.interrupt && res.stopReason === "cancelled") {
+			this.transition(agent, turnEndCause(res.stopReason));
+			return;
+		}
 		if (agent.askedParent) {
 			// The turn that asked the parent ended. Forwarding it would show the parent the same question
 			// twice and it would answer twice. The worker stays asking until the answer reaches it, and the
@@ -790,27 +818,51 @@ export class Hub {
 	 * Changes the model of a worker, on behalf of an agent above it. The adapter does the switch through its harness's
 	 * own path; the record and the journal follow what it reports ("applied" now, "pending" via a model update).
 	 * With retry, an applied switch sends the message that failed the worker's last turn once more (retryFailed).
+	 * With interrupt, a busy worker's turn is cancelled and its task continued (interruptModel); an idle one switches as usual.
 	 */
-	async model(req: { from: string; to: string; model: string; retry?: boolean }): Promise<ModelResult> {
+	async model(req: {
+		from: string;
+		to: string;
+		model: string;
+		retry?: boolean;
+		interrupt?: boolean;
+	}): Promise<ModelResult> {
 		const target = this.registry.get(req.to);
 		if (!target) return { error: this.registry.unknownAgent(req.to, req.from) };
 		if (!this.registry.isAncestor(req.from, req.to))
 			return { error: `${req.from} cannot change the model of ${req.to}: only its parent (or an agent above it) can.` };
+		// Problem: retry sends the failed message again, and interrupt continues the interrupted task; both at once repeat
+		// work. Example: a quota failure retried and continued together runs the same task twice. Solution: refused.
+		if (req.retry && req.interrupt)
+			return {
+				error:
+					"retry and interrupt cannot be combined: interrupt continues the interrupted task itself, and retry would send its failed message again",
+			};
 		// Problem: an exited worker's failed message can never be sent again, and "has exited" alone does not say so.
 		// Example: a parent that retried a quota failure after cancelling the worker waited for a retry that never came.
-		// Solution: a retry against an exited worker says the worker must be respawned.
-		if (target.record.state === "exited" || target.closing)
-			return {
-				error: req.retry
-					? `${req.to} has exited, so its failed message cannot be retried: spawn a new worker to continue its task`
-					: `${req.to} has exited`,
-			};
+		// Solution: a retry or an interrupt against an exited worker says the worker must be respawned.
+		if (target.record.state === "exited" || target.closing) {
+			if (req.retry)
+				return {
+					error: `${req.to} has exited, so its failed message cannot be retried: spawn a new worker to continue its task`,
+				};
+			if (req.interrupt)
+				return {
+					error: `${req.to} has exited, so its turn cannot be continued: spawn a new worker to continue its task`,
+				};
+			return { error: `${req.to} has exited` };
+		}
 		if (!isExactModel(req.model))
 			return {
 				error: `the model must be an exact <provider>/<id> (e.g. anthropic/claude-sonnet-5-5), not ${JSON.stringify(req.model)}`,
 			};
 		if (!target.adapter?.setModel)
 			return { error: `${req.to} cannot change its model through agent-link: its adapter has no model switch` };
+		// Problem: a second model change while an interrupt runs would race its cancel and switch. Example: a plain switch
+		// landing between the cancel and the continuation. Solution: refused until the interrupt ends.
+		if (target.interrupt)
+			return { error: `${req.to} is already being interrupted to switch its model: wait for it to continue` };
+		if (req.interrupt && this.busy(target)) return this.interruptModel(target, req);
 		const previous = target.record.model;
 		let res: SetModelResult;
 		try {
@@ -854,6 +906,118 @@ export class Hub {
 		agent.retried.add(msg.id);
 		this.enqueue(agent, { id: msg.id, from: msg.from, text: msg.text, kind: msg.kind });
 		return { retried: true, messageId: msg.id, ...(failed.error !== undefined && { error: failed.error }) };
+	}
+
+	/**
+	 * Switches the model of a busy worker and continues its interrupted task, with one continuation to the same agent.
+	 * Problem: cancelling first loses the turn when the switch is then refused, and Claude and Codex refuse every switch.
+	 * Example: a Claude worker cancelled by an interrupt, its switch refused, its task stopped for nothing. Solution: the
+	 * switch is asked first; the cancel follows only once the harness accepts it. Once cancelled, the hub waits (bounded)
+	 * until the turn has ended as cancelled, the adapter is idle and the switch is confirmed; only then the continuation
+	 * goes first in the queue. Every other end is an explicit outcome with no continuation.
+	 */
+	private async interruptModel(target: Agent, req: { from: string; model: string }): Promise<ModelResult> {
+		const name = target.record.name;
+		const previous = target.record.model;
+		const interrupt: { stop?: StopReason } = {};
+		target.interrupt = interrupt;
+		let next: QueuedMessage | undefined;
+		try {
+			let res: SetModelResult;
+			try {
+				res = (await target.adapter?.setModel?.(req.model)) ?? { error: `${name} has no model switch` };
+			} catch (e) {
+				res = { error: errorText(e) };
+			}
+			this.log.event(name, "model", { by: req.from, model: req.model, interrupt: true, ...res });
+			if ("error" in res)
+				return {
+					error: res.error,
+					interrupt: { continued: false, reason: "the model switch failed, so the turn was not interrupted" },
+				};
+			if (res.status === "applied") this.setRecordModel(target, res.model);
+			const base = { status: res.status, model: res.model, previous };
+			// Problem: a turn that ended while the switch ran has nothing left to cancel, and its own result already went to
+			// the parent. Example: "count the files" finished during the switch, and a cancel would only repeat the question.
+			// Solution: no cancel, no continuation; the result is the one the parent gets.
+			if (target.adapter?.idle() ?? true)
+				return {
+					...base,
+					interrupt: {
+						continued: false,
+						reason: `${name}'s turn ended on its own before the cancel, so there was nothing to continue`,
+					},
+				};
+			try {
+				await target.adapter?.cancel();
+			} catch (e) {
+				return {
+					...base,
+					interrupt: { continued: false, reason: `${name}'s turn could not be cancelled: ${errorText(e)}` },
+				};
+			}
+			const end = await this.awaitInterrupt(target, interrupt, res.model);
+			if (end === "cancelled") {
+				next = {
+					id: randomUUID(),
+					from: req.from,
+					to: name,
+					text: `Continue the task from where you stopped; your model changed to ${res.model}.`,
+					kind: "message",
+					queuedAt: Date.now(),
+				};
+				return { status: "applied", model: res.model, previous, interrupt: { continued: true, messageId: next.id } };
+			}
+			const reason =
+				end === "timeout"
+					? interrupt.stop === undefined
+						? `${name} did not stop in time, so its task was not continued`
+						: `the switch to ${res.model} did not apply in time, so its task was not continued`
+					: end === "exited"
+						? `${name} exited while its turn was interrupted, so its task was not continued`
+						: `${name}'s turn ended on its own before the cancel took effect, so there was nothing to continue`;
+			return { ...base, interrupt: { continued: false, reason } };
+		} finally {
+			if (target.interrupt === interrupt) target.interrupt = undefined;
+			if (next && !target.closing) {
+				target.queue.unshift(next);
+				this.log.messageQueued({
+					id: next.id,
+					from: next.from,
+					to: next.to,
+					length: next.text.length,
+					kind: next.kind,
+				});
+			}
+			this.pump(target);
+		}
+	}
+
+	/**
+	 * Waits, bounded by interruptMs, until the interrupted turn has ended, the adapter is idle and the switch to `model` is
+	 * confirmed (a pending switch confirms with the adapter's model update). Returns how the turn ended, or "timeout" or
+	 * "exited".
+	 */
+	private async awaitInterrupt(
+		target: Agent,
+		interrupt: { stop?: StopReason },
+		model: string,
+	): Promise<StopReason | "timeout" | "exited"> {
+		// A harness's cancel takes seconds at most (opencode's abort grace is 5 s): 20 s is the bound for the rest.
+		const deadline = Date.now() + (this.opts.interruptMs ?? 20000);
+		for (;;) {
+			if (target.closing || target.record.state === "exited") return "exited";
+			if (interrupt.stop !== undefined && target.adapter?.idle() && target.record.model === model)
+				return interrupt.stop;
+			const left = deadline - Date.now();
+			if (left <= 0) return "timeout";
+			await new Promise((r) => setTimeout(r, Math.min(this.opts.idlePollMs ?? 250, left)));
+		}
+	}
+
+	/** A turn runs or waits on the user: the states an interrupt cancels. */
+	private busy(agent: Agent): boolean {
+		return agent.inflight !== undefined || agent.record.state === "working" || agent.record.state === "asking";
 	}
 
 	private setRecordModel(agent: Agent, model: string): void {
