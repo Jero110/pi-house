@@ -11,6 +11,7 @@
 		"packages/agent-link-tmux",
 		"packages/agent-link",
 		"packages/agent-transcripts",
+		"packages/books-rag",
 		"packages/cmux-mcp",
 		"packages/pihouse"
 	],
