@@ -157,7 +157,11 @@ test("verified JSONL append advances a revision at the same journal timestamp an
 					type: "message",
 					id,
 					timestamp: "2026-01-01T00:00:00.000Z",
-					message: { role: "user", content: `synthetic ${id}` },
+					message: {
+						role: "assistant",
+						content: [{ type: "text", text: `synthetic ${id}` }],
+						usage: { input: id === "message-1" ? 10 : 5, output: 2, cacheRead: 3, cacheWrite: 0 },
+					},
 				})),
 			]
 				.map((item) => JSON.stringify(item))
@@ -168,7 +172,8 @@ test("verified JSONL append advances a revision at the same journal timestamp an
 	assert.equal(captureRun([record], record, store, { by: "planner" }), "written");
 	const file = join(home, "memory/runs/root/run.json");
 	const first = JSON.parse(readFileSync(file, "utf8"));
-	assert.equal(first.evidence.metrics.newTokens, null, "a transcript without usage events is unknown, not zero");
+	assert.equal(first.evidence.metrics.newTokens, 12, "the initial captured usage is retained structurally");
+	assert.equal(first.evidence.participants[0].activeMs, null, "absent answer durations remain unknown");
 	assert.equal(captureRun([record], record, store, { by: "planner" }), "written");
 	const repeated = JSON.parse(readFileSync(file, "utf8"));
 	assert.equal(repeated.revision, first.revision, "same source prefix remains idempotent");
@@ -181,6 +186,12 @@ test("verified JSONL append advances a revision at the same journal timestamp an
 	assert.equal(appended.revision, first.revision + 1);
 	assert.equal(appended.metrics.messages, 2, "structured totals accumulate the delta once");
 	assert.equal(appended.evidence.participants[0].messages, 2);
+	assert.equal(
+		appended.evidence.metrics.newTokens,
+		19,
+		"appended token usage accumulates once, not from the old prefix",
+	);
+	assert.equal(appended.evidence.metrics.cacheRead, 6);
 	assert.deepEqual(appended.evidence.cursor.root.appendedRecordIds, ["message-2"]);
 	assert.equal(appended.evidence.cursor.root.byteOffset, Buffer.byteLength(readFileSync(source)));
 	const capturedDelta = readFileSync(join(home, "memory/runs/root/transcripts/root.json"), "utf8");
