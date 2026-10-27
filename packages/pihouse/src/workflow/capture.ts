@@ -420,7 +420,10 @@ function lineageForSession(store: MemoryStore, sessionId: string, project: strin
 }
 
 /** What one capture did. A deferred run says why; a processed, discarded or deferred run writes nothing. */
-export type CaptureOutcome = { status: "written" | "processed" | "discarded" } | { status: "deferred"; reason: string };
+export type CaptureOutcome =
+	| { status: "written" | "processed" | "discarded" }
+	| { status: "deferred"; reason: string }
+	| { status: "previewed"; fingerprint: string };
 
 /** The newest revision of a run when its captured copies were cleaned; undefined when it was not (legacy or pending). */
 function cleanedLatest(
@@ -477,7 +480,7 @@ export function captureRunOutcome(
 	records: readonly SessionRecord[],
 	root: SessionRecord,
 	store: MemoryStore,
-	opts: { by: FlagBy; reason?: string; roots?: TranscriptRoots; now?: Date },
+	opts: { by: FlagBy; reason?: string; roots?: TranscriptRoots; now?: Date; preview?: boolean },
 ): CaptureOutcome {
 	const defer = (reason: string): CaptureOutcome => ({ status: "deferred", reason });
 	const previous = readPackage(store, root.id);
@@ -678,6 +681,7 @@ export function captureRunOutcome(
 		cursor: sourceCursors,
 		...(review ? { review } : {}),
 	};
+	if (opts.preview) return { status: "previewed", fingerprint };
 	// Problem: a cleaned revision's evidence fingerprint can come back unchanged. Example: a resume with no new lines.
 	// Solution: an identical cleaned fingerprint is discarded before anything is written, so it is never reimported.
 	const admitted = operationalRead(store, (db) => capturedAdmission(db, pkg.id, fingerprint)) ?? "admit";
@@ -698,6 +702,23 @@ export function captureRunOutcome(
 		}
 	}
 	return { status: result };
+}
+
+/**
+ * The evidence fingerprint a capture of this run would write now, and nothing is written.
+ * Problem: cleanup may delete captured copies only while their source is unchanged, and that check must not change
+ * the source or the store. Example: a session appended a line after its digest; the preview differs and cleanup waits.
+ * Solution: the capture pipeline runs up to the point where it would write, then stops; anything it cannot verify
+ * yields undefined.
+ */
+export function previewRunFingerprint(
+	records: readonly SessionRecord[],
+	root: SessionRecord,
+	store: MemoryStore,
+	opts: { by: FlagBy; roots?: TranscriptRoots; now?: Date },
+): string | undefined {
+	const outcome = captureRunOutcome(records, root, store, { ...opts, preview: true });
+	return outcome.status === "previewed" ? outcome.fingerprint : undefined;
 }
 
 /** Records in run.json where a review of the run was written. A run not captured has nowhere to record it. */
