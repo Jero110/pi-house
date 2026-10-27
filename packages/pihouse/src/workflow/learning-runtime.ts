@@ -173,6 +173,40 @@ export async function executeDigest(
 	candidates: RuntimeCandidate[],
 ): Promise<Array<{ revision: string; status: string; path?: string }>> {
 	const byId = new Map(candidates.map((candidate) => [candidate.id, candidate]));
+	const results: Array<{ revision: string; status: string; path?: string }> = [];
+	// Problem: cleanup-failed revisions have commit manifests, so candidate selection excludes them. Example: after a
+	// failed unlink, another invocation sees no digest candidate and never retries deletion. Solution: retry the saved
+	// artifact's cleanup before considering any new generation; this path cannot call the digest worker.
+	const pendingCleanup = options.db
+		.prepare(
+			"SELECT j.id, j.revision_id, json_extract(j.payload, '$.artifactPath') AS artifact_path FROM jobs j WHERE j.state IN ('generated', 'cleanup-failed') ORDER BY j.id",
+		)
+		.all();
+	for (const row of pendingCleanup) {
+		const revision = typeof row.revision_id === "string" ? row.revision_id : undefined;
+		const artifactPath = typeof row.artifact_path === "string" ? row.artifact_path : undefined;
+		const runId = revision
+			? options.db.prepare("SELECT run_id FROM revisions WHERE id = ?").get(revision)?.run_id
+			: undefined;
+		if (!revision || !artifactPath || typeof runId !== "string") continue;
+		const state = options.operationalState(runId);
+		if (
+			!isQuiescent(state) ||
+			options.currentFingerprint(revision) !==
+				options.db.prepare("SELECT source_hash FROM revisions WHERE id = ?").get(revision)?.source_hash
+		)
+			continue;
+		const cleanup = await dispatchCleanup(options.db, String(row.id), {
+			invocation: options.invocation,
+			now: options.now,
+			leaseMs: 30_000,
+			adapter: cleanupAdapter(options.db, {
+				ownedRoot: options.ownedRoot,
+				currentFingerprint: options.currentFingerprint,
+			}),
+		});
+		results.push({ revision, status: cleanup.status, path: artifactPath });
+	}
 	const dispatched = await dispatchJobs(options.db, candidates, {
 		invocation: options.invocation,
 		now: options.now,
@@ -222,7 +256,6 @@ export async function executeDigest(
 				: { status: "failure" };
 		},
 	});
-	const results: Array<{ revision: string; status: string; path?: string }> = [];
 	for (const result of dispatched) {
 		const candidate = candidates.find((item) => item.id === result.id);
 		if (!candidate || result.status !== "generated") {
