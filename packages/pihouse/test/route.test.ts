@@ -2,12 +2,13 @@
 // usage observations; no model, provider or network is touched. The real pi registry is only built, never asked for a
 // model.
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import type { AccountObservation } from "../src/account-usage.ts";
 import { main } from "../src/cli.ts";
+import { SKILLS_DIR } from "../src/paths.ts";
 import { openPiRegistry, ROUTE_EXIT, type RouteRegistry, runRoute } from "../src/route.ts";
 import type { Observation } from "../src/workflow/routing.ts";
 import { ROUTING_PROFILES_FILE, readCheckpoint } from "../src/workflow/routing-profiles.ts";
@@ -348,5 +349,33 @@ test("pih route is reachable from the CLI: with no profiles file it exits unauth
 		assert.equal(existsSync(join(home, "routing")), false);
 	} finally {
 		rmSync(home, { recursive: true, force: true });
+	}
+});
+
+// The executor skill tells agents what to run and how to read the answer. These checks keep it in step with the CLI:
+// every failure kind it names is accepted, and the exit codes it documents are the ones runRoute returns.
+test("the planner and the executor name the routing contract the CLI implements", async () => {
+	const planner = readFileSync(join(SKILLS_DIR, "pre-build/planner/SKILL.md"), "utf8");
+	const executor = readFileSync(join(SKILLS_DIR, "build/executor/SKILL.md"), "utf8");
+	assert.match(planner, /\*\*Routing profile:\*\* <name>/);
+	assert.match(
+		executor,
+		/`pih route <name> --current <provider\/model of that worker> --failure <exhausted\|rate\|auth>`/,
+	);
+	assert.match(executor, /Exit `3` \(`paused`\)/);
+	assert.match(executor, /Exit `4`/);
+	assert.match(executor, /or `2` \(a usage mistake\)/);
+	assert.deepEqual(ROUTE_EXIT, { selected: 0, error: 1, usage: 2, paused: 3, unauthorized: 4 });
+	for (const kind of ["exhausted", "rate", "auth"]) {
+		const r = await run({
+			args: ["build", "--current", "openai-codex/gpt-6-luna", "--failure", kind],
+			raw: profilesFile(build),
+			observations: [observation("openai", "available"), observation("claude", "available")],
+		});
+		try {
+			assert.notEqual(r.code, ROUTE_EXIT.usage, `--failure ${kind} is accepted`);
+		} finally {
+			r.cleanup();
+		}
 	}
 });

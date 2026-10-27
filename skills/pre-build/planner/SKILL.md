@@ -124,6 +124,15 @@ What must be true when this is done, from the user's side, with one concrete exa
   `PIHOUSE_NO_LINK=1 pihouse --list-models <words>`: it prints only models of providers the user is logged in to. Write the
   one it prints as `<provider>/<model-id>`. When several are printed, ask with `ask_user_question`; when none, tell the
   user and ask for another. For a harness other than pihouse, use the id that harness takes (its own model list).
+- **A task may bind a routing profile (optional).** The line `**Routing profile:** <name>` lets that task move to other
+  models when its account runs out. The profile in the user's routing-profiles file (`<pihouse home>/routing-profiles.json`,
+  default `~/.pihouse`) is the only authority: it lists the candidates, in order, the executor may use, and
+  `pih route <name>` picks among them with the usage it sees. A task without that line is fixed to its Model: the
+  executor never moves it, whatever the usage says, unless this plan's Decisions say otherwise. Name a profile only when
+  the user asked for a fallback or accepted one, and only if the file already has it: read the file, never write or
+  invent one, and never copy a model from brand names into a profile. In a profile task the Model column holds the
+  profile's first candidate, so the plan reads true while nothing is exhausted; the executor spawns with what
+  `pih route` prints, not with this column.
 
 ## Execution
 Linear or split between agents, and why. Which tasks run in parallel and which wait for others (a small dependency
@@ -132,6 +141,7 @@ list or graph). The order of merges.
 ## Tasks
 ### T1: <title>
 **Agent:** <agent> · **Harness:** <harness> · **Model:** <model> · **Blocked by:** none | T<n> · **Parallel with:** T<n> | none
+**Routing profile:** <name> (only when the task may move to other models; omit the line otherwise, and the model is fixed)
 **Skills:** <names, comma separated> (paths in the Skills table)
 **Files:** the files it will likely touch
 Objective: the behavior that must work when done.
@@ -152,7 +162,7 @@ in parallel only if they share no files and neither needs the other's result.
 
 ## Step 5: Validate with the user
 
-Summarize in 5-10 lines: goal, tasks, who does each (harness and model), what runs in parallel, the skills, the
+Summarize in 5-10 lines: goal, tasks, who does each (harness, model and routing profile where set), what runs in parallel, the skills, the
 assumptions worth checking, and the plan's path. Then one `ask_user_question`:
 
 - "Approve and execute (Recommended)": hand off now (Step 6).
@@ -189,4 +199,6 @@ tokens and time. Then end your turn. Do not start post-build or extra skills: th
 - Asking for the skills with `ask_user_question` or a hand-made list instead of `pick_skills`.
 - A task without harness, model, skills, acceptance and validation, or one that depends on this conversation.
 - A model written as the user said it instead of an exact `<provider>/<model-id>` from `--list-models`.
+- A routing profile the profiles file does not hold, a profile the user never accepted, or a fallback added to a task
+  that was meant to stay on its model.
 - Handing off before the user explicitly approved.

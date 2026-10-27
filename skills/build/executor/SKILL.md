@@ -51,19 +51,34 @@ the format; you rarely need it.
   explicitly requires linear execution, honor it unless the user authorizes an amendment; record that amendment and
   its dependency/file-independence evidence before changing the schedule. Never bypass a blocker or claim an early
   independent slice satisfies the whole dependent task.
-- **Every task goes to its own agent with agent-link `spawn`**, with exactly the plan's `harness` and `model` (leave
-  `model` unset only when the plan says `default`) and `name` = the task's agent name. A task assigned to "executor"
-  you do yourself.
+- **Every task goes to its own agent with agent-link `spawn`**, with the plan's `harness`, and `name` = the task's agent
+  name. Its `model` is the plan's exact id for a fixed task (unset only when the plan says `default`), or the id that
+  `pih route` selected for a routing-profile task. A task assigned to "executor" you do yourself.
 - **Check usage before every spawn.** Call `account_usage` before each `spawn`, and once before a batch of parallel
   spawns. Never spawn on an account it reports `exhausted`. `stale` or `unknown` is not proof of exhaustion: you may
   spawn, but watch that agent's first result.
-- **When the plan's model cannot be used** (its account is `exhausted`, or a worker fails with a quota, rate or auth
-  error), pause the affected work and switch only to a profile, account or model the plan or the user authorized;
-  never an unconfigured account or API billing, and never a substitute model for a fixed-model task without that
-  authorization. Record it in the ledger as `ASSUMED:` (or `AMENDED:` when it changes a plan Decision). Then spawn on
-  the alternative, or, for a live worker, use agent-link's `model` tool: `retry: true` after a failed turn,
-  `interrupt: true` only when waiting is worse than cutting the current turn. Switch once; never retry quota failures
-  in a loop.
+- **Routing profiles.** A task whose line has `**Routing profile:** <name>` may run on any candidate of that profile, in
+  the profile's order. A task without one is fixed to its model. For a profile task, run `pih route <name>` before its
+  spawn (it reads the pihouse home from the environment) and spawn with the `provider/model` on its `selected:` line.
+  Never spawn it on the plan's Model column, or on a model the profile does not list. Record
+  `ROUTED: <T-id> <provider/model> account=<account> reason=<reason>` from its output.
+  - Exit `3` (`paused`): no candidate can run now. Do not spawn that task. Record `PAUSED: <T-id>` with the checkpoint
+    path and the reason lines, and move on to other ready work. A paused task is a gap for the report, not a failure to
+    retry.
+  - Exit `4` (nothing authorized: no profiles file, an invalid file, an unknown profile) or `2` (a usage mistake): spawn
+    nothing for that task, record `BLOCKED: <T-id>` with the message, and move on. Never fall back to the plan's Model
+    column yourself.
+  - When a worker of a profile task fails with a quota, rate or auth error, run
+    `pih route <name> --current <provider/model of that worker> --failure <exhausted|rate|auth>` once, with the kind of
+    that failure. Its `selected:` id is the one alternative to spawn; for a live worker, the same id goes to agent-link's
+    `model` tool (`retry: true` after a failed turn; `interrupt: true` only when waiting is worse than cutting the current turn). `paused` or exit `4`
+    records the pause and stops there. Switch once: one route call per failure; never retry quota failures in a loop.
+  - A network error is not quota: it follows Step 2, and `pih route` is not called for it.
+- **A fixed task never moves.** A task without a routing profile that hits a quota, rate or auth error is paused and
+  recorded. It moves to another model only when the plan's Decisions or the user authorize that exact model; otherwise
+  the gap goes into the report.
+- **Ledger.** Record the effective model of every dispatch: `DISPATCH: <T-id> <provider/model> profile=<name or none>`.
+  The report names the model that actually ran each task, not the one the plan first wrote.
 - **A model must be an exact id.** If a plan's model is words instead of `<provider>/<model-id>`, resolve it first with
   `PIHOUSE_NO_LINK=1 pihouse --list-models <words>` (it lists only providers the user is logged in to) and spawn with the id
   it prints; never pass the words, as pi matches them loosely and can pick a provider that is not configured. If an
@@ -127,7 +142,8 @@ One retry per task, never a loop. Cancel an agent (`cancel`) once its task is ve
 
 Your final answer, the only long message:
 
-- **Result:** per task: agent, harness, model, skills, status, the validation line that proves it, commit.
+- **Result:** per task: agent, harness, effective model (with its routing profile when routed), skills, status, the
+  validation line that proves it, commit.
 - **Validation:** the plan's commands and their result on the integrated branch.
 - **Assumptions:** every `ASSUMED:` line.
 - **Gaps:** what did not pass, and why.
@@ -142,6 +158,9 @@ if they want them.
 - Calling `ask_user_question` or waiting for the user.
 - Doing a task yourself that the plan gave to another agent, or spawning without the plan's harness and model.
 - Crossing four quota-backed workers at once, counting a harness name as free, or retrying a quota failure in a loop.
+- Spawning a routing-profile task on a model that `pih route` did not select, or running `pih route --current` twice for
+  one failure.
+- Moving a task without a routing profile to another model after a quota error.
 - A brief without its `Skills:` line, or with skills the plan did not give that task.
 - Counting a result without command output as a pass.
 - A third attempt at the same task.
