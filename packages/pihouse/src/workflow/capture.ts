@@ -2,7 +2,9 @@
 // A run is the whole agent tree from the agent-link journal. Capture is code only (ADR-001, D5): it builds the run,
 // computes the metrics, copies every transcript and hands the package to the store. No model runs, and no model
 // reads a transcript here. Spec: docs/specs/workflow-memory.md, "Flags and capture (T4)".
+
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import type { SessionRecord } from "agent-link-core";
@@ -158,8 +160,7 @@ export function titleOf(run: WorkflowRun, reason: string | undefined): string {
 	const slug = run.plan?.split("/").pop()?.replace(/\.md$/, "");
 	if (slug) return capTitle(slug);
 	if (reason && flat(reason)) return capTitle(reason);
-	const first = run.agents[0]?.transcript?.messages.find((m) => m.role === "user" && flat(m.text));
-	return capTitle(first?.text ?? run.root.task ?? run.root.name);
+	return capTitle(run.root.name);
 }
 
 function wallOf(run: WorkflowRun): number {
@@ -237,7 +238,13 @@ export function packageOf(
 	return { pkg, transcripts };
 }
 
-type StoredPackage = RunPackage & { review?: string };
+type StoredPackage = RunPackage & {
+	review?: string;
+	evidence?: unknown;
+	fingerprint?: string;
+	revision?: number;
+	cursor?: Record<string, string>;
+};
 
 const runFile = (store: MemoryStore, id: string) => join(store.dir, "runs", id, "run.json");
 
@@ -263,9 +270,74 @@ export function captureRun(
 ): "written" | "processed" {
 	const run = buildRun(records, root, opts.roots);
 	const { pkg, transcripts } = packageOf(run, opts);
-	const review = readPackage(store, pkg.id)?.review;
-	const stored: StoredPackage = review ? { ...pkg, review } : pkg;
-	return store.writeRun(stored, transcripts, `${renderReport(run)}\n`);
+	const previous = readPackage(store, pkg.id);
+	const evidence = {
+		lineage: pkg.id,
+		project: pkg.project,
+		plan: pkg.plan ?? null,
+		participants: pkg.agents.map(
+			({
+				id,
+				parent,
+				role,
+				harness,
+				model,
+				taskId,
+				taskTitle,
+				assignedSkills,
+				loadedSkills,
+				usage,
+				activeMs,
+				messages,
+				missing,
+			}) => ({
+				id,
+				parent,
+				role,
+				harness,
+				model,
+				taskId: taskId ?? null,
+				taskTitle: taskTitle ?? null,
+				assignedSkills,
+				loadedSkills,
+				usage,
+				activeMs,
+				messages,
+				missing,
+				summary: run.agents.find((item) => item.record.id === id)?.summary
+					? {
+							assistantMessages: run.agents.find((item) => item.record.id === id)?.summary?.assistantMessages,
+							slowestMs: run.agents.find((item) => item.record.id === id)?.summary?.slowestMs,
+							failedToolCalls: run.agents.find((item) => item.record.id === id)?.summary?.failedToolCalls,
+							toolCalls: run.agents.find((item) => item.record.id === id)?.summary?.toolCalls,
+						}
+					: null,
+			}),
+		),
+		metrics: pkg.metrics,
+		cursor: Object.fromEntries(run.agents.map((agent) => [agent.record.id, agent.record.updatedAt])),
+	};
+	const fingerprint = createHash("sha256").update(JSON.stringify(evidence)).digest("hex");
+	const revision = previous?.fingerprint === fingerprint ? (previous.revision ?? 1) : (previous?.revision ?? 0) + 1;
+	const review = previous?.review;
+	const stored: StoredPackage = {
+		...pkg,
+		evidence,
+		fingerprint,
+		revision,
+		cursor: Object.fromEntries(run.agents.map((agent) => [agent.record.id, agent.record.updatedAt])),
+		...(review ? { review } : {}),
+	};
+	const reportRun = {
+		...run,
+		root: { ...run.root, task: undefined },
+		agents: run.agents.map((agent) => ({
+			...agent,
+			record: { ...agent.record, task: undefined },
+			transcript: undefined,
+		})),
+	};
+	return store.writeRun(stored, transcripts, `${renderReport(reportRun, { messages: false })}\n`);
 }
 
 /** Records in run.json where a review of the run was written. A run not captured has nowhere to record it. */

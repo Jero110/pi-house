@@ -173,7 +173,7 @@ test("run.json holds no transcript text and its title is at most 80 chars", () =
 	const text = readFileSync(join(f.store.dir, "runs", "a", "run.json"), "utf8");
 	const pkg = JSON.parse(text);
 	assert.ok(pkg.title.length <= TITLE_MAX, `title is ${pkg.title.length} chars`);
-	assert.ok(pkg.title.startsWith("SECRET"), "the title is the first request, cut");
+	assert.equal(pkg.title, "pihouse", "titles do not persist conversational requests");
 	assert.ok(!text.includes(SECRET), "the whole request is not in run.json");
 	assert.ok(!text.includes('"done"'), "no answer text either");
 	const withReason = captureRun([root], root, f.store, { by: "save", reason: "x".repeat(300), roots: f.roots });
