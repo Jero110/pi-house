@@ -373,3 +373,35 @@ test("removed and not-yet-built invocations start nothing and say what to use in
 	assert.equal(users.length, 0, "no sendUserMessage");
 	assert.equal(existsSync(join(home, "reports")), false, "no report is written");
 });
+
+test("approve on an interrupted application recovers it to failed and leaves the target alone", async () => {
+	const f = fixture();
+	try {
+		mkdirSync(join(f.memory, "approved-records", "preference"), { recursive: true });
+		const recordPath = join(f.memory, "approved-records", "preference", "tests.md");
+		writeFileSync(recordPath, "x");
+		const db = openStore(f.memory);
+		const proposal = createProposal(db.db, {
+			id: "p-int",
+			target: "memory:preference/tests",
+			before: "x",
+			after: "y",
+			evidence: ["r3"],
+		});
+		approveProposal(db.db, proposal.id, proposal.version);
+		db.db
+			.prepare("UPDATE proposals SET state = 'applying', payload = ? WHERE id = ?")
+			.run(JSON.stringify({ ...getProposal(db.db, "p-int"), state: "applying" }), "p-int");
+		db.close();
+
+		const result = await proposalCommand("approve", ["p-int"], { memory: f.memory, repoRoot: f.repoRoot });
+		assert.equal(result.level, "warning");
+		assert.match(
+			result.text,
+			/^Not applied: p-int is failed: Recovered interrupted application; observed target state: before/,
+		);
+		assert.equal(readFileSync(recordPath, "utf8"), "x", "the target is not touched");
+	} finally {
+		f.cleanup();
+	}
+});
