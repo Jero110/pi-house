@@ -4,6 +4,7 @@
 import { existsSync, lstatSync, readdirSync, readFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
+import { productionTargetBound } from "./chunks.ts";
 import { AdapterError, type BooksConfig, loadConfig, parseEnv } from "./config.ts";
 import { evaluateSynthetic } from "./evaluate.ts";
 import { indexCorpus, loadCatalog } from "./indexing.ts";
@@ -57,11 +58,8 @@ const requiredKeys = [
 	"S3_BUCKET_PRIVATE_CONFIRMED",
 ];
 const secretKeys = ["PINE_CONE_API", "S3_ACCESS_KEY_ID", "S3_SECRET_ACCESS_KEY"];
-/** Problem: passage metadata stores a per-character text mapping (about 120 bytes per character), and Pinecone
- * rejects metadata above 40 KB. Example: the chunker default of 1800 or even a bound of 512 makes `index` fail
- * with resource_limit. Solution: ingest with a bound of 256 (about 165-character passages, about 20 KB),
- * recorded in every version's identity so a later change produces a new version. */
-const chunkOptions = { targetBound: 256 };
+/** Production chunking, part of every version's identity so a later change makes a new version. */
+const chunkOptions = { targetBound: productionTargetBound };
 const ingestConfigurationHash = sha256(`books-rag-ingest-v1:${JSON.stringify(chunkOptions)}`);
 
 function describe(error: unknown): string {

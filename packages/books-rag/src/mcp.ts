@@ -133,7 +133,11 @@ export interface BooksMcpOptions {
 	readonly services: () => SearchServices;
 	/** false returns figure metadata with an explicit omitted-image notice, for clients without image support. */
 	readonly images?: boolean;
+	/** Lower response cap in characters (tests, small clients); never above maxResponseCharacters. */
+	readonly responseBudget?: number;
 }
+const budgetOf = (options: BooksMcpOptions): number =>
+	Math.min(options.responseBudget ?? maxResponseCharacters, maxResponseCharacters);
 
 function listTool(options: BooksMcpOptions): Tool {
 	const rules = {
@@ -181,7 +185,7 @@ function listTool(options: BooksMcpOptions): Tool {
 					});
 				};
 				let result = build();
-				while (shown.length > 1 && textOf(result).length > maxResponseCharacters) {
+				while (shown.length > 1 && textOf(result).length > budgetOf(options)) {
 					shown = shown.slice(0, -1);
 					result = build();
 				}
@@ -291,15 +295,15 @@ function searchTool(options: BooksMcpOptions): Tool {
 				let built = build();
 				// Shrink excerpts first, then drop the lowest-ranked hits, then coverage detail. Citation
 				// fields of the hits that remain are never trimmed.
-				while (textOf(built).length > maxResponseCharacters && excerpt > 200) {
+				while (textOf(built).length > budgetOf(options) && excerpt > 200) {
 					excerpt = Math.floor(excerpt * 0.75);
 					built = build();
 				}
-				while (textOf(built).length > maxResponseCharacters && hits > 1) {
+				while (textOf(built).length > budgetOf(options) && hits > 1) {
 					hits--;
 					built = build();
 				}
-				while (textOf(built).length > maxResponseCharacters && coverage > 0) {
+				while (textOf(built).length > budgetOf(options) && coverage > 0) {
 					coverage--;
 					built = build();
 				}
@@ -363,11 +367,11 @@ function readTool(options: BooksMcpOptions): Tool {
 					});
 				};
 				let built = build();
-				while (textOf(built).length > maxResponseCharacters && text.length > 0) {
+				while (textOf(built).length > budgetOf(options) && text.length > 0) {
 					text = sliceLiteral(text, Math.floor(text.length * 0.8));
 					built = build();
 				}
-				return textOf(built).length > maxResponseCharacters
+				return textOf(built).length > budgetOf(options)
 					? failure("resource_limit", "Citation metadata alone exceeds the response budget")
 					: built;
 			} catch (error) {

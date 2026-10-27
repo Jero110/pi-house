@@ -44,6 +44,25 @@ These totals cover 24 answerable queries, not unrelated queries (which returned 
 
 Freeze **180** as the preference for this synthetic benchmark only. It is not an optimal book chunk size; production's default is unchanged. Neither this comparison nor T7's synthetic cosine calibration establishes a suitable live threshold/chunk configuration. No universal abstention, bilingual retrieval, agent citation discipline, real Pinecone visibility, or hosted-service compatibility is claimed.
 
+## Production chunk bound and hosted record size (T9-fix)
+
+Problem: the first hosted record (schema 1) stored one JSON object per character mapping and repeated full location objects, about 120 bytes per text character. Pinecone's 40 KB metadata cap then made any passage above roughly 330 characters unindexable; even a bound of 512 threw `resource_limit`, so the chunker default of 1800 could never be indexed.
+
+Solution (schema 2, lossless): a per-record location table, run-length numeric mappings (`[kind, originalLength, normalizedLength, repeat]`), span starts derived from the previous end, structure slices without repeated block IDs, and a single text copy when original and normalized text are identical. `expandPassageEvidence` is the exact inverse; tests compare it with the local store's evidence. Schema 1 records are rejected as incompatible. The catalog pins the hash of the compact metadata. A record above **32768 bytes** fails indexing with `resource_limit` naming the passage; nothing is truncated.
+
+**Production bound: 1800** conservative units (UTF-8 bytes + 32 of the prefixed input; the model limit is 2048, so 12% headroom, a conservative proxy for the plan's 400-800 token target, not measured tokens). This is the chunker default (`productionTargetBound`) and is what `ingest` uses and records in each version's identity. It is not the synthetic 180/320 preference.
+
+Measured serialized metadata (vector excluded), bound 1800, synthetic layouts only:
+
+| Layout | Largest record |
+|---|---:|
+| Dense two-page text: prose, table-like short items, Courier code block, figure references (passages of 20+ text items spanning two pages) | 5,252 bytes |
+| Adversarial: 60 blocks of 2-character cells plus tiny 2-point lines per page | 9,940 bytes (same at bound 2048) |
+
+Both are far below the 32 KB budget (and 40 KB cap). Real books with many ligature/normalization runs or very deep heading paths have not been measured; the explicit failure above protects against them. Real Nomic token counts of 1800-unit passages remain unmeasured.
+
+Synthetic evaluation re-run after the change (`evaluate --synthetic`, bounds 180 and 320, unchanged protocol): passed, recall@5 1.0 for both, returned characters 3560 and 3660, 25 and 12 chunks.
+
 ## Available local PDF check
 
 The executor authorized substituting the read-only Desktop/books file for the absent Downloads path. The script loads local bytes and installed PDF.js assets only. It uses direct PDF.js item/font/label diagnostics, not full production corpus ingestion or chunk/ranking evaluation. It scans text for a first table-caption candidate and inspects that page plus its neighbor. Only compact labels/headings/counts/locations are printed; no passages or table cells are saved. Renders stay in memory, never in the repository or the user's books folder.
