@@ -13,6 +13,7 @@ export function createTitleController(deps: TitleDependencies) {
 	let revision = 0;
 	let prompt = "";
 	let lastAttempt = -Infinity;
+	let attemptedRevision = -1;
 	let pending = false;
 	return {
 		input(text: string) {
@@ -25,17 +26,18 @@ export function createTitleController(deps: TitleDependencies) {
 		},
 		async settled() {
 			const current = deps.current();
-			if (deps.depth > 0 || !prompt.trim() || pending || (current && !deps.owned())) return;
+			if (deps.depth > 0 || !prompt.trim() || pending || attemptedRevision === revision || !deps.owned()) return;
 			const now = deps.now();
 			if (now - lastAttempt < 60_000) return;
 			lastAttempt = now;
+			attemptedRevision = revision;
 			pending = true;
 			const started = revision;
 			const session = deps.session();
 			try {
 				const title = await deps.generate(prompt, current);
 				if (started !== revision || session !== deps.session() || deps.current() !== current) return;
-				if (current && !deps.owned()) return;
+				if (!deps.owned()) return;
 				const cleaned = title
 					?.split("")
 					.map((char) => (char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127 ? " " : char))

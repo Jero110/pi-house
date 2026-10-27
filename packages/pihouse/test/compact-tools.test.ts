@@ -198,7 +198,11 @@ test("the first prompt names the session and the tab, later prompts do not renam
 			name = n;
 		},
 	} as unknown as ExtensionAPI;
+	const depth = process.env.AGENT_LINK_DEPTH;
+	process.env.AGENT_LINK_DEPTH = "0";
 	brand(pi);
+	if (depth === undefined) delete process.env.AGENT_LINK_DEPTH;
+	else process.env.AGENT_LINK_DEPTH = depth;
 	const ctx = { hasUI: true, cwd: "/Users/me/vs", ui: { setTitle: (t: string) => titles.push(t) } } as never;
 	handlers.get("input")?.(
 		{ type: "input", text: "Add dark mode to the settings page", source: "interactive" } as never,
@@ -215,11 +219,15 @@ test("the first prompt names the session and the tab, later prompts do not renam
 test("before any prompt the tab is the folder, not the product name", () => {
 	const handlers = new Map<string, (event: never, ctx: never) => void>();
 	const titles: string[] = [];
+	const depth = process.env.AGENT_LINK_DEPTH;
+	process.env.AGENT_LINK_DEPTH = "0";
 	brand({
 		on: (event: string, h: (event: never, ctx: never) => void) => handlers.set(event, h),
 		getSessionName: () => undefined,
 		setSessionName: () => {},
 	} as unknown as ExtensionAPI);
+	if (depth === undefined) delete process.env.AGENT_LINK_DEPTH;
+	else process.env.AGENT_LINK_DEPTH = depth;
 	handlers.get("agent_start")?.(
 		{} as never,
 		{ hasUI: true, cwd: "/Users/me/vs", ui: { setTitle: (t: string) => titles.push(t) } } as never,
