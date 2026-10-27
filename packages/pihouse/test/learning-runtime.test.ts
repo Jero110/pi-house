@@ -157,9 +157,12 @@ test("verified synthetic digest execution commits then fences cleanup against a 
 		const run = join(owned, "runs", "run-one");
 		mkdirSync(join(run, "transcripts"), { recursive: true });
 		mkdirSync(join(root, "digests"), { recursive: true });
+		const cursor = {
+			"run-one": { sourceKind: "jsonl", sourceId: "native-one", byteOffset: 16, prefixFingerprint: "p" },
+		};
 		writeFileSync(
 			join(run, "run.json"),
-			JSON.stringify({ id: "run-one", fingerprint: "source-hash", project: "fixture", agents: [{ id: "a" }] }),
+			JSON.stringify({ id: "run-one", fingerprint: "source-hash", project: "fixture", agents: [{ id: "a" }], cursor }),
 		);
 		writeFileSync(join(run, "transcripts", "a.jsonl"), "synthetic evidence\\n");
 		store.db.prepare("INSERT INTO runs(id, created_at) VALUES ('run-one', 'now')").run();
@@ -218,6 +221,11 @@ test("verified synthetic digest execution commits then fences cleanup against a 
 		);
 		assert.equal(result[0].status, "cleaned");
 		assert.equal(store.db.prepare("SELECT state FROM cleanup_manifests WHERE id='run-one.r1'").get()?.state, "cleaned");
+		// The receipt keeps the package's cursors, so a later capture can resume from this revision.
+		const receipt = JSON.parse(
+			String(store.db.prepare("SELECT payload FROM cleanup_manifests WHERE id='run-one.r1'").get()?.payload),
+		);
+		assert.deepEqual(receipt.cursors, cursor);
 		assert.equal(store.db.prepare("SELECT state FROM jobs WHERE id=?").get(candidate.id)?.state, "cleaned");
 	} finally {
 		store.close();

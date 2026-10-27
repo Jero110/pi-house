@@ -188,6 +188,10 @@ export async function executeDigest(
 			if (sha256(JSON.stringify({ package: bytes, files: inputs })) !== candidate.inputFingerprint)
 				return { status: "failure" };
 			const identity: DigestIdentity = { runId: candidate.runId, project: candidate.project, revision };
+			// Problem: after cleanup a reopened run must resume from the cursors this revision was captured with.
+			// Example: without them the receipt has no cursor and the next capture cannot prove the appended delta.
+			// Solution: the verified package bytes already hold the cursors, so they travel with the receipt.
+			const cursors = (JSON.parse(bytes.toString("utf8")) as { cursor?: unknown }).cursor;
 			const committed = commitDigest(options.db, {
 				ownedRoot: options.ownedRoot,
 				digestRoot: options.digestRoot,
@@ -195,6 +199,7 @@ export async function executeDigest(
 				digest: { text: outcome.outputText, finish: "stop" },
 				currentFingerprint: options.currentFingerprint(revision) ?? "",
 				expectedFiles: names,
+				cursors,
 			});
 			return committed.status === "committed"
 				? { status: "success", artifactPath: committed.path, fingerprint: candidate.fingerprint }

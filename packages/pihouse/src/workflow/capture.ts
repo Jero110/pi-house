@@ -7,9 +7,11 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
+import type { DatabaseSync } from "node:sqlite";
 import type { SessionRecord } from "agent-link-core";
 import { treeOf } from "agent-link-core";
 import { locateTranscript, parsePi, type Transcript, type TranscriptRoots, type Usage } from "agent-transcripts";
+import { capturedAdmission, cleanedCursors } from "./cleanup.ts";
 import { persistEvidence } from "./evidence-store.ts";
 import type { MemoryStore, RunAgentEntry, RunPackage, RunTranscript } from "./memory.ts";
 import { ACTIVE_MARKER } from "./migration.ts";
@@ -417,32 +419,86 @@ function lineageForSession(store: MemoryStore, sessionId: string, project: strin
 	return undefined;
 }
 
-/**
- * Captures one run through the store: the tree as one package, `report.md` and a copy of every transcript.
- * Capturing a pending run again replaces it; a processed run is left alone ("processed").
- * Problem: the planner's agent_end fires after every answer, and a review recorded in run.json was lost each time.
- * Solution: the earlier package's `review` path is carried over.
- */
+/** What one capture did. A deferred run says why; a processed, discarded or deferred run writes nothing. */
+export type CaptureOutcome = { status: "written" | "processed" | "discarded" } | { status: "deferred"; reason: string };
+
+/** The newest revision of a run when its captured copies were cleaned; undefined when it was not (legacy or pending). */
+function cleanedLatest(
+	db: DatabaseSync,
+	runId: string,
+): { sourceHash: string; cursors: Record<string, StoredSourceCursor> | undefined } | undefined {
+	const row = db
+		.prepare(
+			"SELECT r.source_hash, m.state FROM revisions r LEFT JOIN cleanup_manifests m ON m.id = r.id WHERE r.run_id = ? ORDER BY r.created_at DESC, r.rowid DESC LIMIT 1",
+		)
+		.get(runId);
+	if (row?.state !== "cleaned" || typeof row.source_hash !== "string") return undefined;
+	const cursors = cleanedCursors(db, runId);
+	const verifiable = typeof cursors === "object" && cursors !== null && !Array.isArray(cursors);
+	return {
+		sourceHash: row.source_hash,
+		cursors: verifiable ? (cursors as Record<string, StoredSourceCursor>) : undefined,
+	};
+}
+
+/** Runs a read on the operational store of an activated memory; an unactivated memory has none. */
+function operationalRead<T>(store: MemoryStore, read: (db: DatabaseSync) => T): T | undefined {
+	if (!existsSync(join(store.dir, ACTIVE_MARKER))) return undefined;
+	const operational = openOperationalStore(join(store.dir, "memory.sqlite"), { fts: false, legacy: true });
+	try {
+		return read(operational.db);
+	} finally {
+		operational.close();
+	}
+}
+
+/** Captures one run through the store: the tree as one package, `report.md` and a copy of every transcript. */
 export function captureRun(
 	records: readonly SessionRecord[],
 	root: SessionRecord,
 	store: MemoryStore,
 	opts: { by: FlagBy; reason?: string; roots?: TranscriptRoots; now?: Date },
-): "written" | "processed" | "deferred" {
+): CaptureOutcome["status"] {
+	return captureRunOutcome(records, root, store, opts).status;
+}
+
+/**
+ * Captures one run through the store. Capturing a pending run again replaces it. A legacy processed run, one with no
+ * cleanup receipt, is left alone ("processed").
+ * Problem: the planner's agent_end fires after every answer, and a review recorded in run.json was lost each time.
+ * Solution: the earlier package's `review` path is carried over.
+ * Problem: a session that continues after its digest was committed and its copies cleaned. Example: the planner
+ * resumes and appends two answers. Re-importing the whole native file would recapture evidence the digest already
+ * covered. Solution: an activated store resumes from the cleaned revision's cursors, writes only the appended delta as
+ * a new revision under the same lineage, and discards a capture whose evidence fingerprint was already cleaned.
+ * Anything unverifiable (rotated, truncated, a fork without its parent) is deferred with its reason, never reimported.
+ */
+export function captureRunOutcome(
+	records: readonly SessionRecord[],
+	root: SessionRecord,
+	store: MemoryStore,
+	opts: { by: FlagBy; reason?: string; roots?: TranscriptRoots; now?: Date },
+): CaptureOutcome {
+	const defer = (reason: string): CaptureOutcome => ({ status: "deferred", reason });
 	const previous = readPackage(store, root.id);
-	if (store.readIndex().some((entry) => entry.id === `run:${root.id}` && entry.status === "processed"))
-		return "processed";
-	const priorCursors = previous?.cursor;
+	const cleaned = operationalRead(store, (db) => cleanedLatest(db, root.id));
+	if (!cleaned && store.readIndex().some((entry) => entry.id === `run:${root.id}` && entry.status === "processed"))
+		return { status: "processed" };
+	if (cleaned && (!previous || previous.fingerprint !== cleaned.sourceHash))
+		return defer("retained run package does not match its cleaned revision");
+	if (cleaned && !cleaned.cursors) return defer("cleaned revision retains no verifiable source cursor");
+	const priorCursors = cleaned ? cleaned.cursors : previous?.cursor;
 	const tree = treeOf(records, root.id);
 	const currentIds = new Set(tree.map((record) => record.id));
-	if (priorCursors && Object.keys(priorCursors).some((id) => !currentIds.has(id))) return "deferred";
+	if (priorCursors && Object.keys(priorCursors).some((id) => !currentIds.has(id)))
+		return defer("a captured participant is no longer in the journal tree");
 	const sourceCursors: Record<string, StoredSourceCursor> = {};
 	const sourcePaths: Record<string, string> = {};
 	const transcriptOverrides = new Map<string, Transcript>();
 	for (const record of tree) {
 		const prior = priorCursors?.[record.id];
-		if (prior?.sourceKind === "unknown") return "deferred";
-		if (prior && prior.sourceKind !== "jsonl") return "deferred";
+		if (prior?.sourceKind === "unknown") return defer("a participant with an unverifiable source cannot be resumed");
+		if (prior && prior.sourceKind !== "jsonl") return defer("a participant with a non-pi cursor cannot be resumed");
 		const sourcePath = locateTranscript(
 			{
 				harness: record.harness,
@@ -453,7 +509,7 @@ export function captureRun(
 			opts.roots,
 		);
 		if ((record.harness !== "pi" && record.harness !== "pihouse") || !sourcePath || !record.sessionId) {
-			if (prior) return "deferred";
+			if (prior) return defer("a resumed participant is no longer a verifiable pi JSONL stream");
 			sourceCursors[record.id] = {
 				sourceKind: "unknown",
 				sourceId: record.sessionId ?? null,
@@ -463,7 +519,7 @@ export function captureRun(
 			continue;
 		}
 		const inspected = inspectJsonlCursor(sourcePath, record.sessionId, prior ?? null);
-		if (inspected.state !== "verified") return "deferred";
+		if (inspected.state !== "verified") return defer(inspected.reason);
 		const cursorUnchanged =
 			prior?.sourceKind === "jsonl" &&
 			prior.byteOffset === inspected.cursor.byteOffset &&
@@ -483,20 +539,22 @@ export function captureRun(
 		if (cursor.sourceKind !== "jsonl") continue;
 		const record = tree.find((item) => item.id === id);
 		const path = sourcePaths[id];
-		if (!record?.sessionId || !path) return "deferred";
+		if (!record?.sessionId || !path) return defer("source identity is unknown");
 		const confirmed = inspectJsonlCursor(path, record.sessionId, null);
 		if (
 			confirmed.state !== "verified" ||
 			confirmed.cursor.byteOffset !== cursor.byteOffset ||
 			confirmed.cursor.prefixFingerprint !== cursor.prefixFingerprint
 		)
-			return "deferred";
+			return defer("source changed while it was being read");
 	}
 	const { pkg, transcripts } = packageOf(run, { ...opts, includeRaw: !previous });
 	const completeSummaries = pkg.agents.every((agent) => agent.missing === null);
 	const rootCursor = sourceCursors[root.id];
 	const forkedFrom = rootCursor?.sourceKind === "jsonl" ? rootCursor.forkedFrom : null;
 	const forkLineage = forkedFrom ? lineageForSession(store, forkedFrom, pkg.project) : undefined;
+	if (cleaned && forkedFrom && !forkLineage)
+		return defer("fork parent lineage is not retained, so a cleaned fork cannot be resumed");
 	const evidenceUsageComplete = pkg.agents.every((agent) => {
 		const runAgent = run.agents.find((item) => item.record.id === agent.id);
 		const continuation = priorCursors?.[agent.id]?.sourceKind === "jsonl";
@@ -620,7 +678,11 @@ export function captureRun(
 		cursor: sourceCursors,
 		...(review ? { review } : {}),
 	};
-	const result = store.writeRun(stored, transcripts, renderEvidenceReport(evidence));
+	// Problem: a cleaned revision's evidence fingerprint can come back unchanged. Example: a resume with no new lines.
+	// Solution: an identical cleaned fingerprint is discarded before anything is written, so it is never reimported.
+	const admitted = operationalRead(store, (db) => capturedAdmission(db, pkg.id, fingerprint)) ?? "admit";
+	if (admitted === "discarded") return { status: "discarded" };
+	const result = store.writeRun(stored, transcripts, renderEvidenceReport(evidence), { reopen: cleaned !== undefined });
 	if (result === "written" && existsSync(join(store.dir, ACTIVE_MARKER))) {
 		const operational = openOperationalStore(join(store.dir, "memory.sqlite"), { fts: false, legacy: true });
 		try {
@@ -635,7 +697,7 @@ export function captureRun(
 			operational.close();
 		}
 	}
-	return result;
+	return { status: result };
 }
 
 /** Records in run.json where a review of the run was written. A run not captured has nowhere to record it. */

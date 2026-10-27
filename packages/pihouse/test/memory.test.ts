@@ -113,6 +113,19 @@ test("pending lists oldest first and a processed run never comes back, even when
 	assert.equal(store.pendingCount(), 0);
 });
 
+test("a processed run is written again only as an explicit reopened revision, which returns it to the queue", () => {
+	const { store } = fixture();
+	store.writeRun(run("r1"), transcripts);
+	store.markProcessed(["r1"], "b1");
+	assert.equal(store.writeRun(run("r1"), transcripts, undefined, { reopen: false }), "processed");
+	assert.equal(store.pendingCount(), 0);
+	assert.equal(store.writeRun(run("r1"), transcripts, undefined, { reopen: true }), "written");
+	assert.deepEqual(
+		store.pending().map((e) => e.id),
+		["run:r1"],
+	);
+});
+
 test("digests are written, read back, capped and indexed", () => {
 	const { store } = fixture();
 	store.writeRun(run("r1"), transcripts);

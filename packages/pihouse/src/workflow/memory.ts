@@ -138,7 +138,12 @@ export interface SliceOptions {
 
 export interface MemoryStore {
 	readonly dir: string;
-	writeRun(pkg: RunPackage, transcripts: RunTranscript[], report?: string): "written" | "processed";
+	writeRun(
+		pkg: RunPackage,
+		transcripts: RunTranscript[],
+		report?: string,
+		options?: { reopen?: boolean },
+	): "written" | "processed";
 	pending(): IndexEntry[];
 	pendingCount(): number;
 	markProcessed(runIds: string[], batchId: string): void;
@@ -340,11 +345,13 @@ export function openMemory(dir: string, opts: { now?: () => Date } = {}): Memory
 	const store: MemoryStore = {
 		dir,
 
-		writeRun(pkg, transcripts, report) {
+		writeRun(pkg, transcripts, report, options) {
 			const id = safeId(pkg.id);
 			const existing = load().entries.find((e) => e.id === `run:${id}`);
-			// A processed run was already digested; capturing it again would put it back in the queue.
-			if (existing && existing.status !== "pending") return "processed";
+			// A processed run was already digested; capturing it again would put it back in the queue. The one exception is
+			// a reopened revision: its cleaned predecessor's evidence was verified, and only the appended delta is new.
+			// Example: a resumed planner adds two answers after its digest; those answers must reach the next review.
+			if (existing && existing.status !== "pending" && !options?.reopen) return "processed";
 			const root = abs(`runs/${id}`);
 			rmSync(root, { recursive: true, force: true });
 			for (const t of transcripts) {
