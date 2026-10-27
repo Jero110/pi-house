@@ -42,8 +42,13 @@ export interface SessionRecord {
 	endedAt?: string;
 }
 
-/** The fields a later change may set. */
-export type SessionPatch = Partial<Omit<SessionRecord, "id" | "name" | "root" | "startedAt">>;
+/**
+ * The fields a later change may set. The root may change too: when a root hands off, the agent that takes over becomes
+ * the root of its tree. Problem: the journal kept the closed root as the tree's root. Example: the executor that took
+ * over a root's terminal and its workers still named that closed root, so the tree had no live root.
+ * Solution: the root field is patchable, and the hub rewrites it for the successor's whole tree.)
+ */
+export type SessionPatch = Partial<Omit<SessionRecord, "id" | "name" | "startedAt">>;
 
 export function journalId(name: string, at: Date): string {
 	const stamp = at
