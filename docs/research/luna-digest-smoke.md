@@ -46,7 +46,7 @@ sandbox: pihouse extensions, agent-link and configured credentials loaded as usu
 executor, so the executor's own run capture may list them. pi's automatic retry was not disabled; neither run
 retried.
 
-Outputs are kept unmodified in `docs/research/digest-smoke/` (`luna.json`, `haiku.json`).
+Outputs are kept unmodified in `docs/research/digest-smoke/` (`luna.output.txt`, `haiku.output.txt`; plain text so the formatter never rewrites the hashed bytes).
 
 | | Luna (`openai-codex/gpt-6-luna`) | Haiku (`claude-bridge/claude-haiku-5-5`) |
 |---|---|---|
