@@ -18,7 +18,7 @@ import {
 	type UsageWindow,
 	windowsFromJson,
 } from "./usage.ts";
-import { type Observation, type Profile, route } from "./workflow/routing.ts";
+import { type Observation, type PollState, type Profile, pollAccount, route } from "./workflow/routing.ts";
 
 export type AccountStatus = "available" | "exhausted" | "stale" | "unknown";
 
@@ -49,6 +49,8 @@ export interface GatherInput {
 	openaiUrl?: string;
 	fetchFn?: typeof fetch;
 	timeoutMs?: number;
+	/** Shared by every report of one process: concurrent calls share a request, and failures back off. */
+	poll?: PollState;
 }
 
 const CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
@@ -63,16 +65,38 @@ function accountOf(provider: string): string {
 	return provider;
 }
 
-type Found = { windows: readonly UsageWindow[]; at: number; source: string };
+/** Why a poll failed, in the words the note shows. Each state keeps its own words: a refused login is not a timeout. */
+const FAILURE_NOTE: Partial<Record<Observation["state"], string>> = {
+	auth: "the usage endpoint refused this login",
+	rate: "the usage endpoint is rate-limited",
+	network: "usage endpoint unreachable or unreadable",
+};
 
-/** The newest of the observations that have a window. */
-function newest(...found: (Found | undefined)[]): Found | undefined {
-	return found.filter((f): f is Found => !!f?.windows.length).sort((a, b) => b.at - a.at)[0];
+/**
+ * One observation from usage windows, whatever the source: exhausted when a live window is full, unknown when no window
+ * is still running (or none was seen), available otherwise.
+ */
+function fromWindows(
+	account: string,
+	windows: readonly UsageWindow[],
+	observedAt: number,
+	source: string,
+	now: number,
+): Observation {
+	const live = windows.filter((w) => !w.resetsAt || w.resetsAt > now);
+	const state = !live.length ? "unknown" : live.some((w) => w.percent >= 100) ? "exhausted" : "available";
+	return { provider: account, account, state, observedAt, source, windows: [...windows] };
 }
 
-async function readOpenAi(input: GatherInput): Promise<{ found?: Found; failed: boolean }> {
-	const token = await input.openaiToken?.().catch(() => undefined);
-	if (!token) return { failed: false };
+/** One poll of the ChatGPT usage endpoint. Every outcome is an observation: a failure says which kind it was. */
+async function fetchOpenAi(input: GatherInput, token: string): Promise<Observation> {
+	const fail = (state: Observation["state"]): Observation => ({
+		provider: "openai",
+		account: "openai",
+		state,
+		observedAt: input.now,
+		source: "usage endpoint",
+	});
 	try {
 		const id = chatgptAccountId(token);
 		const res = await (input.fetchFn ?? fetch)(input.openaiUrl ?? CODEX_USAGE_URL, {
@@ -83,33 +107,34 @@ async function readOpenAi(input: GatherInput): Promise<{ found?: Found; failed: 
 			},
 			signal: AbortSignal.timeout(input.timeoutMs ?? TIMEOUT_MS),
 		});
-		if (!res.ok) return { failed: true };
+		if (res.status === 401 || res.status === 403) return fail("auth");
+		if (res.status === 429) return fail("rate");
+		if (!res.ok) return fail("network");
 		const windows = windowsFromJson(await res.json(), input.now);
-		return windows.length
-			? { found: { windows, at: input.now, source: "usage endpoint" }, failed: false }
-			: { failed: true };
+		return fromWindows("openai", windows, input.now, "usage endpoint", input.now);
 	} catch {
-		return { failed: true };
+		return fail("network");
 	}
 }
 
+/** The usage endpoint through the shared poll state: concurrent callers wait for one request, and failures back off. */
+async function readOpenAi(
+	input: GatherInput,
+	poll: PollState,
+): Promise<{ observation?: Observation; retryAt?: number }> {
+	const token = await input.openaiToken?.().catch(() => undefined);
+	if (!token) return {};
+	const polled = await pollAccount(poll, "openai", "openai", input.now, () => fetchOpenAi(input, token));
+	return polled.status === "observed" ? { observation: polled.observation } : { retryAt: polled.retryAt };
+}
+
 /** Same rule as route(): one candidate whose account carries the observation. */
-function classify(account: string, found: Found | undefined, now: number): AccountStatus {
-	if (!found) return "unknown";
-	const live = found.windows.filter((w) => !w.resetsAt || w.resetsAt > now);
-	if (!live.length) return "unknown";
-	const observation: Observation = {
-		provider: account,
-		account,
-		state: live.some((w) => w.percent >= 100) ? "exhausted" : "available",
-		observedAt: found.at,
-		source: found.source,
-	};
+function classify(observation: Observation, now: number): { status: AccountStatus; reason: string } {
 	const candidate = {
 		harness: "any",
-		provider: account,
+		provider: observation.account,
 		model: "any",
-		account,
+		account: observation.account,
 		billing: "subscription",
 		capabilities: [],
 	};
@@ -127,45 +152,61 @@ function classify(account: string, found: Found | undefined, now: number): Accou
 		now,
 		maxAgeMs: MAX_AGE_MS,
 	});
-	if (result.status === "selected") return "available";
-	const reason = result.reasons[0]?.reason;
-	return reason === "exhausted" || reason === "stale" ? reason : "unknown";
+	if (result.status === "selected") return { status: "available", reason: "available" };
+	const reason = result.reasons[0]?.reason ?? "unknown";
+	return { status: reason === "exhausted" || reason === "stale" ? reason : "unknown", reason };
+}
+
+/** The note for an observation that does not say "available" or "exhausted": code words, never provider text. */
+function noteFor(chosen: Observation, status: AccountStatus): string | undefined {
+	const hasWindows = !!chosen.windows?.length;
+	const failure = FAILURE_NOTE[chosen.state];
+	if (failure && !hasWindows) return failure;
+	if (status !== "unknown") return undefined;
+	return hasWindows ? "every observed window has already reset" : "the source answered without usage windows";
 }
 
 export async function gatherAccountUsage(input: GatherInput): Promise<AccountReport[]> {
 	const accounts = [...new Set(input.providers.map(accountOf))].sort();
+	const poll: PollState = input.poll ?? new Map();
 	const reports: AccountReport[] = [];
 	for (const account of accounts) {
-		let found: Found | undefined;
 		let note: string | undefined;
+		const candidates: Observation[] = [];
 		const seen = input.headers[account];
-		const fromHeaders: Found | undefined = seen && { windows: seen.windows, at: seen.at, source: "response headers" };
+		if (seen) candidates.push(fromWindows(account, seen.windows, seen.at, "response headers", input.now));
 		if (account === "claude") {
 			const file = readClaudeCodeObservation(input.claudeDir ?? CLAUDE_CODE_RATE_LIMITS, input.now);
-			found = newest(
-				file && { windows: file.windows, at: file.observedAt, source: "Claude Code rate limits" },
-				fromHeaders,
-			);
-			if (!found) note = "no Claude Code rate-limit file and no response headers yet";
+			if (file) {
+				candidates.push(fromWindows("claude", file.windows, file.observedAt, "Claude Code rate limits", input.now));
+			} else if (!candidates.length) {
+				note = "no Claude Code rate-limit file and no response headers yet";
+			}
 		} else if (account === "openai") {
-			const read = await readOpenAi(input);
-			found = newest(read.found, fromHeaders);
-			if (!found) note = read.failed ? "usage endpoint unreachable or unreadable" : "no usage source yet";
-		} else {
-			found = newest(fromHeaders);
-			if (!found) note = "no usage source for this provider";
+			const read = await readOpenAi(input, poll);
+			if (read.observation) candidates.push(read.observation);
+			else if (read.retryAt !== undefined) {
+				note = `usage endpoint backed off after a failure; asked again after ${new Date(read.retryAt).toISOString()}`;
+			}
+		} else if (!candidates.length) {
+			note = "no usage source for this provider";
 		}
-		const status = classify(account, found, input.now);
-		if (status === "unknown" && found && !note) note = "every observed window has already reset";
+		// The newest observation that carries windows wins; a failure is shown only when nothing better was seen.
+		candidates.sort((a, b) => Number(!!b.windows?.length) - Number(!!a.windows?.length) || b.observedAt - a.observedAt);
+		const chosen = candidates[0];
+		const { status } = chosen ? classify(chosen, input.now) : { status: "unknown" as const };
+		note ??= chosen ? noteFor(chosen, status) : "no usage source yet";
 		reports.push({
 			account,
 			status,
-			windows: (found?.windows ?? []).map((w) => ({
+			windows: (chosen?.windows ?? []).map((w) => ({
 				label: w.label,
 				percent: w.percent,
 				...(w.resetsAt ? { resetsAt: new Date(w.resetsAt).toISOString() } : {}),
 			})),
-			...(found ? { ageSeconds: Math.max(0, Math.round((input.now - found.at) / 1000)), source: found.source } : {}),
+			...(chosen
+				? { ageSeconds: Math.max(0, Math.round((input.now - chosen.observedAt) / 1000)), source: chosen.source }
+				: {}),
 			...(note ? { note } : {}),
 		});
 	}

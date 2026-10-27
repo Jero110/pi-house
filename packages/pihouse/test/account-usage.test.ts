@@ -11,6 +11,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { type AccountReport, formatAccountUsage, gatherAccountUsage } from "../src/account-usage.ts";
 import accountUsage from "../src/extensions/account-usage.ts";
 import { EXTENSIONS } from "../src/paths.ts";
+import type { PollState } from "../src/workflow/routing.ts";
 
 const NOW = Date.parse("2026-10-26T12:00:00Z");
 const SECRET = "sk-secret-token-value";
@@ -225,4 +226,70 @@ test("the tool is registered once with a bounded schema and reads no secrets int
 
 test("every pihouse root and worker loads the extension", () => {
 	assert.ok(EXTENSIONS.some((e) => e.endsWith("extensions/account-usage.ts")));
+});
+
+test("concurrent reports share one usage request, and a refused login backs off instead of retrying", async () => {
+	// Problem: every status bar redraw and every account_usage call asked the usage endpoint again, so a refused login
+	// was retried on each call.
+	// Example: two reports in the same moment and one more shortly after must cost one request, not three.
+	let hits = 0;
+	const server = await usageServer((res) => {
+		hits++;
+		res.statusCode = 401;
+		res.end("no");
+	});
+	try {
+		const poll: PollState = new Map();
+		const args = {
+			now: NOW,
+			providers: ["openai-codex"],
+			claudeDir: claudeDir(undefined),
+			headers: {},
+			openaiToken: async () => SECRET,
+			openaiUrl: server.url,
+			poll,
+		};
+		const [first, second] = await Promise.all([gatherAccountUsage(args), gatherAccountUsage(args)]);
+		assert.equal(hits, 1);
+		const later = await gatherAccountUsage(args);
+		assert.equal(hits, 1);
+		for (const reports of [first, second, later]) {
+			const openai = find(reports, "openai");
+			assert.equal(openai?.status, "unknown");
+			assert.match(openai?.note ?? "", /backed off|refused/);
+			assert.ok(!JSON.stringify(reports).includes(SECRET));
+		}
+	} finally {
+		server.close();
+	}
+});
+
+test("a refused login, a rate limit and an unreachable endpoint have distinct notes, all unknown", async () => {
+	const cases: [number, RegExp][] = [
+		[401, /refused this login/],
+		[429, /rate-limited/],
+		[500, /unreachable or unreadable/],
+	];
+	for (const [code, note] of cases) {
+		const server = await usageServer((res) => {
+			res.statusCode = code;
+			res.end("no");
+		});
+		try {
+			const reports = await gatherAccountUsage({
+				now: NOW,
+				providers: ["openai-codex"],
+				claudeDir: claudeDir(undefined),
+				headers: {},
+				openaiToken: async () => SECRET,
+				openaiUrl: server.url,
+				poll: new Map(),
+			});
+			const openai = find(reports, "openai");
+			assert.equal(openai?.status, "unknown", String(code));
+			assert.match(openai?.note ?? "", note, String(code));
+		} finally {
+			server.close();
+		}
+	}
 });

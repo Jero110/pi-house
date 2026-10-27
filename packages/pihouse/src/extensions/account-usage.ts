@@ -8,6 +8,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { formatAccountUsage, gatherAccountUsage, type SeenHeaders } from "../account-usage.ts";
 import { windowsFromHeaders } from "../usage.ts";
+import type { PollState } from "../workflow/routing.ts";
 
 const Params = Type.Object(
 	{
@@ -20,6 +21,8 @@ const Params = Type.Object(
 
 export default function accountUsage(pi: ExtensionAPI): void {
 	const headers: SeenHeaders = {};
+	// One poll state for every call in this process: two reports at once cost one request to the usage endpoint.
+	const poll: PollState = new Map();
 
 	pi.on("after_provider_response", (event, ctx) => {
 		const provider = ctx.model?.provider;
@@ -55,6 +58,7 @@ export default function accountUsage(pi: ExtensionAPI): void {
 				now,
 				providers,
 				headers,
+				poll,
 				openaiToken: () =>
 					providers.includes("openai-codex")
 						? Promise.resolve(ctx.modelRegistry.getApiKeyForProvider("openai-codex"))
