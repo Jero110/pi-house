@@ -10,7 +10,7 @@ import type { FigureAsset } from "./figures.ts";
 import { safePath, sha256 } from "./locations.ts";
 import type { ObjectReceipt, Objects } from "./objects.ts";
 import type { Pinecone, PineconeMetadata } from "./pinecone.ts";
-import { passageRecord } from "./pinecone.ts";
+import { expandPassageEvidence, passageRecord } from "./pinecone.ts";
 import type { CorpusStore } from "./store.ts";
 
 /** Stable hashes survive JSON property ordering across hosted providers. */
@@ -131,11 +131,7 @@ export function resolveHostedPassage(id: string, metadata: PineconeMetadata, ver
 		metadata.indexConfigurationHash !== version.indexConfigurationHash
 	)
 		throw new AdapterError("identity_mismatch", "Hosted passage is stale or corrupted");
-	const parse = <T>(key: string): T => {
-		const value = metadata[key];
-		if (typeof value !== "string") throw new AdapterError("invalid_response", "Missing hosted citation field");
-		return JSON.parse(value) as T;
-	};
+	const evidence = expandPassageEvidence(metadata);
 	const passage = definePassage(
 		{
 			id: id as PassageId,
@@ -145,12 +141,7 @@ export function resolveHostedPassage(id: string, metadata: PineconeMetadata, ver
 			indexConfigurationHash: metadata.indexConfigurationHash as Sha256,
 			parentSectionId: metadata.parentSectionId as Passage["parentSectionId"],
 			originalText: metadata.originalText as string,
-			normalizedText: metadata.normalizedText as string,
-			headingPath: parse("headingPath"),
-			spans: parse("spans"),
-			mappings: parse("mappings"),
-			neighbors: parse("neighbors"),
-			figures: parse("figures"),
+			...evidence,
 			quality: [],
 		},
 		validationSource(version.source),

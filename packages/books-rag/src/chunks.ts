@@ -36,6 +36,11 @@ export function passageEmbeddingInput(
 	const header = passage.structure?.sharedHeader;
 	return `${documentPrefix}${passage.headingPath.map((h) => h.title).join(" > ")}${header ? `\nFirst source row (unverified header): ${header.text}` : ""}\n\n${passage.normalizedText}`;
 }
+/** Production chunk bound in conservative units (UTF-8 bytes + 32 for the prefixed input; the model limit is
+ * 2048, so this keeps about 12% headroom, roughly 400-450 English WordPiece tokens). Chosen with the compact
+ * record schema so the largest measured hosted record stays under the 32 KB budget; see
+ * docs/books-rag-evaluation.md. Not the synthetic 180/320 preference. */
+export const productionTargetBound = 1800;
 export interface ChunkOptions {
 	/** Target in conservative bound units, including prefix, headings and allowance. */
 	readonly targetBound?: number;
@@ -121,7 +126,7 @@ export function chunkPreparedIngest(
 	figures: readonly Figure[] = [],
 	options: ChunkOptions = {},
 ): readonly StructuralPassage[] {
-	const target = options.targetBound ?? 1800;
+	const target = options.targetBound ?? productionTargetBound;
 	if (!Number.isSafeInteger(target) || target < 128 || target > 2048)
 		throw new CorpusError("resource_limit", "Chunk bound must be between 128 and 2048");
 	const root = document.sections[0];

@@ -9,7 +9,7 @@ import {
 	requestJson,
 	VerificationCache,
 } from "./config.ts";
-import type { Passage, PdfLocation, TextRange } from "./contracts.ts";
+import type { Passage, PdfLocation } from "./contracts.ts";
 import { assertSourceIdentity } from "./contracts.ts";
 import { assertEmbeddingIdentity, validateVector } from "./embeddings.ts";
 
@@ -22,16 +22,13 @@ export interface PineconeRecord {
 export function assertPassageId(id: string): void {
 	if (!/^passage_[a-f0-9]{32}$/u.test(id)) throw new AdapterError("configuration", "Expected opaque passage ID");
 }
-const location = (l: PdfLocation) => ({
-	kind: l.kind,
-	pageNumber: l.pageNumber,
-	printedLabel: l.printedLabel,
-	coordinateSystem: l.coordinateSystem,
-	pageWidth: l.pageWidth,
-	pageHeight: l.pageHeight,
-	bounds: l.bounds === null ? null : [...l.bounds],
-});
-const range = (r: TextRange) => ({ start: r.start, end: r.end });
+/** Hosted record schema. Version 1 stored one JSON object per character mapping and exceeded Pinecone's
+ * 40 KB metadata cap above ~330 characters. Version 2 is lossless but compact; version 1 records are
+ * rejected as incompatible instead of being misparsed. */
+export const recordSchema = 2;
+/** Hard ceiling per record, with margin under Pinecone's 40 KB cap. Never truncated: over it, indexing fails. */
+export const recordBudgetBytes = 32 * 1024;
+const kindCodes = ["literal", "normalized", "omitted"] as const;
 const metadataKeys = new Set([
 	"schema",
 	"bookId",
@@ -41,7 +38,9 @@ const metadataKeys = new Set([
 	"generation",
 	"originalText",
 	"normalizedText",
+	"sameText",
 	"parentSectionId",
+	"locations",
 	"headingPath",
 	"spans",
 	"mappings",
@@ -55,17 +54,20 @@ function hostedMetadata(value: PineconeMetadata): void {
 	validateMetadata(value);
 	if (
 		Object.keys(value).some((key) => !metadataKeys.has(key)) ||
-		value.schema !== 1 ||
+		value.schema !== recordSchema ||
 		typeof value.generation !== "string" ||
 		typeof value.originalText !== "string" ||
-		typeof value.normalizedText !== "string"
+		(value.sameText === true ? "normalizedText" in value : typeof value.normalizedText !== "string")
 	)
 		throw new AdapterError("configuration", "Only allowlisted hosted passage metadata is permitted");
 	assertGeneration(value.generation);
 }
-/** Flat Pinecone types, with structured citation fields encoded as JSON strings.
- * Only explicit fields cross the boundary, never a SourceVersion/originalPath or
- * an arbitrary caller object. Oversized records fail instead of losing evidence. */
+/** Flat Pinecone types, with structured citation fields encoded as compact JSON strings.
+ * Only explicit fields cross the boundary, never a SourceVersion/originalPath or an arbitrary caller
+ * object. Problem: verbose per-character mappings and repeated location objects made a 330-character
+ * passage 40 KB. Example: "abc" literal x1500 became 1500 objects. Solution: a shared location table,
+ * numeric run-length mappings and derived span starts; expandPassageEvidence is the exact inverse.
+ * Oversized records fail naming the passage instead of losing evidence. */
 export function passageRecord(
 	passage: Passage & { readonly structure?: ChunkStructure },
 	vector: readonly number[],
@@ -74,76 +76,153 @@ export function passageRecord(
 	assertSourceIdentity(passage);
 	assertPassageId(passage.id);
 	assertGeneration(generation);
+	const table: (string | number | readonly number[] | null)[][] = [];
+	const index = new Map<string, number>();
+	const loc = (l: PdfLocation): number => {
+		const row = [l.pageNumber, l.printedLabel, l.pageWidth, l.pageHeight, l.bounds === null ? null : [...l.bounds]];
+		const key = JSON.stringify(row);
+		let at = index.get(key);
+		if (at === undefined) {
+			at = table.length;
+			index.set(key, at);
+			table.push(row as (string | number | readonly number[] | null)[]);
+		}
+		return at;
+	};
+	const runs: number[] = [];
+	for (const m of passage.mappings) {
+		const code = kindCodes.indexOf(m.kind);
+		const ol = m.originalRange.end - m.originalRange.start;
+		const nl = m.normalizedRange.end - m.normalizedRange.start;
+		const n = runs.length;
+		if (n && runs[n - 4] === code && runs[n - 3] === ol && runs[n - 2] === nl) runs[n - 1] = (runs[n - 1] ?? 0) + 1;
+		else runs.push(code, ol, nl, 1);
+	}
+	const sameText = passage.originalText === passage.normalizedText;
 	const metadata: PineconeMetadata = {
-		schema: 1,
+		schema: recordSchema,
 		bookId: passage.bookId,
 		versionId: passage.versionId,
 		sourceHash: passage.sourceHash,
 		indexConfigurationHash: passage.indexConfigurationHash,
 		generation,
 		originalText: passage.originalText,
-		normalizedText: passage.normalizedText,
+		...(sameText ? { sameText: true } : { normalizedText: passage.normalizedText }),
 		parentSectionId: passage.parentSectionId,
-		headingPath: JSON.stringify(
-			passage.headingPath.map((h) => ({ sectionId: h.sectionId, title: h.title, location: location(h.location) })),
-		),
-		spans: JSON.stringify(
-			passage.spans.map((s) => ({
-				blockId: s.blockId,
-				location: location(s.location),
-				originalRange: range(s.originalRange),
-			})),
-		),
-		mappings: JSON.stringify(
-			passage.mappings.map((m) => ({
-				kind: m.kind,
-				originalRange: range(m.originalRange),
-				normalizedRange: range(m.normalizedRange),
-			})),
-		),
+		headingPath: JSON.stringify(passage.headingPath.map((h) => [h.sectionId, h.title, loc(h.location)])),
+		// Spans are contiguous from 0, so each stores only its end offset.
+		spans: JSON.stringify(passage.spans.map((s) => [s.blockId, loc(s.location), s.originalRange.end])),
+		mappings: JSON.stringify(runs),
 		neighbors: JSON.stringify({ previous: passage.neighbors.previous, next: passage.neighbors.next }),
 		figures: JSON.stringify(
-			passage.figures.map((f) => ({
-				figureId: f.figureId,
-				evidence:
-					f.evidence.kind === "explicit-reference"
-						? {
-								kind: f.evidence.kind,
-								figureLabel: f.evidence.figureLabel,
-								referenceText: f.evidence.referenceText,
-								location: location(f.evidence.location),
-							}
-						: {
-								kind: f.evidence.kind,
-								status: f.evidence.status,
-								reason: f.evidence.reason,
-								location: location(f.evidence.location),
-							},
-			})),
+			passage.figures.map((f) =>
+				f.evidence.kind === "explicit-reference"
+					? [f.figureId, 0, f.evidence.figureLabel, f.evidence.referenceText, loc(f.evidence.location)]
+					: [f.figureId, 1, f.evidence.reason, loc(f.evidence.location)],
+			),
 		),
 		figureIds: passage.figures.map((f) => f.figureId),
 		qualityCodes: passage.quality.map((d) => d.code),
 	};
 	if (passage.structure) {
 		const s = passage.structure;
-		metadata.structure = JSON.stringify({
-			kind: s.kind,
-			groupId: s.groupId,
-			part: s.part,
-			totalParts: s.totalParts,
-			sharedHeader:
-				s.sharedHeader === null
-					? null
-					: { text: s.sharedHeader.text, blockId: s.sharedHeader.blockId, location: location(s.sharedHeader.location) },
-			sourceSlices: s.sourceSlices.map((slice) => ({
-				blockId: slice.blockId,
-				originalRange: range(slice.originalRange),
-				normalizedRange: range(slice.normalizedRange),
-			})),
-		});
+		metadata.structure = JSON.stringify([
+			s.kind,
+			s.groupId,
+			s.part,
+			s.totalParts,
+			s.sharedHeader === null ? null : [s.sharedHeader.text, s.sharedHeader.blockId, loc(s.sharedHeader.location)],
+			// One slice per span, in order, so block IDs are not repeated.
+			s.sourceSlices.map((x) => [
+				x.originalRange.start,
+				x.originalRange.end,
+				x.normalizedRange.start,
+				x.normalizedRange.end,
+			]),
+		]);
 	}
+	metadata.locations = JSON.stringify(table);
+	const bytes = Buffer.byteLength(JSON.stringify(metadata));
+	if (bytes > recordBudgetBytes)
+		throw new AdapterError(
+			"resource_limit",
+			`Passage ${passage.id} record is ${bytes} bytes, above the ${recordBudgetBytes}-byte budget; use a smaller chunk bound (nothing was truncated)`,
+		);
 	validateMetadata(metadata);
 	return { id: passage.id, values: validateVector(vector), metadata };
+}
+/** Exact inverse of passageRecord for the evidence fields the hosted reader needs. */
+export function expandPassageEvidence(
+	metadata: PineconeMetadata,
+): Pick<Passage, "headingPath" | "spans" | "mappings" | "neighbors" | "figures" | "normalizedText"> {
+	const parse = (key: string): unknown => {
+		const value = metadata[key];
+		if (typeof value !== "string") throw new AdapterError("invalid_response", "Missing hosted citation field");
+		return JSON.parse(value) as unknown;
+	};
+	if (metadata.schema !== recordSchema)
+		throw new AdapterError("identity_mismatch", "Hosted record schema is incompatible with this reader");
+	const table = parse("locations") as [number, string | null, number, number, number[] | null][];
+	const loc = (at: unknown): PdfLocation => {
+		const row = table[at as number];
+		if (!row) throw new AdapterError("invalid_response", "Invalid hosted location reference");
+		return {
+			kind: "pdf",
+			pageNumber: row[0],
+			printedLabel: row[1],
+			coordinateSystem: "pdf-points-top-left",
+			pageWidth: row[2],
+			pageHeight: row[3],
+			bounds: row[4] === null ? null : ([...row[4]] as [number, number, number, number]),
+		};
+	};
+	const spans: Passage["spans"][number][] = [];
+	let start = 0;
+	for (const [blockId, at, end] of parse("spans") as [string, number, number][]) {
+		spans.push({ blockId, location: loc(at), originalRange: { start, end } } as Passage["spans"][number]);
+		start = end;
+	}
+	const mappings: Passage["mappings"][number][] = [];
+	const runs = parse("mappings") as number[];
+	let original = 0;
+	let normalized = 0;
+	for (let i = 0; i + 3 < runs.length; i += 4) {
+		const [code, ol, nl, repeat] = [runs[i], runs[i + 1], runs[i + 2], runs[i + 3]] as [number, number, number, number];
+		const kind = kindCodes[code];
+		if (!kind) throw new AdapterError("invalid_response", "Invalid hosted mapping kind");
+		for (let n = 0; n < repeat; n++) {
+			mappings.push({
+				originalRange: { start: original, end: original + ol },
+				normalizedRange: { start: normalized, end: normalized + nl },
+				kind,
+			});
+			original += ol;
+			normalized += nl;
+		}
+	}
+	return {
+		headingPath: (parse("headingPath") as [string, string, number][]).map(([sectionId, title, at]) => ({
+			sectionId,
+			title,
+			location: loc(at),
+		})) as Passage["headingPath"],
+		spans,
+		mappings,
+		neighbors: parse("neighbors") as Passage["neighbors"],
+		figures: (parse("figures") as unknown[][]).map((f) =>
+			f[1] === 0
+				? {
+						figureId: f[0],
+						evidence: { kind: "explicit-reference", figureLabel: f[2], referenceText: f[3], location: loc(f[4]) },
+					}
+				: {
+						figureId: f[0],
+						evidence: { kind: "caption-layout", status: "uncertain", reason: f[2], location: loc(f[3]) },
+					},
+		) as Passage["figures"],
+		normalizedText:
+			metadata.sameText === true ? (metadata.originalText as string) : (metadata.normalizedText as string),
+	};
 }
 function assertGeneration(value: string): void {
 	if (!/^[a-f0-9]{32}$/u.test(value)) throw new AdapterError("configuration", "Expected opaque index generation");

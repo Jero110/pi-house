@@ -1,10 +1,24 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
+import { productionTargetBound } from "../src/chunks.ts";
 import type { Passage } from "../src/contracts.ts";
 import { embeddingIdentity } from "../src/embeddings.ts";
-import { Pinecone, passageRecord, validateMetadata } from "../src/pinecone.ts";
+import { ingestPdf, publishIngest } from "../src/ingest.ts";
+import { sha256 } from "../src/locations.ts";
+import {
+	expandPassageEvidence,
+	Pinecone,
+	passageRecord,
+	recordBudgetBytes,
+	validateMetadata,
+} from "../src/pinecone.ts";
+import { CorpusStore } from "../src/store.ts";
+import { pdfFixture, structuralPdf } from "./fixtures.ts";
 
 const generation = "a".repeat(32);
 const vector = Array.from({ length: 768 }, (_, i) => (i === 0 ? 1 : 0));
@@ -130,8 +144,9 @@ test("Pinecone checks exact read-only index before writes; scoped text/citations
 		if (call.method === "POST") assert.equal(call.body.namespace, "owned-library");
 	}
 	assert.equal(item.metadata.sourceHash, passage().sourceHash);
-	assert.deepEqual(JSON.parse(String(item.metadata.spans)), passage().spans);
-	assert.deepEqual(JSON.parse(String(item.metadata.headingPath)), passage().headingPath);
+	const evidence = expandPassageEvidence(item.metadata);
+	assert.deepEqual(evidence.spans, passage().spans);
+	assert.deepEqual(evidence.headingPath, passage().headingPath);
 	const probes = calls.filter((c) => c.path === "/indexes/books").length;
 	await client.query(vector, embeddingIdentity, { generation });
 	await client.query(vector, embeddingIdentity, { generation });
@@ -197,7 +212,11 @@ test("Pinecone checks exact read-only index before writes; scoped text/citations
 });
 
 test("metadata exceeds 40 KB explicitly, rejects null/nested/nonfinite values, accepts allowed flat types", () => {
-	assert.throws(() => passageRecord({ ...passage(), originalText: "x".repeat(41000) }, vector, generation), /40 KB/u);
+	assert.throws(
+		() => passageRecord({ ...passage(), originalText: "x".repeat(41000) }, vector, generation),
+		/Passage passage_e+ record is \d+ bytes, above the 32768-byte budget/u,
+	);
+	assert.throws(() => validateMetadata({ text: "x".repeat(41000) }), /40 KB/u);
 	for (const value of [null, { nested: true }, [1], Number.NaN])
 		assert.throws(() => validateMetadata({ value } as never), /flat/u);
 	validateMetadata({ text: "x", number: 1, flag: false, strings: ["a", "b"] });
@@ -317,4 +336,129 @@ test("Pinecone queues work, re-probes malformed results, and leaves stale-candid
 	const stale = await client.query(vector, embeddingIdentity, { generation });
 	assert.equal(stale[0]?.metadata.generation, "0".repeat(32));
 	assert.equal(probes, beforeMismatch + 1);
+});
+
+const evidenceOf = (p: Passage) => ({
+	headingPath: p.headingPath,
+	spans: p.spans,
+	mappings: p.mappings,
+	neighbors: p.neighbors,
+	figures: p.figures,
+	normalizedText: p.normalizedText,
+});
+
+/** Dense two-page layout: prose, many short table-like items, a Courier code block, ligature-bearing text
+ * (NFKC changes it, so mappings alternate between literal and normalized runs) and figure references. */
+function densePdf(): Uint8Array {
+	const prose = (n: number) => `Dense line ${n}: retrieval of cited passages \ufb01xes ligature \ufb02ow in sentences.`;
+	const page = (offset: number) => ({
+		geometry: [900, 900] as const,
+		text: [
+			{ text: `Dense chapter ${offset}`, y: 880, size: 18 },
+			...Array.from({ length: 28 }, (_, i) => ({ text: prose(offset + i), y: 850 - i * 14, size: 8 })),
+			...Array.from({ length: 12 }, (_, i) => ({ text: `v${i}`, x: 40 + i * 30, y: 440, size: 8 })),
+			...Array.from({ length: 14 }, (_, i) => ({
+				text: `    value_${i} = f(${i})`,
+				y: 420 - i * 12,
+				size: 8,
+				font: "Courier" as const,
+			})),
+			{ text: `See Figure 1-${offset + 1} for the layout.`, y: 240, size: 8 },
+		],
+	});
+	return pdfFixture({
+		pages: [
+			page(0),
+			page(1),
+			{
+				geometry: [900, 900],
+				text: [
+					{ text: "Figure 1-1. First", y: 800 },
+					{ text: "Figure 1-2. Second", y: 700 },
+				],
+			},
+		],
+	});
+}
+
+async function chunked(t: { after: (fn: () => void) => void }, pdf: Uint8Array, targetBound: number) {
+	const root = mkdtempSync(join(realpathSync(tmpdir()), "books-record-"));
+	t.after(() => rmSync(root, { recursive: true, force: true }));
+	const store = new CorpusStore({ directory: join(root, "store") });
+	const input = join(root, "book.pdf");
+	writeFileSync(input, pdf);
+	const prepared = await ingestPdf({
+		store,
+		input,
+		bookId: store.newBookId(),
+		indexConfigurationHash: sha256(`r-${targetBound}`),
+	});
+	await publishIngest(prepared, store, { targetBound });
+	return store.listPassages(prepared.source).map((p) => store.readPassage(prepared.source, p.id));
+}
+
+test("compact hosted records round-trip exactly the evidence the local store holds", async (t) => {
+	for (const pdf of [structuralPdf(), densePdf()]) {
+		const passages = await chunked(t, pdf, 400);
+		assert.ok(passages.length > 1);
+		for (const p of passages) {
+			const record = passageRecord(p, vector, generation);
+			assert.equal(record.metadata.schema, 2);
+			assert.deepEqual(expandPassageEvidence(record.metadata), evidenceOf(p));
+		}
+	}
+});
+
+test("mixed literal, normalized and omitted mappings round-trip through runs", () => {
+	const base = passage();
+	const mixed: Passage = {
+		...base,
+		originalText: "abc\ufb01d\u00adef",
+		normalizedText: "abcfid" + "ef",
+		mappings: [
+			{ originalRange: { start: 0, end: 1 }, normalizedRange: { start: 0, end: 1 }, kind: "literal" },
+			{ originalRange: { start: 1, end: 2 }, normalizedRange: { start: 1, end: 2 }, kind: "literal" },
+			{ originalRange: { start: 2, end: 3 }, normalizedRange: { start: 2, end: 3 }, kind: "literal" },
+			{ originalRange: { start: 3, end: 4 }, normalizedRange: { start: 3, end: 5 }, kind: "normalized" },
+			{ originalRange: { start: 4, end: 5 }, normalizedRange: { start: 5, end: 6 }, kind: "literal" },
+			{ originalRange: { start: 5, end: 6 }, normalizedRange: { start: 6, end: 6 }, kind: "omitted" },
+			{ originalRange: { start: 6, end: 7 }, normalizedRange: { start: 6, end: 7 }, kind: "literal" },
+			{ originalRange: { start: 7, end: 8 }, normalizedRange: { start: 7, end: 8 }, kind: "literal" },
+		],
+		spans: [{ ...base.spans[0], originalRange: { start: 0, end: 8 } } as Passage["spans"][number]],
+	};
+	const record = passageRecord(mixed, vector, generation);
+	assert.deepEqual(
+		JSON.parse(String(record.metadata.mappings)),
+		[0, 1, 1, 3, 1, 1, 2, 1, 0, 1, 1, 1, 2, 1, 0, 1, 0, 1, 1, 2],
+	);
+	assert.deepEqual(expandPassageEvidence(record.metadata).mappings, mixed.mappings);
+});
+
+test("identical original and normalized text is stored once; schema 1 records are incompatible", () => {
+	const same = { ...passage(), normalizedText: passage().originalText };
+	const record = passageRecord(same, vector, generation);
+	assert.equal(record.metadata.sameText, true);
+	assert.equal("normalizedText" in record.metadata, false);
+	assert.equal(expandPassageEvidence(record.metadata).normalizedText, same.originalText);
+	assert.throws(() => expandPassageEvidence({ ...record.metadata, schema: 1 }), /incompatible/u);
+});
+
+test("production-bound passages from dense two-page text serialize within the 32 KB record budget", async (t) => {
+	let largest = 0;
+	for (const pdf of [densePdf(), structuralPdf()]) {
+		for (const p of await chunked(t, pdf, productionTargetBound)) {
+			const bytes = Buffer.byteLength(JSON.stringify(passageRecord(p, vector, generation).metadata));
+			largest = Math.max(largest, bytes);
+			assert.ok(bytes <= recordBudgetBytes, `${bytes} bytes`);
+		}
+	}
+	const dense = await chunked(t, densePdf(), productionTargetBound);
+	assert.ok(Math.max(...dense.map((p) => p.spans.length)) >= 20, "passages hold many text items");
+	assert.ok(
+		dense.some((p) => new Set(p.spans.map((s) => s.location.pageNumber)).size === 2),
+		"a passage spans two pages",
+	);
+	assert.ok(dense.some((p) => p.figures.length > 0));
+	console.log(`largest production-bound record: ${largest} bytes at bound ${productionTargetBound}`);
 });
