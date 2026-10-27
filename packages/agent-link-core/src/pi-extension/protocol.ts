@@ -9,7 +9,11 @@ export const PI_SOCKET_ENV = "AGENT_LINK_PI_SOCKET";
 export const PI_MCP_ENV = "AGENT_LINK_PI_MCP";
 
 /** Adapter -> extension. */
-export type ToExtension = { type: "prompt"; id: string; text: string } | { type: "cancel" };
+export type ToExtension =
+	| { type: "prompt"; id: string; text: string }
+	| { type: "cancel" }
+	/** Switch pi's model; `model` is an exact `<provider>/<id>`. Answered by a model_result with the same id. */
+	| { type: "set_model"; id: string; model: string };
 
 /** Extension -> adapter. A turn_end with id null is a turn the adapter did not start (typed in the pane). */
 export type FromExtension =
@@ -17,7 +21,14 @@ export type FromExtension =
 	| { type: "tool_call"; title: string }
 	| { type: "agent_message"; text: string }
 	| { type: "turn_end"; id: string | null; stopReason: StopReason; text: string }
-	| { type: "session"; sessionId: string; file?: string };
+	| { type: "session"; sessionId: string; file?: string }
+	/** The answer to set_model: "applied" (pi runs `model` now), "pending" (a turn runs; it follows) or an error. */
+	| { type: "model_result"; id: string; status: "applied" | "pending"; model: string }
+	| { type: "model_result"; id: string; error: string }
+	/** A pending switch took effect, before the turn that held it reported idle. */
+	| { type: "model"; model: string }
+	/** A pending switch failed when it was due; pi keeps its model. */
+	| { type: "model_error"; model: string; error: string };
 
 export function writeLine(socket: Socket, message: ToExtension | FromExtension): void {
 	if (!socket.destroyed) socket.write(`${JSON.stringify(message)}\n`);
@@ -70,6 +81,18 @@ export function parseFromExtension(v: Record<string, unknown>): FromExtension | 
 			return typeof v.file === "string"
 				? { type: "session", sessionId: v.sessionId, file: v.file }
 				: { type: "session", sessionId: v.sessionId };
+		case "model_result": {
+			if (typeof v.id !== "string") return undefined;
+			if (typeof v.error === "string") return { type: "model_result", id: v.id, error: v.error };
+			if ((v.status !== "applied" && v.status !== "pending") || typeof v.model !== "string") return undefined;
+			return { type: "model_result", id: v.id, status: v.status, model: v.model };
+		}
+		case "model":
+			return typeof v.model === "string" ? { type: "model", model: v.model } : undefined;
+		case "model_error":
+			return typeof v.model === "string" && typeof v.error === "string"
+				? { type: "model_error", model: v.model, error: v.error }
+				: undefined;
 		case "turn_end": {
 			const id = typeof v.id === "string" ? v.id : null;
 			const stopReason = isStopReason(v.stopReason) ? v.stopReason : "error";
@@ -83,6 +106,8 @@ export function parseFromExtension(v: Record<string, unknown>): FromExtension | 
 /** The adapter's messages, checked field by field; undefined for anything else. */
 export function parseToExtension(v: Record<string, unknown>): ToExtension | undefined {
 	if (v.type === "cancel") return { type: "cancel" };
+	if (v.type === "set_model" && typeof v.id === "string" && typeof v.model === "string")
+		return { type: "set_model", id: v.id, model: v.model };
 	if (v.type === "prompt" && typeof v.id === "string" && typeof v.text === "string") {
 		return { type: "prompt", id: v.id, text: v.text };
 	}

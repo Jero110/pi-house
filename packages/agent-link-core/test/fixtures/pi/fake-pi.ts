@@ -23,8 +23,20 @@ export class FakePi {
 	confirmAnswer = true;
 	confirms: string[] = [];
 	hasUI = true;
+	/** The models pi knows (provider/id) and the providers with credentials; setModel() records its calls. */
+	models = new Set(["anthropic/claude-sonnet-5-5", "anthropic/claude-haiku-5-5", "openai/gpt-5.5"]);
+	authed = new Set(["anthropic"]);
+	setModels: string[] = [];
+	/** What pi.setModel answers (false = pi refused: no auth). */
+	setModelAnswer = true;
+	/** Held while a switch runs, to test ordering. */
+	setModelGate: Promise<void> | undefined;
 
 	ctx = {
+		modelRegistry: {
+			find: (provider: string, id: string) => (this.models.has(`${provider}/${id}`) ? { provider, id } : undefined),
+			hasConfiguredAuth: (m: { provider: string }) => this.authed.has(m.provider),
+		},
 		hasUI: true,
 		abort: () => {
 			this.aborts++;
@@ -49,6 +61,11 @@ export class FakePi {
 			},
 			sendMessage(message: SentMessage["message"], options?: SentMessage["options"]) {
 				self.sent.push({ message, options });
+			},
+			async setModel(model: { provider: string; id: string }) {
+				await self.setModelGate;
+				if (self.setModelAnswer) self.setModels.push(`${model.provider}/${model.id}`);
+				return self.setModelAnswer;
 			},
 			registerMcpServer(name: string, config: unknown) {
 				self.mcp.push({ name, config });

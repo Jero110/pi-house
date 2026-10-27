@@ -99,6 +99,69 @@ export function createAgentLinkExtension(env: NodeJS.ProcessEnv = process.env) {
 		let promptId: string | null = null;
 		let lastText = "";
 		let lastStop: string | undefined;
+		/**
+		 * Problem: pi.setModel while a turn runs would change the model under a request in flight.
+		 * Example: a worker at 90% context, upgraded by its parent mid-turn.
+		 * Solution: a busy pi (a turn running, a dialog open, or a prompt accepted whose turn has not started)
+		 * answers "pending" and the switch is made in agent_settled, before idle and the turn end go to the hub,
+		 * so the hub's next prompt always meets the new model.
+		 */
+		let pendingModel: string | undefined;
+		/** The switch in progress, so a prompt that arrives meanwhile starts its turn after it. */
+		let switching: Promise<unknown> = Promise.resolve();
+		const busy = () => running || asking || promptId !== null;
+
+		/** The model pi would switch to, or why it cannot: it must exist and have credentials. */
+		const resolveModel = (model: string): { model: Parameters<ExtensionAPI["setModel"]>[0] } | { error: string } => {
+			const registry = ctx?.modelRegistry;
+			if (!registry) return { error: "pi has no session yet" };
+			const slash = model.indexOf("/");
+			const found = slash > 0 ? registry.find(model.slice(0, slash), model.slice(slash + 1)) : undefined;
+			if (!found) return { error: `unknown model ${model}` };
+			if (!registry.hasConfiguredAuth(found)) return { error: `no credentials for provider ${found.provider}` };
+			return { model: found };
+		};
+
+		/** Switches pi to `model` (documented pi.setModel). The effective `<provider>/<id>`, or the error. */
+		const switchModel = async (model: string): Promise<{ model: string } | { error: string }> => {
+			const resolved = resolveModel(model);
+			if ("error" in resolved) return resolved;
+			const name = `${resolved.model.provider}/${resolved.model.id}`;
+			try {
+				if (await pi.setModel(resolved.model)) return { model: name };
+			} catch (e) {
+				return { error: `pi could not switch to ${name}: ${e instanceof Error ? e.message : String(e)}` };
+			}
+			return { error: `pi refused ${name}: no credentials for ${resolved.model.provider}` };
+		};
+
+		const setModel = async (id: string, model: string) => {
+			const resolved = resolveModel(model);
+			if ("error" in resolved) return send({ type: "model_result", id, error: resolved.error });
+			const name = `${resolved.model.provider}/${resolved.model.id}`;
+			if (busy()) {
+				pendingModel = model;
+				return send({ type: "model_result", id, status: "pending", model: name });
+			}
+			const done = switchModel(model);
+			switching = done;
+			const r = await done;
+			send(
+				"error" in r
+					? { type: "model_result", id, error: r.error }
+					: { type: "model_result", id, status: "applied", model: r.model },
+			);
+		};
+
+		/** Makes the held switch, if any; a request that arrives meanwhile replaces it and is made next. */
+		const applyPendingModel = async () => {
+			while (pendingModel) {
+				const model = pendingModel;
+				pendingModel = undefined;
+				const r = await switchModel(model);
+				send("error" in r ? { type: "model_error", model, error: r.error } : { type: "model", model: r.model });
+			}
+		};
 
 		const send = (message: FromExtension) => {
 			for (const c of clients) writeLine(c, message);
@@ -131,13 +194,18 @@ export function createAgentLinkExtension(env: NodeJS.ProcessEnv = process.env) {
 				const message = parseToExtension(raw);
 				if (message?.type === "prompt") {
 					promptId = message.id;
-					// Idle: steer + triggerTurn starts a turn. Busy (the hub waits for idle, so only in a race
-					// with a turn typed in the pane): followUp folds it into the running turn before agent_end,
-					// and that turn's end answers this prompt.
-					pi.sendMessage(
-						{ customType: MESSAGE_TYPE, content: message.text, display: true },
-						running ? { deliverAs: "followUp" } : { triggerTurn: true, deliverAs: "steer" },
+					const text = message.text;
+					void switching.then(() =>
+						// Idle: steer + triggerTurn starts a turn. Busy (the hub waits for idle, so only in a race
+						// with a turn typed in the pane): followUp folds it into the running turn before agent_end,
+						// and that turn's end answers this prompt.
+						pi.sendMessage(
+							{ customType: MESSAGE_TYPE, content: text, display: true },
+							running ? { deliverAs: "followUp" } : { triggerTurn: true, deliverAs: "steer" },
+						),
 					);
+				} else if (message?.type === "set_model") {
+					void setModel(message.id, message.model);
 				} else if (message?.type === "cancel") {
 					if (running) ctx?.abort();
 				}
@@ -223,10 +291,11 @@ export function createAgentLinkExtension(env: NodeJS.ProcessEnv = process.env) {
 			if (last && !lastText) lastText = last.text;
 		});
 		// agent_end can be followed by a retry, a compaction or a queued follow-up; agent_settled is the end.
-		pi.on("agent_settled", (event) => {
+		pi.on("agent_settled", async (event) => {
 			if (!running) return;
 			running = false;
 			asking = false;
+			await applyPendingModel();
 			sendState();
 			send({ type: "turn_end", id: promptId, stopReason: stopReason(lastStop, event.aborted), text: lastText });
 			promptId = null;

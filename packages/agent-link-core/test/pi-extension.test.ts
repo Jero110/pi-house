@@ -214,3 +214,113 @@ test("a pi dialog (ui_prompt) is reported as asking until it ends", async (t) =>
 	client.close();
 	await pi.emit("session_shutdown");
 });
+
+test("set_model while idle: the model is resolved, its auth checked, pi switched, and the effective model answered", async (t) => {
+	const { pi, client } = await started(t);
+	client.send({ type: "set_model", id: "c1", model: "anthropic/claude-sonnet-5-5" });
+	const res = await client.waitFor((l) => l.type === "model_result" && l.id === "c1");
+	assert.deepEqual(res, { type: "model_result", id: "c1", status: "applied", model: "anthropic/claude-sonnet-5-5" });
+	assert.deepEqual(pi.setModels, ["anthropic/claude-sonnet-5-5"]);
+	assert.deepEqual(pi.sent, [], "a model switch never starts a turn");
+	client.close();
+	await pi.emit("session_shutdown");
+});
+
+test("set_model with an unknown model, a model without credentials or a refusing pi errors and switches nothing", async (t) => {
+	const { pi, client } = await started(t);
+	client.send({ type: "set_model", id: "u1", model: "anthropic/claude-nope" });
+	client.send({ type: "set_model", id: "u2", model: "openai/gpt-5.5" });
+	pi.setModelAnswer = false;
+	client.send({ type: "set_model", id: "u3", model: "anthropic/claude-haiku-5-5" });
+	const errors = await Promise.all(
+		["u1", "u2", "u3"].map((id) => client.waitFor((l) => l.type === "model_result" && l.id === id)),
+	);
+	assert.match(String(errors[0]?.error), /unknown model anthropic\/claude-nope/);
+	assert.match(String(errors[1]?.error), /no credentials for provider openai/);
+	assert.match(String(errors[2]?.error), /pi refused anthropic\/claude-haiku-5-5/);
+	assert.equal(
+		errors.some((e) => "status" in e),
+		false,
+	);
+	assert.deepEqual(pi.setModels, []);
+	client.close();
+	await pi.emit("session_shutdown");
+});
+
+test("set_model while a turn runs answers pending, and the switch happens before the turn's idle and end", async (t) => {
+	const { pi, client } = await started(t);
+	client.send({ type: "prompt", id: "m1", text: "work" });
+	await pi.emit("agent_start");
+	client.send({ type: "set_model", id: "b1", model: "anthropic/claude-sonnet-5-5" });
+	const res = await client.waitFor((l) => l.type === "model_result" && l.id === "b1");
+	assert.deepEqual(res, { type: "model_result", id: "b1", status: "pending", model: "anthropic/claude-sonnet-5-5" });
+	await tick();
+	assert.deepEqual(pi.setModels, [], "not while the turn runs");
+
+	// An unknown model is refused at once even while busy: pending is only for a switch that can happen.
+	client.send({ type: "set_model", id: "b2", model: "anthropic/claude-nope" });
+	assert.match(String((await client.waitFor((l) => l.id === "b2")).error), /unknown model/);
+
+	await pi.emit("message_end", { message: assistant("done") });
+	await pi.emit("agent_settled", { aborted: false });
+	assert.deepEqual(pi.setModels, ["anthropic/claude-sonnet-5-5"]);
+	await client.waitFor((l) => l.type === "turn_end");
+	const order = client.lines.map((l) => (l.type === "state" ? l.state : l.type));
+	assert.deepEqual(
+		order.slice(-3),
+		["model", "idle", "turn_end"],
+		"the model is in place before the hub may prompt again",
+	);
+	assert.deepEqual(client.lines.at(-3), { type: "model", model: "anthropic/claude-sonnet-5-5" });
+	client.close();
+	await pi.emit("session_shutdown");
+});
+
+test("a pending switch whose auth is gone at the boundary reports model_error and keeps the model", async (t) => {
+	const { pi, client } = await started(t);
+	await pi.emit("agent_start");
+	client.send({ type: "set_model", id: "e1", model: "anthropic/claude-sonnet-5-5" });
+	await client.waitFor((l) => l.type === "model_result" && l.status === "pending");
+	pi.authed.clear();
+	await pi.emit("agent_settled", { aborted: false });
+	const err = await client.waitFor((l) => l.type === "model_error");
+	assert.equal(err.model, "anthropic/claude-sonnet-5-5");
+	assert.match(String(err.error), /no credentials for provider anthropic/);
+	assert.deepEqual(pi.setModels, []);
+	assert.equal((await client.waitFor((l) => l.type === "turn_end")).type, "turn_end", "the turn still ends");
+	client.close();
+	await pi.emit("session_shutdown");
+});
+
+test("set_model after a prompt arrived but before its turn started is pending, never overlapping the turn", async (t) => {
+	const { pi, client } = await started(t);
+	client.send({ type: "prompt", id: "m9", text: "go" });
+	await tick();
+	client.send({ type: "set_model", id: "r1", model: "anthropic/claude-sonnet-5-5" });
+	assert.equal((await client.waitFor((l) => l.id === "r1")).status, "pending");
+	await pi.emit("agent_start");
+	await pi.emit("agent_settled", { aborted: false });
+	await client.waitFor((l) => l.type === "model");
+	assert.deepEqual(pi.setModels, ["anthropic/claude-sonnet-5-5"]);
+	client.close();
+	await pi.emit("session_shutdown");
+});
+
+test("a prompt that arrives while a switch runs waits for it", async (t) => {
+	const { pi, client } = await started(t);
+	let release = () => {};
+	pi.setModelGate = new Promise<void>((r) => {
+		release = r;
+	});
+	client.send({ type: "set_model", id: "g1", model: "anthropic/claude-sonnet-5-5" });
+	await tick();
+	client.send({ type: "prompt", id: "g2", text: "next" });
+	await tick();
+	assert.deepEqual(pi.sent, [], "the turn waits for the switch");
+	release();
+	await client.waitFor((l) => l.type === "model_result" && l.id === "g1");
+	await tick();
+	assert.equal(pi.sent.length, 1);
+	client.close();
+	await pi.emit("session_shutdown");
+});

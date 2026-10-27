@@ -187,3 +187,50 @@ test("close resolves a pending prompt as cancelled, reports no exit and is idemp
 	);
 	ext.close();
 });
+
+test("setModel sends set_model, resolves on the matching model_result, and fails clearly when the socket goes", async (t) => {
+	const s = spec();
+	const adapter = createPiAdapter(deps());
+	await adapter.launch(s);
+	const ext = fakeExtension(t, join(s.runDir, "pi.sock"));
+	await adapter.connect();
+	const applied = adapter.setModel?.("anthropic/claude-sonnet-5-5");
+	await tick();
+	const asked = ext.received.at(-1);
+	assert.equal(asked?.type, "set_model");
+	assert.equal(asked?.model, "anthropic/claude-sonnet-5-5");
+	ext.send({ type: "model_result", id: "other", status: "applied", model: "x/y" });
+	ext.send({ type: "model_result", id: asked?.id, status: "applied", model: "anthropic/claude-sonnet-5-5" });
+	assert.deepEqual(await applied, { status: "applied", model: "anthropic/claude-sonnet-5-5" });
+
+	const refused = adapter.setModel?.("anthropic/nope");
+	await tick();
+	ext.send({ type: "model_result", id: ext.received.at(-1)?.id, error: "unknown model anthropic/nope" });
+	assert.deepEqual(await refused, { error: "unknown model anthropic/nope" });
+
+	const lost = adapter.setModel?.("anthropic/claude-haiku-5-5");
+	await tick();
+	ext.close();
+	assert.match(String("error" in ((await lost) ?? {}) ? ((await lost) as { error: string }).error : ""), /pi exited/);
+	assert.deepEqual(await adapter.setModel?.("anthropic/claude-haiku-5-5"), { error: "pi adapter: not connected" });
+	await adapter.close();
+});
+
+test("model and model_error from the extension become updates", async (t) => {
+	const s = spec();
+	const adapter = createPiAdapter(deps());
+	await adapter.launch(s);
+	const ext = fakeExtension(t, join(s.runDir, "pi.sock"), "busy");
+	const updates: SessionUpdate[] = [];
+	adapter.onUpdate((u) => updates.push(u));
+	await adapter.connect();
+	ext.send({ type: "model", model: "anthropic/claude-sonnet-5-5" });
+	ext.send({ type: "model_error", model: "anthropic/gone", error: "no credentials for provider anthropic" });
+	await tick();
+	assert.deepEqual(updates.slice(-2), [
+		{ kind: "model", model: "anthropic/claude-sonnet-5-5" },
+		{ kind: "model_error", model: "anthropic/gone", error: "no credentials for provider anthropic" },
+	]);
+	await adapter.close();
+	ext.close();
+});

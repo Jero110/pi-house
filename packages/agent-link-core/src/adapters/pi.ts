@@ -14,6 +14,7 @@ import type {
 	PromptRequest,
 	PromptResponse,
 	SessionUpdate,
+	SetModelResult,
 } from "../types.ts";
 
 /** Absolute path of the extension pi loads. */
@@ -43,6 +44,9 @@ export function createPiAdapter(deps: AdapterDeps, options: PiAdapterOptions = {
 	let state: "idle" | "busy" | "asking" | undefined;
 	let pending: { id: string; resolve: (r: PromptResponse) => void } | undefined;
 	let closed = false;
+	/** set_model requests waiting for their model_result. */
+	const modelWaits = new Map<string, (r: SetModelResult) => void>();
+	let modelSeq = 0;
 
 	const emit = (u: SessionUpdate) => {
 		for (const l of listeners) l(u);
@@ -58,6 +62,8 @@ export function createPiAdapter(deps: AdapterDeps, options: PiAdapterOptions = {
 		closed = true;
 		deps.log("pi_socket_closed");
 		settle({ stopReason: "error", text: "pi exited before the turn ended" });
+		for (const resolve of modelWaits.values()) resolve({ error: "pi exited before it answered the model switch" });
+		modelWaits.clear();
 		emit({ kind: "exited", detail: "the pi extension's socket closed" });
 	};
 
@@ -106,6 +112,14 @@ export function createPiAdapter(deps: AdapterDeps, options: PiAdapterOptions = {
 						emit({ kind: "agent_message", text: m.text });
 					} else if (m.type === "tool_call") {
 						emit({ kind: "tool_call", title: m.title });
+					} else if (m.type === "model_result") {
+						const wait = modelWaits.get(m.id);
+						modelWaits.delete(m.id);
+						wait?.("error" in m ? { error: m.error } : { status: m.status, model: m.model });
+					} else if (m.type === "model") {
+						emit({ kind: "model", model: m.model });
+					} else if (m.type === "model_error") {
+						emit({ kind: "model_error", model: m.model, error: m.error });
 					} else if (m.type === "session") {
 						emit({ kind: "session", sessionId: m.sessionId, transcript: m.file });
 					} else if (pending && m.id === pending.id) {
@@ -138,6 +152,18 @@ export function createPiAdapter(deps: AdapterDeps, options: PiAdapterOptions = {
 			return !!socket && !closed && !pending && state === "idle";
 		},
 
+		/** pi's documented pi.setModel runs inside the extension; it resolves the model, checks auth and defers a busy turn. */
+		setModel(model: string): Promise<SetModelResult> {
+			if (!socket || closed) return Promise.resolve({ error: "pi adapter: not connected" });
+			const s = socket;
+			const id = `model-${++modelSeq}`;
+			return new Promise((resolve) => {
+				modelWaits.set(id, resolve);
+				deps.log("set_model", { id, model });
+				writeLine(s, { type: "set_model", id, model });
+			});
+		},
+
 		async cancel(): Promise<void> {
 			if (socket && !closed) writeLine(socket, { type: "cancel" });
 		},
@@ -146,6 +172,8 @@ export function createPiAdapter(deps: AdapterDeps, options: PiAdapterOptions = {
 			if (closed) return;
 			closed = true;
 			settle({ stopReason: "cancelled", text: "" });
+			for (const resolve of modelWaits.values()) resolve({ error: "the agent was closed" });
+			modelWaits.clear();
 			socket?.destroy();
 		},
 
