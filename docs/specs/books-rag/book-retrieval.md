@@ -1,5 +1,7 @@
 # Spec: book-retrieval
 
+> **Amended 2026-10-27 (user-authorized):** passage text is hosted in Pinecone metadata, figures and the catalog in a private S3-compatible bucket, originals optional after ingestion, single writer and read-only extra machines. Where this file says text/figures stay local or Pinecone gets vectors only, the plan's hosted-corpus amendment governs.
+
 **Status:** Approved by the user on 2026-10-27; PDF-only first-version amendment explicitly authorized on 2026-10-27. **Depends on:** book-corpus.
 Shared objective, stack, commands, style, testing rules, assumptions, and boundaries: [common.md](common.md).
 

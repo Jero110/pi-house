@@ -1,5 +1,7 @@
 # Capability Map: Traceable Books RAG
 
+> **Amended 2026-10-27 (user-authorized):** passage text is hosted in Pinecone metadata, figures and the catalog in a private S3-compatible bucket, originals optional after ingestion, single writer and read-only extra machines. Where this file says text/figures stay local or Pinecone gets vectors only, the plan's hosted-corpus amendment governs.
+
 Status: module boundaries and specifications approved by the user on 2026-10-27. PDF-only first-version scope explicitly authorized by the user on 2026-10-27; EPUB deferred. T1 PDF-only research is complete; T2 requires executor verification.
 
 | Module id | Responsibility | Depends on | Specification |

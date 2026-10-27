@@ -10,7 +10,7 @@
 Provide a personal library of approximately 20 PDF books to pihouse and other MCP clients. EPUB ingestion, archive/spine locators and assets are deferred by explicit user authorization (2026-10-27); reject non-PDF input explicitly. This format reduction changes no other privacy, provenance, extraction, rendering, retrieval, safety or evaluation gate. Retrieve only relevant passages, preserve verifiable source locations, and attach associated figures on demand. If retrieved evidence does not support the question, the agent must say it did not find support in the library rather than fabricate an answer or citation. This is a statement about the search, not proof that the entire library lacks the answer.
 
 - Extraction, chunking, and embeddings run locally without generative-model calls. They consume local compute, storage, and possibly model-download bandwidth, not the agent's inference quota.
-- Pinecone stores vectors and minimal indexing metadata. Full originals, extracted text, captions, and figures stay local.
+- AMENDED 2026-10-27 by explicit user authorization (see the plan's hosted-corpus amendment): Pinecone stores vectors plus passage text and citation metadata; figures and a catalog manifest live in a private S3-compatible bucket (Supabase Storage); original PDFs may be deleted after ingestion. Never local paths or secrets.
 - The existing agent translates/reformulates Spanish questions into the book language when useful; the MCP server calls no translation LLM. Translation uses the agent's normal inference budget. Preserve original technical identifiers and queries where useful.
 - Retrieved passages and requested images may be sent to the agent provider. Vectors and metadata sent to Pinecone are not inherently private or anonymous.
 - Never purchase, upgrade, or automatically provision paid resources. If the intended configuration requires payment or exceeds a verified free allowance, stop and report the constraint. Do not claim a free tier guarantees zero charges. Use only an explicitly configured index, with documented limits.
@@ -94,7 +94,7 @@ Mandatory success conditions:
 
 - Always: preserve originals; record extraction/model versions; distinguish unavailable service, incomplete extraction, and insufficient evidence; run checks/tests; keep secrets and source books out of git; label external content as untrusted data.
 - Ask first / stop and report when unattended: paid resources, dependency choices beyond approved research constraints, large model downloads, materially changed privacy boundaries, or replacing Pinecone. Never silently route to a cloud embedding service.
-- Never: patch pi, modify unrelated work, upload passage text as Pinecone metadata, fabricate author/edition/page fields, claim RAG eliminates hallucinations, or interpret a service error as no matching content.
+- Never: patch pi, modify unrelated work, upload secrets or local paths to hosted services, fabricate author/edition/page fields, claim RAG eliminates hallucinations, or interpret a service error as no matching content.
 
 ## Approval gate
 

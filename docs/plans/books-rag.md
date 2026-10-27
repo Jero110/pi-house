@@ -14,10 +14,27 @@ The user explicitly permitted a PDF-only first version ("si queires slo para pdf
 
 The user's subsequent clarification requires the **full PDF-only pipeline and T1–T11**, not an extraction-only spike. Mandatory offline end-to-end tests must cover synthetic PDF ingest → structural chunks → index via fake local-embedding/Pinecone endpoints → search → verified read → next-page figure, plus unrelated-query abstention and failure/privacy/output-budget cases. The supplied PDF pages 169–174 local check remains required when the input is available. Real local-model/Pinecone/client smoke checks run only with already available compatible prerequisites and verified allowed resources; otherwise report them pending. No provisioning, downloads, payments or original/text uploads are authorized. EPUB implementation and EPUB-specific testing are deferred; generic unsupported-format rejection remains required without building an EPUB parser or fixture suite.
 
+## Authorized hosted-corpus amendment (2026-10-27)
+
+The user explicitly authorized moving the corpus to their own hosted services so the library works from any of their computers without keeping or re-downloading the books ("texto en Pinecone, figuras en S3/Supabase y los PDFs se pueden borrar tras la ingesta", confirmed with "haz lo que dijimos"). This supersedes, and only supersedes, these earlier decisions: Pinecone receiving vectors only, originals/text/figures staying local, lazy on-demand rendering, and the out-of-scope exclusion of hosted text/figures and cross-machine use.
+
+- **Pinecone (text):** each passage record carries its vector plus the passage text needed to answer and cite: original and normalized text, heading path, PDF page/span locators, source/version/hash identity and figure IDs, within Pinecone metadata limits (40 KB per record; types restricted, no nulls). Never local paths or secrets. The dedicated configured namespace remains mandatory.
+- **Object storage (figures and catalog):** figures are rendered once during ingestion (verified crop or explicitly labeled full page, <=1600 px longest side, <=2 MiB) and uploaded to a **private** bucket through the **S3-compatible API**, signed with SigV4 using Node built-ins (no SDK dependency). Supabase Storage's S3 endpoint is the target; the same code must work with any S3-compatible store. A small versioned catalog/manifest object (books, versions, extraction coverage, index generation) lives in the same bucket. Bucket must be private; never public URLs.
+- **Originals are optional after ingestion.** Citations are verified against the source hash recorded at ingestion plus hosted-record consistency (same version/hash/generation across Pinecone and the manifest). If the original is still present locally it may additionally be re-hashed. Report honestly that deleted originals cannot be re-verified or re-rendered beyond what was stored.
+- **Single writer:** ingestion/indexing runs on one machine at a time; other machines are read-only clients. Writes must be generation-based and never mix versions; a reader seeing an incomplete generation reports `incomplete_corpus`.
+- **Every client machine** still needs the local embedding runtime with the identical pinned model; no cloud embeddings.
+- **Local store (T3)** remains the ingestion working store and optional cache; it is not required for queries on a second machine.
+- **Lexical candidates:** a local FTS index is optional (cache-only). Retrieval quality without it must be measured in T8, not assumed.
+- **Privacy:** book text now resides in Pinecone and figures in the user's object storage, both third-party services. Retrieved text/figures may still reach the agent provider. Documentation must state this plainly.
+- **Credentials:** read from environment or a gitignored `.env`: `PINE_CONE_API`, `S3_ENDPOINT`, `S3_REGION`, `S3_BUCKET`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`. A Supabase personal access token (`sbp_`, Management API) must **not** be used: it can create/modify projects, which is forbidden provisioning. Never log or output secrets.
+- Unchanged: no payments, no automatic creation of indexes/buckets/projects (operator creates them), no model downloads, no OCR/LLM ingestion, synthetic tests with fake Pinecone and fake S3 HTTP servers only, bounded outputs, explicit statuses, PDF-only.
+
+Task impact: T5 renders figures at ingestion; T6 adds `packages/books-rag/src/objects.ts` (S3-compatible SigV4 client) with `test/objects.test.ts` and Pinecone text metadata; T7 resolves evidence from hosted records with manifest/generation checks; T9/T10 must support a read-only second machine; T10 integration covers ingest → upload (fake Pinecone + fake S3) → delete local original → search → read → next-page figure on a fresh empty local store.
+
 ## Decisions (binding)
 
 - Approximately 20 PDF books for this version; EPUB deferred by explicit user authorization. Text retrieval, not visual similarity search.
-- Extract, chunk, embed, and retain originals/text/figures locally without an ingestion LLM. Pinecone receives vectors and minimal metadata only, never passages, captions, image bytes, local paths, or secrets.
+- Extract, chunk, and embed locally without an ingestion LLM. SUPERSEDED IN PART by the hosted-corpus amendment above: passage text goes to Pinecone metadata and figures to private S3-compatible storage; never local paths or secrets.
 - The existing client agent may translate/reformulate queries into English; no separate translation model or server-side generation.
 - Retrieved text and requested images may reach the agent provider. This privacy boundary must be explicit.
 - Preserve source hashes, edition/author provenance, structural paths, source spans, and unknown fields. PDF positions are explicitly PDF pages, never assumed printed pagination.
@@ -286,7 +303,7 @@ Current baseline before plan execution: specification-only changes passed `npm r
 
 - EPUB implementation, EPUB-specific testing, archive/spine/anchor locators and EPUB assets: deferred by explicit user authorization for the PDF-only first version. Reject rather than partially ingest unsupported formats; this does not remove PDF path/asset safety checks.
 - OCR/scanned-book pipeline, vision embeddings, visual similarity queries, LLM summaries/descriptions during ingestion, GraphRAG, RAPTOR, or a wiki rewrite.
-- Hosted original text/figures, remote multiuser access/authentication, cross-machine corpus synchronization, and integrated PDF/EPUB viewing.
+- Hosting original PDF files, remote multiuser access/authentication, and integrated PDF/EPUB viewing. (Hosted extracted text/figures and single-user cross-machine use are now in scope per the hosted-corpus amendment.)
 - Automatic Pinecone account/resource creation, plan upgrades, payments, cloud embedding fallback, and large model downloads.
 - Production deployment, public sharing of books, licensing guarantees, DRM removal, or subscription scraping.
 - Reworking workflow memory, changing pi internals, UI/statusbar changes, skill catalog changes, or unrelated self-learning work.
