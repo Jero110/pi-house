@@ -422,8 +422,11 @@ function outcome(db: DatabaseSync, proposal: Proposal): CommandResult {
 	};
 }
 
-/** A version prefix as typed: hex only, so a stray word is usage rather than a prefix that matches nothing. */
-const VERSION_PREFIX = /^[0-9a-f]{1,64}$/i;
+/**
+ * A version prefix as typed: hex only, at least 4 digits. A 1-character prefix could match another proposal's version by
+ * accident, so a short or stray word is usage rather than an approval.
+ */
+const VERSION_PREFIX = /^[0-9a-f]{4,64}$/i;
 
 /** What changed since creation, in terms a person can check: the evidence count and how often it was revised. */
 function revisedSummary(proposal: Proposal): string {

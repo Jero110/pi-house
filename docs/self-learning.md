@@ -12,7 +12,7 @@ This is the operational guide to the implemented workflow. Module contracts live
 | `/workflow self-learning` | Prepares missing digests, scans and reviews a batch in separate workers. Does not apply proposals. |
 | `/workflow ask <question>` | Selectively consults retained metrics, digests, proposals, architecture and skills. |
 | `/workflow proposals` | Lists proposal status, scope, short version (first 8 hex) and next action. |
-| `/workflow approve <id> [version]` / `reject <id> [reason]` | Approves and applies the version shown by `proposals`, passed as its version prefix. Without a version, approves only a proposal never revised since creation and names that version; a revised proposal refuses. Re-running approve on an approved proposal needs no version. Records rejection. |
+| `/workflow approve <id> [version]` / `reject <id> [reason]` | Approves and applies the version shown by `proposals`, passed as its version prefix (at least 4 hex characters). Without a version, approves only a proposal never revised since creation and names that version; a revised proposal refuses. Re-running approve on an approved proposal needs no version. Records rejection. |
 
 `/workflow review`, `/keeper`, and `pih keeper` are retired; they return replacement guidance and do not start old jobs. Digest/review work requires a pihouse session with agent-link available. The caller receives concise status and artifact paths, not generated full reports. A run is eligible for cleanup only when participants and delivery state are verifiably quiescent and the evidence fingerprint remains stable. Unknown or live runs stay queued. A digest is a lossy description, not a transcript replacement.
 

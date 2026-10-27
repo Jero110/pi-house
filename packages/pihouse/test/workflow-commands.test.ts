@@ -525,13 +525,15 @@ test("approve without a version approves a proposal that never changed and names
 	}
 });
 
-test("approve with a version that is not hex prints usage and changes nothing", async () => {
+test("approve with a version that is not hex, or shorter than 4 digits, prints usage and changes nothing", async () => {
 	const f = fixture();
 	try {
 		openMemoryProposal(f.memory, "p-usage", ["r1"]);
-		const result = await proposalCommand("approve", ["p-usage", "zz"], { memory: f.memory, repoRoot: f.repoRoot });
-		assert.equal(result.level, "warning");
-		assert.equal(result.text, "usage: /workflow approve <id> [version]");
+		for (const version of ["zz", "abc", "a"]) {
+			const result = await proposalCommand("approve", ["p-usage", version], { memory: f.memory, repoRoot: f.repoRoot });
+			assert.equal(result.level, "warning");
+			assert.equal(result.text, "usage: /workflow approve <id> [version]");
+		}
 		const check = openStore(f.memory);
 		try {
 			assert.equal(getProposal(check.db, "p-usage").state, "open");
