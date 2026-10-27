@@ -3,7 +3,16 @@
 
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtempSync, readdirSync, readFileSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import {
+	mkdirSync,
+	mkdtempSync,
+	readdirSync,
+	readFileSync,
+	rmSync,
+	statSync,
+	utimesSync,
+	writeFileSync,
+} from "node:fs";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -19,10 +28,13 @@ import {
 	chooseRoute,
 	type LoadedProfiles,
 	loadRoutingProfiles,
+	MAX_DECISION_LINE,
 	type ModelRegistry,
 	type PauseNotice,
 	parseRoutingProfiles,
 	readCheckpoint,
+	readRoutingDecisions,
+	routingDecisionsPath,
 	routingProfilesPath,
 } from "../src/workflow/routing-profiles.ts";
 
@@ -490,4 +502,50 @@ test("the configured entry reads routing-profiles.json from PIHOUSE_HOME and rou
 	if (choice.status !== "routed" || choice.result.status !== "selected") assert.fail("expected a selected candidate");
 	assert.equal(choice.profileHash, createHash("sha256").update(text).digest("hex"));
 	assert.equal(choice.result.candidate.model, "gpt-6-luna");
+});
+
+// The decision journal is read after a crash or an edit, so one bad line must never hide the decisions around it.
+test("a corrupt journal line is skipped and counted; the decisions around it are kept", () => {
+	const home = mkdtempSync(join(tmpdir(), "pih-journal-"));
+	try {
+		const good = {
+			time: 1,
+			profile: "build",
+			task: "T1",
+			agent: "w-1",
+			model: "openai-codex/gpt-6-luna",
+			account: "openai",
+			billing: "subscription",
+			reason: "available",
+			failure: null,
+			checkpoint: null,
+		};
+		const lines = [
+			JSON.stringify(good),
+			"{ not json",
+			JSON.stringify({ ...good, failure: "bogus" }),
+			JSON.stringify({ ...good, time: "soon" }),
+			"x".repeat(MAX_DECISION_LINE + 1),
+			JSON.stringify({ ...good, agent: "w-2", model: null, account: null, billing: null }),
+		];
+		mkdirSync(join(home, "routing"), { recursive: true });
+		writeFileSync(routingDecisionsPath(home), `${lines.join("\n")}\n`);
+		const read = readRoutingDecisions(home);
+		assert.equal(read.skipped, 4);
+		assert.deepEqual(
+			read.decisions.map((d) => d.agent),
+			["w-1", "w-2"],
+		);
+	} finally {
+		rmSync(home, { recursive: true, force: true });
+	}
+});
+
+test("a missing journal is an empty history, not an error", () => {
+	const home = mkdtempSync(join(tmpdir(), "pih-journal-empty-"));
+	try {
+		assert.deepEqual(readRoutingDecisions(home), { decisions: [], skipped: 0 });
+	} finally {
+		rmSync(home, { recursive: true, force: true });
+	}
 });

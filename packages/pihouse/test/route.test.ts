@@ -2,7 +2,7 @@
 // usage observations; no model, provider or network is touched. The real pi registry is only built, never asked for a
 // model.
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -11,7 +11,7 @@ import { main } from "../src/cli.ts";
 import { SKILLS_DIR } from "../src/paths.ts";
 import { openPiRegistry, ROUTE_EXIT, type RouteRegistry, runRoute } from "../src/route.ts";
 import type { Observation } from "../src/workflow/routing.ts";
-import { ROUTING_PROFILES_FILE, readCheckpoint } from "../src/workflow/routing-profiles.ts";
+import { ROUTING_PROFILES_FILE, readCheckpoint, readRoutingDecisions } from "../src/workflow/routing-profiles.ts";
 
 const NOW = Date.parse("2026-10-27T12:00:00Z");
 
@@ -106,6 +106,154 @@ async function run(input: RunInput): Promise<RunResult> {
 
 const profilesFile = (...profiles: unknown[]) => JSON.stringify({ version: 1, profiles });
 
+test("route decisions persist agent, task, selected model, account and reason", async () => {
+	const r = await run({
+		args: ["build", "--agent", "w-2", "--task", "T1"],
+		raw: profilesFile(build),
+		observations: [observation("openai", "available")],
+	});
+	try {
+		const records = readFileSync(join(r.home, "routing", "decisions.jsonl"), "utf8")
+			.trim()
+			.split("\n");
+		assert.equal(records.length, 1);
+		assert.deepEqual(JSON.parse(records[0] ?? "{}"), {
+			time: NOW,
+			profile: "build",
+			task: "T1",
+			agent: "w-2",
+			model: "openai-codex/gpt-6-luna",
+			account: "openai",
+			billing: "subscription",
+			reason: "available (usage endpoint, observed 30s ago)",
+			failure: null,
+			checkpoint: null,
+		});
+	} finally {
+		r.cleanup();
+	}
+});
+
+test("a paused decision records no model, the checkpoint it wrote, the failure it answered and every reason", async () => {
+	const r = await run({
+		args: ["build", "--agent", "w-1", "--task", "T1", "--current", "openai-codex/gpt-6-luna", "--failure", "exhausted"],
+		raw: profilesFile(build),
+		observations: [observation("openai", "exhausted"), observation("claude", "exhausted")],
+	});
+	try {
+		assert.equal(r.code, ROUTE_EXIT.paused);
+		const checkpoint = r.out.find((l) => l.startsWith("checkpoint: "))?.slice("checkpoint: ".length);
+		assert.deepEqual(readRoutingDecisions(r.home).decisions, [
+			{
+				time: NOW,
+				profile: "build",
+				task: "T1",
+				agent: "w-1",
+				model: null,
+				account: null,
+				billing: null,
+				reason: "openai-codex/gpt-6-luna on openai: exhausted; anthropic/claude-sonnet-5-5 on claude: exhausted",
+				failure: "exhausted",
+				checkpoint,
+			},
+		]);
+	} finally {
+		r.cleanup();
+	}
+});
+
+test("a profile the file does not name is recorded as nothing authorized, with the agent it was for", async () => {
+	const r = await run({
+		args: ["review", "--agent", "w-3"],
+		raw: profilesFile(build),
+		observations: [observation("openai", "available")],
+	});
+	try {
+		assert.equal(r.code, ROUTE_EXIT.unauthorized);
+		const [record] = readRoutingDecisions(r.home).decisions;
+		assert.equal(record?.agent, "w-3");
+		assert.equal(record?.model, null);
+		assert.match(record?.reason ?? "", /profile "review" is not in the routing profiles file/);
+	} finally {
+		r.cleanup();
+	}
+});
+
+test("decisions are appended, never rewritten: a replacement adds its own line with its account and failure", async () => {
+	const home = mkdtempSync(join(tmpdir(), "pih-route-append-"));
+	const route = (args: string[], observations: Observation[]) =>
+		runRoute(args, {
+			env: { PIHOUSE_HOME: home },
+			home,
+			now: NOW,
+			out: () => {},
+			err: () => {},
+			openRegistry: async () => fakeRegistry(BOTH_MODELS),
+			observe: async () => observations.map((o) => ({ account: o.account, observation: o })),
+		});
+	try {
+		writeFileSync(join(home, ROUTING_PROFILES_FILE), profilesFile(build));
+		assert.equal(await route(["build", "--agent", "w-1", "--task", "T1"], [observation("openai", "available")]), 0);
+		assert.equal(
+			await route(
+				["build", "--agent", "w-2", "--task", "T1", "--current", "openai-codex/gpt-6-luna", "--failure", "exhausted"],
+				[observation("openai", "exhausted"), observation("claude", "available")],
+			),
+			0,
+		);
+		const decisions = readRoutingDecisions(home);
+		assert.equal(decisions.skipped, 0);
+		assert.deepEqual(
+			decisions.decisions.map((d) => [d.agent, d.model, d.account, d.failure]),
+			[
+				["w-1", "openai-codex/gpt-6-luna", "openai", null],
+				["w-2", "anthropic/claude-sonnet-5-5", "claude", "exhausted"],
+			],
+		);
+	} finally {
+		rmSync(home, { recursive: true, force: true });
+	}
+});
+
+test("the routing journal is private: its folder is 0700 and its file 0600", async () => {
+	const r = await run({
+		args: ["build", "--agent", "w-1"],
+		raw: profilesFile(build),
+		observations: [observation("openai", "available")],
+	});
+	try {
+		assert.equal(statSync(join(r.home, "routing")).mode & 0o777, 0o700);
+		assert.equal(statSync(join(r.home, "routing", "decisions.jsonl")).mode & 0o777, 0o600);
+	} finally {
+		r.cleanup();
+	}
+});
+
+test("a journal that cannot be written prints nothing and exits 1, so no model is handed out unrecorded", async () => {
+	const home = mkdtempSync(join(tmpdir(), "pih-route-blocked-"));
+	const out: string[] = [];
+	const err: string[] = [];
+	try {
+		writeFileSync(join(home, ROUTING_PROFILES_FILE), profilesFile(build));
+		// The journal folder is a plain file, so the decision cannot be appended.
+		writeFileSync(join(home, "routing"), "not a folder");
+		const code = await runRoute(["build", "--agent", "w-1"], {
+			env: { PIHOUSE_HOME: home },
+			home,
+			now: NOW,
+			out: (line) => out.push(line),
+			err: (line) => err.push(line),
+			openRegistry: async () => fakeRegistry(BOTH_MODELS),
+			observe: async () => [{ account: "openai", observation: observation("openai", "available") }],
+		});
+		assert.equal(code, ROUTE_EXIT.error);
+		assert.deepEqual(out, []);
+		assert.match(err[0] ?? "", /could not record the decision/);
+	} finally {
+		rmSync(home, { recursive: true, force: true });
+	}
+});
+
 test("a fresh available first candidate is selected with its exact model, profile, account and reason", async () => {
 	const r = await run({
 		args: ["build"],
@@ -117,7 +265,8 @@ test("a fresh available first candidate is selected with its exact model, profil
 		assert.deepEqual(r.out.slice(0, 3), ["selected: openai-codex/gpt-6-luna", "profile: build", "account: openai"]);
 		assert.match(r.out[3] ?? "", /^reason: available \(usage endpoint, observed 30s ago\)$/);
 		assert.deepEqual(r.err, []);
-		assert.equal(existsSync(join(r.home, "routing")), false, "a selection writes no checkpoint");
+		// A selection writes its decision to the journal, but never a pause checkpoint.
+		assert.equal(existsSync(join(r.home, "routing", "paused")), false, "a selection writes no checkpoint");
 	} finally {
 		r.cleanup();
 	}
@@ -302,6 +451,7 @@ test("usage mistakes exit 2 and name the problem; nothing is chosen", async () =
 		},
 		{ args: ["build", "--current", "openai-codex/gpt-6-luna", "--failure", "bogus"], reason: /--failure expects/ },
 		{ args: ["build", "--task"], reason: /--task needs a value/ },
+		{ args: ["build", "--agent", "../w-1"], reason: /--agent expects letters/ },
 		{ args: ["build", "--model", "x"], reason: /unknown option --model/ },
 	];
 	for (const c of cases) {

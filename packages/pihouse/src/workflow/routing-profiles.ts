@@ -9,6 +9,7 @@
 // A missing file means no routing authority at all: the fixed model stays.
 import { createHash } from "node:crypto";
 import {
+	appendFileSync,
 	closeSync,
 	fsyncSync,
 	mkdirSync,
@@ -347,6 +348,117 @@ export function readCheckpoint(
 }
 
 const PAUSED_DIR = join("routing", "paused");
+
+// Problem: a worker's model is chosen by one command and spent by another, and nothing kept which account and reason
+// chose it. Example: the executor spawned w-2 on the second account after a quota error; a week later no report could
+// say whether that account was the authorized alternative or a guess.
+// Solution: every decision `pih route` prints is appended as one JSON line, and reports read the latest line per agent.
+export const ROUTING_DECISIONS_FILE = join("routing", "decisions.jsonl");
+/** The longest line the journal writes or reads. A longer line is counted as skipped and never parsed. */
+export const MAX_DECISION_LINE = 4096;
+const MAX_DECISION_REASON = 500;
+const FAILURE_KINDS: readonly Failure["kind"][] = ["exhausted", "auth", "network", "rate"];
+
+/** One decision as `pih route` printed it. Nothing secret or prompt-like is stored: ids, a model id, an account and a reason. */
+export interface RoutingDecision {
+	/** Epoch milliseconds, when the decision was made: before the spawn it authorizes. */
+	time: number;
+	profile: string;
+	task: string;
+	/** The agent-link name of the worker the decision is for, or null when none was given. */
+	agent: string | null;
+	/** The exact provider/model that was selected, or null when nothing was. */
+	model: string | null;
+	account: string | null;
+	billing: string | null;
+	reason: string;
+	/** The failure the decision answered (`--current` with `--failure`), or null. */
+	failure: Failure["kind"] | null;
+	/** The checkpoint a pause wrote, or null. */
+	checkpoint: string | null;
+}
+
+export function routingDecisionsPath(home: string): string {
+	return join(home, ROUTING_DECISIONS_FILE);
+}
+
+/**
+ * Appends one decision. The journal is history, never rewritten: a later route cannot erase an earlier account. The
+ * directory is created private (0700); the file is created 0600.
+ */
+export function appendRoutingDecision(home: string, decision: RoutingDecision): void {
+	const line = JSON.stringify({ ...decision, reason: decision.reason.slice(0, MAX_DECISION_REASON) });
+	if (Buffer.byteLength(line) + 1 > MAX_DECISION_LINE) throw new Error("routing decision is too long for the journal");
+	const file = routingDecisionsPath(home);
+	mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
+	appendFileSync(file, `${line}\n`, { mode: 0o600 });
+}
+
+export interface RoutingDecisions {
+	decisions: RoutingDecision[];
+	/** Lines that were too long, not JSON, or not a decision. They are counted, never fatal. */
+	skipped: number;
+}
+
+/**
+ * Reads the journal in file order. A missing file is an empty history. A corrupt line is skipped and counted, so one
+ * bad line never hides the decisions around it.
+ */
+export function readRoutingDecisions(home: string): RoutingDecisions {
+	let text: string;
+	try {
+		text = readFileSync(routingDecisionsPath(home), "utf8");
+	} catch {
+		return { decisions: [], skipped: 0 };
+	}
+	const decisions: RoutingDecision[] = [];
+	let skipped = 0;
+	for (const line of text.split("\n")) {
+		if (line === "") continue;
+		const decision = line.length <= MAX_DECISION_LINE ? decisionOf(line) : undefined;
+		if (decision) decisions.push(decision);
+		else skipped++;
+	}
+	return { decisions, skipped };
+}
+
+function decisionOf(line: string): RoutingDecision | undefined {
+	let data: unknown;
+	try {
+		data = JSON.parse(line);
+	} catch {
+		return undefined;
+	}
+	if (typeof data !== "object" || data === null || Array.isArray(data)) return undefined;
+	const o = data as Obj;
+	const nullableText = (v: unknown): boolean => v === null || typeof v === "string";
+	if (
+		typeof o.time !== "number" ||
+		!Number.isFinite(o.time) ||
+		typeof o.profile !== "string" ||
+		typeof o.task !== "string" ||
+		!nullableText(o.agent) ||
+		!nullableText(o.model) ||
+		!nullableText(o.account) ||
+		!nullableText(o.billing) ||
+		typeof o.reason !== "string" ||
+		!(o.failure === null || FAILURE_KINDS.some((kind) => kind === o.failure)) ||
+		!nullableText(o.checkpoint)
+	)
+		return undefined;
+	return {
+		time: o.time,
+		profile: o.profile,
+		task: o.task,
+		agent: o.agent as string | null,
+		model: o.model as string | null,
+		account: o.account as string | null,
+		billing: o.billing as string | null,
+		reason: o.reason,
+		failure: o.failure as Failure["kind"] | null,
+		checkpoint: o.checkpoint as string | null,
+	};
+}
 
 function sha256(text: string): string {
 	return createHash("sha256").update(text).digest("hex");
