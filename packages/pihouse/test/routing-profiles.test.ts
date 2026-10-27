@@ -2,10 +2,13 @@
 // or network is touched; a profile only names what the user authorized.
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { createServer, type Server } from "node:http";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
+import { MAX_AGE_MS, observeAccounts } from "../src/account-usage.ts";
 import type { Observation, Profile } from "../src/workflow/routing.ts";
 import {
 	type Choice,
@@ -323,4 +326,134 @@ test("a selected or fixed choice pauses nothing and writes nothing", () => {
 	});
 	assert.deepEqual(readdirSync(home), []);
 	assert.equal(notices.length, 0);
+});
+
+// End to end on fake sources: a Claude rate-limit file, response headers and a fake usage endpoint (HTTP answers are
+// injected by the test). No provider or model is ever called.
+function claudeFull(now: number): string {
+	const dir = mkdtempSync(join(tmpdir(), "pihouse-claude-"));
+	const path = join(dir, "s1.json");
+	writeFileSync(path, JSON.stringify({ used_percentage: 100, resets_at: now / 1000 + 7200 }));
+	utimesSync(path, now / 1000, now / 1000);
+	return dir;
+}
+
+async function fakeUsage(status: number): Promise<{ url: string; hits: () => number; close: () => void }> {
+	let hits = 0;
+	const server: Server = createServer((_req, res) => {
+		hits++;
+		res.statusCode = status;
+		res.end("{}");
+	});
+	await new Promise<void>((ok) => server.listen(0, "127.0.0.1", ok));
+	const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/usage`;
+	return { url, hits: () => hits, close: () => server.close() };
+}
+
+const claudeProfile = (...candidates: unknown[]) => ({
+	...codingRaw,
+	candidates,
+});
+const sonnet = {
+	harness: "pihouse",
+	model: "anthropic/claude-sonnet-5-5",
+	account: "claude",
+	billing: "subscription",
+	capabilities: ["code"],
+};
+
+test("an exhausted account pauses with a checkpoint; the authorized alternative is chosen when it has room", async () => {
+	const claudeDir = claudeFull(NOW);
+	const headers = { openai: { at: NOW, windows: [{ label: "5h", percent: 10, resetsAt: NOW + 3_600_000 }] } };
+	const { registry } = fakeRegistry([
+		{ provider: "anthropic", id: "claude-sonnet-5-5", authed: true },
+		{ provider: "openai-codex", id: "gpt-6-luna", authed: true },
+	]);
+	const sources = { now: NOW, claudeDir, headers, providers: ["anthropic", "openai-codex"] };
+	const observations = (await observeAccounts(sources)).flatMap((o) => (o.observation ? [o.observation] : []));
+	const luna = {
+		harness: "pihouse",
+		model: "openai-codex/gpt-6-luna",
+		account: "openai",
+		billing: "subscription",
+		capabilities: ["code"],
+	};
+
+	const both = chooseRoute({
+		loaded: loadedWith(parsedProfiles(claudeProfile(sonnet, luna))),
+		profileId: "coding",
+		registry,
+		fixed: FIXED,
+		observations,
+		now: NOW,
+		maxAgeMs: MAX_AGE_MS,
+	});
+	assert.equal(
+		both.status === "routed" && both.result.status === "selected" && both.result.candidate.model,
+		"gpt-6-luna",
+	);
+
+	const onlyClaude = chooseRoute({
+		loaded: loadedWith(parsedProfiles(claudeProfile(sonnet))),
+		profileId: "coding",
+		registry,
+		fixed: FIXED,
+		observations,
+		now: NOW,
+		maxAgeMs: MAX_AGE_MS,
+	});
+	const home = tempHome();
+	const notices: PauseNotice[] = [];
+	const outcome = checkpointPause({
+		home,
+		taskId: "task-9",
+		choice: onlyClaude,
+		now: NOW,
+		notify: (n) => notices.push(n),
+	});
+	assert.equal(outcome.status, "checkpointed");
+	assert.deepEqual(notices[0]?.reasons, ["anthropic/claude-sonnet-5-5 on claude: exhausted"]);
+});
+
+test("a rate-limited usage endpoint is a rate pause, not exhaustion, and writes the same checkpoint kind", async () => {
+	const usage = await fakeUsage(429);
+	try {
+		const { registry } = fakeRegistry([{ provider: "openai-codex", id: "gpt-6-luna", authed: true }]);
+		const luna = {
+			harness: "pihouse",
+			model: "openai-codex/gpt-6-luna",
+			account: "openai",
+			billing: "subscription",
+			capabilities: ["code"],
+		};
+		const observations = (
+			await observeAccounts({
+				now: NOW,
+				providers: ["openai-codex"],
+				headers: {},
+				claudeDir: claudeFull(NOW),
+				openaiToken: async () => "fake-token",
+				openaiUrl: usage.url,
+				poll: new Map(),
+			})
+		).flatMap((o) => (o.observation ? [o.observation] : []));
+		const choice = chooseRoute({
+			loaded: loadedWith(parsedProfiles(claudeProfile(luna))),
+			profileId: "coding",
+			registry,
+			fixed: FIXED,
+			observations,
+			now: NOW,
+			maxAgeMs: MAX_AGE_MS,
+		});
+		assert.equal(choice.status, "routed");
+		if (choice.status === "routed" && choice.result.status === "paused") {
+			assert.equal(choice.result.reasons[0]?.reason, "rate");
+		} else {
+			assert.fail("expected a paused result");
+		}
+		assert.equal(usage.hits(), 1);
+	} finally {
+		usage.close();
+	}
 });

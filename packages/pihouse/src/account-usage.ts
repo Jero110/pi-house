@@ -166,10 +166,21 @@ function noteFor(chosen: Observation, status: AccountStatus): string | undefined
 	return hasWindows ? "every observed window has already reset" : "the source answered without usage windows";
 }
 
-export async function gatherAccountUsage(input: GatherInput): Promise<AccountReport[]> {
+/** What one account's sources said: the observation routing reads (absent when no source saw anything) and a note. */
+export interface AccountObservation {
+	account: string;
+	observation?: Observation;
+	note?: string;
+}
+
+/**
+ * The observation for every logged-in account, in the shape routing reads. Every source is polled or read here, and
+ * nothing else in this file calls the network.
+ */
+export async function observeAccounts(input: GatherInput): Promise<AccountObservation[]> {
 	const accounts = [...new Set(input.providers.map(accountOf))].sort();
 	const poll: PollState = input.poll ?? new Map();
-	const reports: AccountReport[] = [];
+	const observed: AccountObservation[] = [];
 	for (const account of accounts) {
 		let note: string | undefined;
 		const candidates: Observation[] = [];
@@ -193,19 +204,29 @@ export async function gatherAccountUsage(input: GatherInput): Promise<AccountRep
 		}
 		// The newest observation that carries windows wins; a failure is shown only when nothing better was seen.
 		candidates.sort((a, b) => Number(!!b.windows?.length) - Number(!!a.windows?.length) || b.observedAt - a.observedAt);
-		const chosen = candidates[0];
-		const { status } = chosen ? classify(chosen, input.now) : { status: "unknown" as const };
-		note ??= chosen ? noteFor(chosen, status) : "no usage source yet";
+		observed.push({ account, observation: candidates[0], ...(note ? { note } : {}) });
+	}
+	return observed;
+}
+
+export async function gatherAccountUsage(input: GatherInput): Promise<AccountReport[]> {
+	const reports: AccountReport[] = [];
+	for (const { account, observation, note: sourceNote } of await observeAccounts(input)) {
+		const { status } = observation ? classify(observation, input.now) : { status: "unknown" as const };
+		const note = sourceNote ?? (observation ? noteFor(observation, status) : "no usage source yet");
 		reports.push({
 			account,
 			status,
-			windows: (chosen?.windows ?? []).map((w) => ({
+			windows: (observation?.windows ?? []).map((w) => ({
 				label: w.label,
 				percent: w.percent,
 				...(w.resetsAt ? { resetsAt: new Date(w.resetsAt).toISOString() } : {}),
 			})),
-			...(chosen
-				? { ageSeconds: Math.max(0, Math.round((input.now - chosen.observedAt) / 1000)), source: chosen.source }
+			...(observation
+				? {
+						ageSeconds: Math.max(0, Math.round((input.now - observation.observedAt) / 1000)),
+						source: observation.source,
+					}
 				: {}),
 			...(note ? { note } : {}),
 		});
