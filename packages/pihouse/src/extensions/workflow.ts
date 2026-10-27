@@ -8,7 +8,7 @@
 // proposals, approve, reject: the proposal store (see proposalCommand). No model turn.
 // `/workflow review` (model-written recommendations) was removed; the report is what remains, and it is computed.
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -21,13 +21,19 @@ import {
 	addFlag,
 	capTitle,
 	captureRun,
+	captureRunOutcome,
 	isFlagged,
 	localRecord,
 	ownRoot,
 	projectOf,
 	readFlags,
 } from "../workflow/capture.ts";
-import { digestCommand, type LearningDeps } from "../workflow/learning-commands.ts";
+import {
+	digestCommand,
+	type LearningDeps,
+	type LearningOutcome,
+	selfLearningCommand,
+} from "../workflow/learning-commands.ts";
 import { LIMITS, type MemoryStore, openMemory } from "../workflow/memory.ts";
 import { ACTIVE_MARKER } from "../workflow/migration.ts";
 import { createProposalTarget } from "../workflow/proposal-target.ts";
@@ -58,7 +64,8 @@ export const MESSAGE_TYPE = "pihouse-workflow";
 export const WORKFLOW_COMMANDS = [
 	{ usage: "report [--last]", completions: ["report", "report --last"] },
 	{ usage: "save [reason]", completions: ["save "] },
-	{ usage: "digest", completions: ["digest"] },
+	{ usage: "digest (separate model agent; model quota)", completions: ["digest"] },
+	{ usage: "self-learning (digest, scan and review agents; model quota)", completions: ["self-learning"] },
 	{ usage: "ask <question>", completions: ["ask "] },
 	{ usage: "proposals", completions: ["proposals"] },
 	{ usage: "approve <id>", completions: ["approve "] },
@@ -74,7 +81,7 @@ export const USAGE = `usage: ${WORKFLOW_COMMANDS.map((c) => `/workflow ${c.usage
  * warning that names the replacement.
  */
 const REVIEW_REMOVED =
-	"/workflow review was removed. Use /workflow report [--last] for what a run did. Learning from runs (/workflow self-learning) is not available yet.";
+	"/workflow review was removed. Use /workflow report [--last] for what a run did. Use /workflow self-learning to learn from runs.";
 const KEEPER_RETIRED =
 	"The keeper was retired. Use /workflow proposals, /workflow approve <id> and /workflow reject <id> [reason]; /workflow report shows what a run did.";
 
@@ -263,6 +270,49 @@ function ownRun(ctx: ExtensionContext): { records: SessionRecord[]; root: Sessio
 	return { records: records.some((r) => r.id === root.id) ? records : [...records, root], root };
 }
 
+/**
+ * The package revision before this capture, if one is retained.
+ * Problem: captureRunOutcome says `written` both for a first capture and a reopened revision. Example: a run resumes
+ * after cleanup and gets a new delta, but the command says only "Saved". Solution: compare the stored revision around
+ * the capture; the capture library still owns all capture semantics.
+ */
+function savedRevision(store: MemoryStore, runId: string): number | undefined {
+	try {
+		const value: unknown = JSON.parse(readFileSync(join(store.dir, "runs", runId, "run.json"), "utf8"));
+		if (typeof value !== "object" || value === null || !Number.isSafeInteger(Reflect.get(value, "revision")))
+			return undefined;
+		return Number(Reflect.get(value, "revision"));
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * The user's save result, without claiming a write for a discarded, deferred or legacy processed run.
+ */
+export function saveOutcomeText(
+	runId: string,
+	result: ReturnType<typeof captureRunOutcome>,
+	priorRevision?: number,
+	revision?: number,
+	pending = 0,
+): CommandResult {
+	if (result.status === "written")
+		return priorRevision !== undefined && revision !== undefined && revision > priorRevision
+			? {
+					level: "info",
+					text: `Reopened run ${runId} as revision ${revision}; the new evidence is in the workflow memory (${pending} pending).`,
+				}
+			: { level: "info", text: `Captured run ${runId} in the workflow memory (${pending} pending).` };
+	if (result.status === "processed")
+		return { level: "info", text: `Run ${runId} is legacy processed; it was not recaptured. The flag is kept.` };
+	if (result.status === "discarded")
+		return { level: "info", text: `Run ${runId} was discarded: it was already cleaned and has no new evidence.` };
+	if (result.status === "deferred")
+		return { level: "warning", text: `Run ${runId} was deferred: ${result.reason}. The flag is kept.` };
+	return { level: "warning", text: `Run ${runId} capture returned ${result.status}; no new capture was written.` };
+}
+
 function save(pi: ExtensionAPI, reason: string, ctx: ExtensionCommandContext): void {
 	const store = openMemory(pihousePaths().memory);
 	const { records, root } = ownRun(ctx);
@@ -270,13 +320,10 @@ function save(pi: ExtensionAPI, reason: string, ctx: ExtensionCommandContext): v
 	const name = pi.getSessionName();
 	if (!name?.startsWith(WORKFLOW_PREFIX))
 		pi.setSessionName(`workflow-saved · ${name ?? (capTitle(reason, 48) || "chat")}`);
-	const result = captureRun(records, root, store, { by: "save", reason: reason || undefined });
-	ctx.ui.notify(
-		result === "processed"
-			? `Run ${root.id} was already digested; the flag is kept.`
-			: `Saved run ${root.id} to the workflow memory (${store.pendingCount()} pending).`,
-		"info",
-	);
+	const priorRevision = savedRevision(store, root.id);
+	const result = captureRunOutcome(records, root, store, { by: "save", reason: reason || undefined });
+	const outcome = saveOutcomeText(root.id, result, priorRevision, savedRevision(store, root.id), store.pendingCount());
+	ctx.ui.notify(outcome.text, outcome.level);
 }
 
 function report(args: string[], ctx: ExtensionCommandContext): void {
@@ -452,8 +499,12 @@ function modelAvailable(ctx: ExtensionCommandContext, model: string): boolean {
 	return found !== undefined && ctx.modelRegistry.hasConfiguredAuth(found);
 }
 
-/** `/workflow digest`: the learning runtime with the session's hub, pane backend and model registry. */
-async function digest(ctx: ExtensionCommandContext): Promise<void> {
+/** `/workflow digest` and `/workflow self-learning`: the learning runtime with the session's hub, pane backend and models. */
+async function learning(
+	ctx: ExtensionCommandContext,
+	name: string,
+	run: (deps: LearningDeps) => Promise<LearningOutcome>,
+): Promise<void> {
 	const paths = pihousePaths();
 	const deps: LearningDeps = {
 		memory: paths.memory,
@@ -465,10 +516,10 @@ async function digest(ctx: ExtensionCommandContext): Promise<void> {
 		progress: (text) => ctx.ui.notify(text, "info"),
 	};
 	try {
-		const result = await digestCommand(deps);
+		const result = await run(deps);
 		ctx.ui.notify(result.text, result.level);
 	} catch (error) {
-		ctx.ui.notify(`/workflow digest: ${messageOf(error)}`, "warning");
+		ctx.ui.notify(`/workflow ${name}: ${messageOf(error)}`, "warning");
 	}
 }
 
@@ -514,7 +565,7 @@ export default function workflow(pi: ExtensionAPI): void {
 	});
 	pi.registerCommand("workflow", {
 		description:
-			"report [--last]: what the last run did · save [reason] · ask <question> · proposals · approve <id> · reject <id> [reason]",
+			"report [--last]: what the last run did · save [reason] · digest (launches a separate model agent; costs model quota) · self-learning (launches digest, scan and review agents; costs model quota) · ask <question> · proposals · approve <id> · reject <id> [reason]",
 		getArgumentCompletions: (prefix) =>
 			WORKFLOW_COMMANDS.flatMap((c) => [...c.completions])
 				.filter((c) => c.startsWith(prefix))
@@ -525,7 +576,8 @@ export default function workflow(pi: ExtensionAPI): void {
 			if (sub === "review") return ctx.ui.notify(REVIEW_REMOVED, "warning");
 			if (sub === "save") return save(pi, rest.join(" ").trim(), ctx);
 			if (sub === "proposals" || sub === "approve" || sub === "reject") return runProposalCommand(sub, rest, ctx);
-			if (sub === "digest") return digest(ctx);
+			if (sub === "digest") return learning(ctx, sub, digestCommand);
+			if (sub === "self-learning") return learning(ctx, sub, selfLearningCommand);
 			if (sub === "ask" && rest.join(" ").trim()) {
 				pi.sendMessage(
 					{ customType: MESSAGE_TYPE, content: await askContext(rest.join(" ").trim()), display: false },

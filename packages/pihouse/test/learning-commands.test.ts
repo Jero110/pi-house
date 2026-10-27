@@ -6,12 +6,14 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
+import { proposalCommand } from "../src/extensions/workflow.ts";
 import { DIGEST_SECTIONS } from "../src/workflow/digest-contract.ts";
 import {
 	digestCommand,
 	LEARNING_MODEL_ENV,
 	type LearningDeps,
 	learningModel,
+	selfLearningCommand,
 } from "../src/workflow/learning-commands.ts";
 import { migrateLegacyStore } from "../src/workflow/migration.ts";
 import { openOperationalStore } from "../src/workflow/storage.ts";
@@ -26,8 +28,11 @@ interface Spawned {
 	model?: string;
 }
 
-/** A fake hub client: registers one coordinator, and each spawn writes a valid digest like a finished child would. */
-function fakeHub(journal: string, digestFor: (task: string) => string = validDigest) {
+/**
+ * A fake hub client: registers one coordinator, and each spawn writes what `answer` says for its task, as a finished
+ * child would. The default answers every job with a valid digest.
+ */
+function fakeHub(journal: string, answer: (task: string) => string = validDigest) {
 	const spawns: Spawned[] = [];
 	const client = {
 		register: async () => ({
@@ -38,7 +43,7 @@ function fakeHub(journal: string, digestFor: (task: string) => string = validDig
 			spawns.push({ name: body.name, task: body.task, cwd: body.cwd, read: body.read, model: body.model });
 			const output = body.task.match(/Output: ([^\n]+)/)?.[1];
 			assert.ok(output, "the child is told where to write");
-			writeFileSync(output, digestFor(body.task));
+			writeFileSync(output, answer(body.task));
 			const transcript = join(journal, `${body.name}.jsonl`);
 			writeFileSync(
 				transcript,
@@ -96,7 +101,7 @@ function fixture(): Fixture {
 }
 
 /** A fully exited synthetic run: its package, one transcript copy and the operational rows a capture writes. */
-function addExitedRun(f: Fixture, runId: string): void {
+function addExitedRun(f: Fixture, runId: string, lineage = `lineage-${runId}`): void {
 	const run = join(f.memory, "runs", runId);
 	mkdirSync(join(run, "transcripts"), { recursive: true });
 	writeFileSync(
@@ -115,6 +120,9 @@ function addExitedRun(f: Fixture, runId: string): void {
 		store.db
 			.prepare("INSERT INTO metrics(id, revision_id, kind, value) VALUES (?, ?, 'run', '{}')")
 			.run(`m-${runId}`, revision);
+		store.db
+			.prepare("INSERT INTO metrics(id, revision_id, kind, value) VALUES (?, ?, 'run.lineage', ?)")
+			.run(`l-${runId}`, revision, JSON.stringify({ lineage }));
 		store.db
 			.prepare("INSERT INTO participants(id, revision_id, role, payload) VALUES (?, ?, 'planner', '{}')")
 			.run(`p-${runId}`, revision);
@@ -270,6 +278,136 @@ test("the digest command writes its attempt only under digests/.attempts and rea
 		assert.ok(output.startsWith(join(f.memory, "digests", ".attempts")), output);
 		assert.equal(readFileSync(join(f.memory, "digests", "run-one", "digest-run-one.r1.md"), "utf8").length > 0, true);
 		assert.equal(dirname(output), join(f.memory, "digests", ".attempts"));
+	} finally {
+		f.cleanup();
+	}
+});
+
+/** The scan a child writes for two runs that repeat one suggestion: one group, two supporting revisions. */
+const scanOf = (supporters: string[]) =>
+	JSON.stringify({
+		schemaVersion: 1,
+		groups: [{ id: "tests-first", claim: "Run the tests before committing", scope: { kind: "global" }, supporters }],
+	});
+
+/** The review a child writes: its reasoning, then the one fenced block intake reads, with one proposal. */
+const REVIEW_TEXT = [
+	"Both runs ask for the tests to run before a commit.",
+	"",
+	"```json",
+	JSON.stringify({
+		schemaVersion: 1,
+		proposals: [
+			{
+				kind: "memory",
+				scope: "global",
+				target: "memory:preference/tests-first",
+				before: "no rule",
+				after: "run the tests before committing",
+				supporting: ["run-a.r1", "run-b.r1"],
+				opposing: [],
+				conditions: ["repeated in two independent runs"],
+				uncertainty: "two runs only",
+				validation: "read the review",
+			},
+		],
+	}),
+	"```",
+].join("\n");
+
+/** Answers each job by its stage: digest, scan or review. */
+function answerByStage(task: string): string {
+	if (/job scan-/.test(task)) return scanOf(["run-a.r1", "run-b.r1"]);
+	if (/job review-/.test(task)) return REVIEW_TEXT;
+	return validDigest(task);
+}
+
+test("self-learning digests the missing runs, then scans and reviews the batch in separate children, applying nothing", async () => {
+	const f = fixture();
+	try {
+		addExitedRun(f, "run-a", "lin-a");
+		addExitedRun(f, "run-b", "lin-b");
+		const hub = fakeHub(f.journal, answerByStage);
+		const progress: string[] = [];
+		const outcome = await selfLearningCommand(
+			deps(f, { client: hub.client as never, ports: exitedPorts, progress: (text) => progress.push(text) }),
+		);
+		assert.equal(outcome.level, "info", outcome.text);
+
+		const stages = hub.spawns.map((spawn) => /job (scan|review|digest)-/.exec(spawn.task)?.[1]);
+		assert.deepEqual(stages, ["digest", "digest", "scan", "review"], "digests first, then one scan and one review");
+		const [scan, review] = [hub.spawns[2], hub.spawns[3]];
+		assert.match(scan?.task ?? "", /"groups"/, "the scan child gets the groups contract");
+		assert.match(review?.task ?? "", /"proposals"/, "the review child gets its proposal contract");
+		assert.doesNotMatch(scan?.task ?? "", /Also read:/, "the scan reads only the manifest");
+		assert.match(review?.task ?? "", /Also read:/, "the review also reads the scan summary");
+		for (const spawn of [scan, review]) {
+			assert.ok(spawn?.read?.includes(join(f.memory, "batches")), "the batch folder is readable");
+			assert.ok(spawn?.read?.includes(join(f.memory, "digests")), "the digests are readable");
+			assert.ok(!spawn?.read?.includes(join(f.memory, "runs", "run-a")), "no raw run folder is readable");
+		}
+
+		assert.match(outcome.text, /Self-learning batch batch-\w+: reviewed 2 run\(s\)\./);
+		assert.match(outcome.text, /Digest: 2 generated, 2 cleaned/);
+		assert.match(outcome.text, /Groups: 1, contradicted: 0, against a rejected proposal: 0\./);
+		assert.match(outcome.text, /Proposals: 1 created, 0 merged, 0 suppressed\./);
+		assert.match(outcome.text, /\/workflow approve <id>/);
+		assert.match(outcome.text, /Nothing is applied by this command/);
+		assert.doesNotMatch(outcome.text, /synthetic objective/, "no digest text reaches the session");
+		assert.ok(progress.some((text) => /^Scan of batch/.test(text)));
+
+		const listed = await proposalCommand("proposals", [], { memory: f.memory, repoRoot: f.root });
+		assert.match(listed.text, /memory:preference\/tests-first/);
+		assert.match(listed.text, /\bopen\b/, "the proposal waits for approval");
+	} finally {
+		f.cleanup();
+	}
+});
+
+test("a second self-learning invocation reviews nothing again: the batch members are not duplicated", async () => {
+	const f = fixture();
+	try {
+		addExitedRun(f, "run-a", "lin-a");
+		addExitedRun(f, "run-b", "lin-b");
+		const hub = fakeHub(f.journal, answerByStage);
+		await selfLearningCommand(deps(f, { client: hub.client as never, ports: exitedPorts }));
+		const started = hub.spawns.length;
+		const again = await selfLearningCommand(deps(f, { client: hub.client as never, ports: exitedPorts }));
+		assert.match(again.text, /nothing to review/);
+		assert.equal(hub.spawns.length, started, "no child is started for work already reviewed");
+	} finally {
+		f.cleanup();
+	}
+});
+
+test("a scan that writes no valid decision stops the command, says nothing was applied, and keeps the batch open", async () => {
+	const f = fixture();
+	try {
+		addExitedRun(f, "run-a", "lin-a");
+		const hub = fakeHub(f.journal, (task) =>
+			/job scan-/.test(task) ? "prose, not the groups JSON" : validDigest(task),
+		);
+		const outcome = await selfLearningCommand(deps(f, { client: hub.client as never, ports: exitedPorts }));
+		assert.equal(outcome.level, "warning");
+		assert.match(outcome.text, /stopped at the scan/);
+		assert.match(outcome.text, /Nothing was applied; batch batch-\w+ stays open/);
+		assert.equal(hub.spawns.length, 2, "one digest and one scan; no review is started");
+		const listed = await proposalCommand("proposals", [], { memory: f.memory, repoRoot: f.root });
+		assert.equal(listed.text, "No proposals yet.");
+	} finally {
+		f.cleanup();
+	}
+});
+
+test("self-learning without the hub starts nothing", async () => {
+	const f = fixture();
+	try {
+		addExitedRun(f, "run-a", "lin-a");
+		const hub = fakeHub(f.journal, answerByStage);
+		const outcome = await selfLearningCommand(deps(f, { env: {}, client: hub.client as never, ports: exitedPorts }));
+		assert.equal(outcome.level, "warning");
+		assert.match(outcome.text, /need the agent-link hub/);
+		assert.equal(hub.spawns.length, 0);
 	} finally {
 		f.cleanup();
 	}

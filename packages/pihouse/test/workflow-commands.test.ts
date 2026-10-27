@@ -338,9 +338,10 @@ test("help and completion list exactly the commands in the table, and nothing re
 	for (const c of WORKFLOW_COMMANDS) assert.ok(USAGE.includes(`/workflow ${c.usage}`), `usage lists ${c.usage}`);
 	const shown = `${USAGE} ${String(spec?.description)} ${values.join(" ")}`;
 	assert.ok(values.includes("digest"), "digest is offered");
-	for (const word of ["review", "keeper"]) {
-		assert.doesNotMatch(shown, new RegExp(word), `${word} is not offered`);
-	}
+	assert.ok(values.includes("self-learning"), "self-learning is offered");
+	assert.match(String(spec?.description), /separate model agent.*model quota/);
+	assert.doesNotMatch(shown, /\/workflow review(?:\s|$)/, "the removed command is not offered");
+	assert.doesNotMatch(shown, /keeper/, "the retired keeper is not offered");
 });
 
 test("removed invocations start nothing and say what to use instead; digest without the hub starts nothing", async (t) => {
@@ -367,17 +368,19 @@ test("removed invocations start nothing and say what to use instead; digest with
 
 	await handler("review --last", ctx);
 	await handler("digest", ctx);
+	await handler("self-learning", ctx);
 	await keeper("summarize", ctx);
 	await keeper("", ctx);
 
 	assert.deepEqual(
 		notes.map((n) => n.level),
-		["warning", "warning", "warning", "warning"],
+		["warning", "warning", "warning", "warning", "warning"],
 	);
 	assert.match(notes[0]?.text ?? "", /\/workflow review was removed.*\/workflow report/);
 	assert.match(notes[1]?.text ?? "", /need the agent-link hub.*Nothing was started/);
-	assert.match(notes[2]?.text ?? "", /The keeper was retired.*\/workflow proposals/);
-	assert.match(notes[3]?.text ?? "", /The keeper was retired/);
+	assert.match(notes[2]?.text ?? "", /need the agent-link hub.*Nothing was started/);
+	assert.match(notes[3]?.text ?? "", /The keeper was retired.*\/workflow proposals/);
+	assert.match(notes[4]?.text ?? "", /The keeper was retired/);
 	assert.equal(sent.length, 0, "no sendMessage");
 	assert.equal(users.length, 0, "no sendUserMessage");
 	assert.equal(existsSync(join(home, "reports")), false, "no report is written");

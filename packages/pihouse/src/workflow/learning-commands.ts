@@ -3,13 +3,22 @@
 // in a child agent this module spawns through the hub, one per job.
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
+import type { DatabaseSync } from "node:sqlite";
 import { type HubClient, identityFromEnv } from "agent-link-core";
+import {
+	type AgentRequest,
+	type AgentResponse,
+	DEFAULT_MAX_OUTPUT_CHARS,
+	runSelfLearning,
+	type SelfLearningResult,
+} from "./learning-review.ts";
 import {
 	activateLearningStore,
 	executeDigest,
 	produceDigestCandidates,
 	type RuntimeOptions,
 } from "./learning-runtime.ts";
+import { type IntakeResult, ingestReview } from "./proposal-intake.ts";
 import { runtimePorts } from "./runtime-ports.ts";
 import { type OperationalStore, openOperationalStore } from "./storage.ts";
 import { nativeWorkerAdapter, type WorkerJob, type WorkerResult } from "./worker-adapter.ts";
@@ -27,11 +36,21 @@ const DIGEST_JOBS_PER_INVOCATION = 2;
 const WORKER_TIMEOUT_MS = 600_000;
 const LEASE_MS = WORKER_TIMEOUT_MS + 60_000;
 
+/**
+ * The scan's output, as learning-review validates it. Problem: the child sees only this text, so a shape that differs
+ * from validateScan is rejected after the child has already run. Example: "supporters" written as "runs". Solution:
+ * the same field names and rules, written out for the child; validateScan stays the authority.
+ */
+const SCAN_CONTRACT = [
+	'Write one JSON object: {"schemaVersion":1,"groups":[...]}. Each group is {"id": a short unique string, "claim": one sentence of at most 500 characters, "scope": {"kind":"global"} or {"kind":"project","project":"<name>"}, "supporters": [digest revision ids that support the claim, at least one], "opposers": [digest revision ids that contradict it], "priorProposals": [proposal ids from the manifest that it concerns]}.',
+	'Use only the revision ids and proposal ids listed in the manifest. Group paraphrases of one suggestion into one group; a supporter and an opposer are never the same id. A project scope needs every supporter from that project. Emit {"schemaVersion":1,"groups":[]} when nothing repeats. No prose.',
+].join("\n");
+
 const NO_HUB =
 	"/workflow digest and /workflow self-learning need the agent-link hub: run them from a pihouse session started through pih. Nothing was started.";
 
 export interface LearningDeps {
-	/** The workflow memory folder: the store, its operational database and its digests. */
+	/** The workflow memory folder: the store, its operational database, its digests and its batches. */
 	memory: string;
 	/** The agent-link journal folder (`<agent-link home>/sessions`). */
 	journalDir: string;
@@ -103,6 +122,26 @@ function gate(deps: LearningDeps): Ready | LearningOutcome {
 	return worker ? { ok: true, model, worker } : { level: "warning", text: NO_HUB };
 }
 
+/**
+ * Runs `work` on the activated store's operational database, closed afterwards.
+ * Problem: the digest and the review both need the database, and each opened it on its own. Example: a self-learning
+ * run that digests first and then reviews would hold two handles to the same file. Solution: one handle for both.
+ */
+async function withStore<T>(deps: LearningDeps, work: (store: OperationalStore) => Promise<T>): Promise<T> {
+	activateLearningStore(deps.memory);
+	const store = openOperationalStore(join(deps.memory, "memory.sqlite"), { fts: false, legacy: true });
+	try {
+		return await work(store);
+	} finally {
+		store.close();
+	}
+}
+
+function runtimeOf(deps: LearningDeps, store: OperationalStore): RuntimeOptions {
+	const ports = deps.ports ?? runtimePorts({ storeDir: deps.memory, journalDir: deps.journalDir });
+	return { storeDir: deps.memory, db: store.db, ownedRoot: deps.memory, ...ports };
+}
+
 interface DigestSummary {
 	generated: string[];
 	cleaned: number;
@@ -113,17 +152,12 @@ interface DigestSummary {
 }
 
 /**
- * The digest step: produce the eligible candidates, run one isolated child per job, commit, then clean up.
+ * The digest step: produce the eligible candidates, run one isolated child each, commit, then clean up.
  * Problem: a failed or deferred run must not stop the others, and a retry must not repeat the model call.
  * Example: run A's child fails, run B digests; run A is retried by the next invocation only.
  * Solution: the runtime's per-job results are counted here by code; nothing is re-run inside this call.
  */
-async function digestStep(deps: LearningDeps, ready: Ready): Promise<DigestSummary> {
-	activateLearningStore(deps.memory);
-	const store: OperationalStore = openOperationalStore(join(deps.memory, "memory.sqlite"), {
-		fts: false,
-		legacy: true,
-	});
+async function digestStep(deps: LearningDeps, ready: Ready, options: RuntimeOptions): Promise<DigestSummary> {
 	const summary: DigestSummary = {
 		generated: [],
 		cleaned: 0,
@@ -132,62 +166,43 @@ async function digestStep(deps: LearningDeps, ready: Ready): Promise<DigestSumma
 		deferred: [],
 		notStarted: 0,
 	};
-	try {
-		const ports = deps.ports ?? runtimePorts({ storeDir: deps.memory, journalDir: deps.journalDir });
-		const options: RuntimeOptions = { storeDir: deps.memory, db: store.db, ownedRoot: deps.memory, ...ports };
-		const produced = produceDigestCandidates(options);
-		summary.deferred.push(...produced.deferred.map((entry) => entry.reason));
-		if (produced.candidates.length === 0) return summary;
+	const produced = produceDigestCandidates(options);
+	summary.deferred.push(...produced.deferred.map((entry) => entry.reason));
+	if (produced.candidates.length === 0) return summary;
 
-		const digestRoot = join(deps.memory, "digests");
-		const total = Math.min(produced.candidates.length, DIGEST_JOBS_PER_INVOCATION);
-		let started = 0;
-		const results = await executeDigest(
-			{
-				...options,
-				digestRoot,
-				outputPath: (candidate) => join(digestRoot, ".attempts", `${candidate.revision}.md`),
-				cwd: deps.cwd,
-				invocation: randomUUID(),
-				now: deps.now ?? Date.now,
-				leaseMs: LEASE_MS,
-				maxJobs: DIGEST_JOBS_PER_INVOCATION,
-				worker: async (job) => {
-					started++;
-					deps.progress(`Digest ${started} of ${total}: ${job.revision} with ${ready.model}.`);
-					return ready.worker(job);
-				},
+	const digestRoot = join(deps.memory, "digests");
+	const total = Math.min(produced.candidates.length, DIGEST_JOBS_PER_INVOCATION);
+	let started = 0;
+	const results = await executeDigest(
+		{
+			...options,
+			digestRoot,
+			outputPath: (candidate) => join(digestRoot, ".attempts", `${candidate.revision}.md`),
+			// Problem: a worker launched from the user's project may access project files by its normal cwd permissions.
+			// Solution: start it in the pihouse memory store; this separates working directories, not a security sandbox.
+			cwd: deps.memory,
+			invocation: randomUUID(),
+			now: deps.now ?? Date.now,
+			leaseMs: LEASE_MS,
+			maxJobs: DIGEST_JOBS_PER_INVOCATION,
+			worker: async (job) => {
+				started++;
+				deps.progress(`Digest ${started} of ${total}: ${job.revision} with ${ready.model}.`);
+				return ready.worker(job);
 			},
-			produced.candidates,
-		);
-		summary.notStarted = produced.candidates.length - results.length;
-		for (const result of results) {
-			if (result.path) summary.generated.push(result.path);
-			if (result.status === "cleaned") summary.cleaned++;
-			else if (result.path) summary.cleanupPending++;
-			else if (result.status === "deferred")
-				summary.deferred.push("source changed or run became active during the digest");
-			else summary.failed++;
-		}
-		return summary;
-	} finally {
-		store.close();
+		},
+		produced.candidates,
+	);
+	summary.notStarted = produced.candidates.length - results.length;
+	for (const result of results) {
+		if (result.path) summary.generated.push(result.path);
+		if (result.status === "cleaned") summary.cleaned++;
+		else if (result.path) summary.cleanupPending++;
+		else if (result.status === "deferred")
+			summary.deferred.push("source changed or run became active during the digest");
+		else summary.failed++;
 	}
-}
-
-/**
- * The status the session sees. Problem: a long list of digest paths, reasons and counts is easy to misread as a
- * summary the model wrote. Example: a reader who takes "deferred" for a failure. Solution: one count line, then the
- * paths, then each deferral reason once with its count.
- */
-function digestText(summary: DigestSummary): string {
-	const lines = [
-		`Digest: ${summary.generated.length} generated, ${summary.cleaned} cleaned, ${summary.cleanupPending} cleanup pending, ${summary.failed} failed, ${summary.deferred.length} deferred, ${summary.notStarted} not started.`,
-	];
-	for (const path of summary.generated) lines.push(`  ${path}`);
-	for (const [reason, count] of countBy(summary.deferred)) lines.push(`  deferred: ${reason} (${count})`);
-	if (summary.notStarted > 0) lines.push("  Not started runs wait for the next /workflow digest.");
-	return lines.join("\n");
+	return summary;
 }
 
 function countBy(values: string[]): [string, number][] {
@@ -196,13 +211,145 @@ function countBy(values: string[]): [string, number][] {
 	return [...counts.entries()];
 }
 
+/**
+ * The status the session sees. Problem: a long list of digest paths, reasons and counts is easy to misread as a
+ * summary the model wrote. Example: a reader who takes "deferred" for a failure. Solution: one count line, then the
+ * paths, then each deferral reason once with its count.
+ */
+function digestLines(summary: DigestSummary): string[] {
+	const lines = [
+		`Digest: ${summary.generated.length} generated, ${summary.cleaned} cleaned, ${summary.cleanupPending} cleanup pending, ${summary.failed} failed, ${summary.deferred.length} deferred, ${summary.notStarted} not started.`,
+	];
+	for (const path of summary.generated) lines.push(`  ${path}`);
+	for (const [reason, count] of countBy(summary.deferred)) lines.push(`  deferred: ${reason} (${count})`);
+	if (summary.notStarted > 0) lines.push("  Not started runs wait for the next /workflow digest.");
+	return lines;
+}
+
 /** `/workflow digest`: digest the eligible run revisions, one isolated child each, and report the counts. */
 export async function digestCommand(deps: LearningDeps): Promise<LearningOutcome> {
 	const ready = gate(deps);
 	if ("level" in ready) return ready;
-	const summary = await digestStep(deps, ready);
-	return {
-		level: summary.failed > 0 ? "warning" : "info",
-		text: digestText(summary),
+	return withStore(deps, async (store) => {
+		const summary = await digestStep(deps, ready, runtimeOf(deps, store));
+		return { level: summary.failed > 0 ? "warning" : "info", text: digestLines(summary).join("\n") };
+	});
+}
+
+/**
+ * The run's lineage, from its newest revision's metrics. Problem: a fork without a recorded lineage would count as an
+ * independent run. Example: a worker forked from another run whose parent is no longer retained. Solution: no lineage,
+ * no support; the run is excluded and the review says so.
+ */
+function lineageOf(db: DatabaseSync, runId: string): string | undefined {
+	const row = db
+		.prepare(
+			"SELECT m.value FROM metrics m JOIN revisions r ON r.id = m.revision_id WHERE r.run_id = ? AND m.kind = 'run.lineage' ORDER BY r.created_at DESC, r.rowid DESC LIMIT 1",
+		)
+		.get(runId);
+	if (!row) return undefined;
+	try {
+		const value: unknown = JSON.parse(String(row.value));
+		const lineage: unknown = typeof value === "object" && value !== null ? Reflect.get(value, "lineage") : undefined;
+		return typeof lineage === "string" && lineage ? lineage : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * The review port: each scan and review is one child that reads the manifest and writes the stage's artifact.
+ * Problem: the child could read anything the hub allows, including raw transcripts the digests already replaced.
+ * Example: a review that opens a run folder to check a claim. Solution: its read dirs are the batch and the digests
+ * only; the run folders are not among them.
+ */
+function agentPort(deps: LearningDeps, ready: Ready, digestRoot: string, reviewRoot: string) {
+	return async (request: AgentRequest): Promise<AgentResponse> => {
+		const label = request.stage === "scan" ? "Scan" : "Review";
+		deps.progress(`${label} of batch ${request.batchId} with ${ready.model}.`);
+		const outcome = await ready.worker({
+			stage: request.stage,
+			id: `${request.stage}-${request.batchId}`,
+			revision: request.batchId,
+			inputPath: request.manifestPath,
+			outputPath: request.outputPath,
+			// Workers run from pihouse's store, never the user's project; this is not a sandbox.
+			cwd: deps.memory,
+			maxOutputBytes: DEFAULT_MAX_OUTPUT_CHARS,
+			inputs: request.scanSummaryPath ? [request.scanSummaryPath] : [],
+			contract: request.stage === "scan" ? SCAN_CONTRACT : request.outputContract,
+			readDirs: [reviewRoot, digestRoot],
+		});
+		if (outcome.status === "success") return { status: "success", artifactPath: outcome.outputPath };
+		return { status: outcome.status === "cancelled" ? "cancelled" : "failure" };
 	};
+}
+
+function selfLearningOutcome(
+	digest: DigestSummary,
+	learned: SelfLearningResult,
+	intake: IntakeResult | undefined,
+): LearningOutcome {
+	const failed = learned.status === "scan-failed" || learned.status === "review-failed" || learned.status === "blocked";
+	const stage = learned.status === "scan-failed" ? "scan" : "review";
+	const lines: string[] = [];
+	if (learned.status === "blocked") lines.push(`Self-learning blocked: ${learned.reason}. Nothing was applied.`);
+	else if (failed)
+		lines.push(
+			`Self-learning stopped at the ${stage}: ${learned.reason}. Nothing was applied; batch ${learned.batchId} stays open and the next /workflow self-learning resumes it.`,
+		);
+	else if (learned.status === "nothing-to-review")
+		lines.push("Self-learning: nothing to review; no digest is waiting.");
+	else lines.push(`Self-learning batch ${learned.batchId}: reviewed ${learned.selected} run(s).`);
+	lines.push(...digestLines(digest));
+	if (learned.groups.length > 0) {
+		const contradicted = learned.groups.filter((group) => group.contradicted).length;
+		const rejected = learned.groups.filter((group) => group.priorRejected).length;
+		lines.push(
+			`Groups: ${learned.groups.length}, contradicted: ${contradicted}, against a rejected proposal: ${rejected}.`,
+		);
+	}
+	if (intake?.status === "ingested")
+		lines.push(
+			`Proposals: ${intake.created} created, ${intake.merged} merged, ${intake.suppressed} suppressed. List them with /workflow proposals; approve one with /workflow approve <id>. Nothing is applied by this command.`,
+		);
+	if (learned.excluded.length > 0)
+		for (const [reason, count] of countBy(learned.excluded.map((entry) => entry.reason)))
+			lines.push(`Excluded: ${reason} (${count}).`);
+	if (learned.overflow.length > 0) lines.push(`Waiting for a later batch: ${learned.overflow.length}.`);
+	if (learned.reviewPath) lines.push(`Review: ${learned.reviewPath}`);
+	if (learned.summaryPath) lines.push(`Summary: ${learned.summaryPath}`);
+	return { level: failed ? "warning" : "info", text: lines.join("\n") };
+}
+
+/**
+ * `/workflow self-learning`: digest what is missing, then scan and review one batch in separate children. The
+ * invocation authorizes the review only; it applies nothing.
+ */
+export async function selfLearningCommand(deps: LearningDeps): Promise<LearningOutcome> {
+	const ready = gate(deps);
+	if ("level" in ready) return ready;
+	return withStore(deps, async (store) => {
+		const options = runtimeOf(deps, store);
+		const digest = await digestStep(deps, ready, options);
+		const digestRoot = join(deps.memory, "digests");
+		const reviewRoot = join(deps.memory, "batches");
+		let intake: IntakeResult | undefined;
+		const learned = await runSelfLearning(store.db, {
+			invocation: randomUUID(),
+			now: deps.now ?? Date.now,
+			leaseMs: LEASE_MS,
+			reviewRoot,
+			lineageOf: (runId) => lineageOf(store.db, runId),
+			// The digest step above prepared every eligible revision, so no digest job is left for the review.
+			missing: [],
+			digestAdapter: async () => ({ status: "failure" }),
+			agent: agentPort(deps, ready, digestRoot, reviewRoot),
+			intake: (reviewId, text) => {
+				intake = ingestReview(store.db, reviewId, text);
+				return intake;
+			},
+		});
+		return selfLearningOutcome(digest, learned, intake);
+	});
 }
