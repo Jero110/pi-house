@@ -262,6 +262,11 @@ export class Hub {
 		const caller = this.registry.get(req.from);
 		if (!caller) return { error: this.registry.unknownAgent(req.from, req.from) };
 		if (caller.record.state === "exited" || caller.closing) return { error: `${req.from} has exited` };
+		return this.startWorker(caller, req);
+	}
+
+	/** The spawn flow below a caller that is known to be live: checks, record, launch, pane, brief. */
+	private async startWorker(caller: Agent, req: SpawnRequest): Promise<{ name: string } | { error: string }> {
 		this.profileFor(req.harness);
 		const checked = checkSpawn(req, {
 			caller,
