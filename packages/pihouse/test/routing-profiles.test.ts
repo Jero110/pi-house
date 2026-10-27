@@ -2,17 +2,21 @@
 // or network is touched; a profile only names what the user authorized.
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
 import type { Observation, Profile } from "../src/workflow/routing.ts";
 import {
+	type Choice,
+	checkpointPause,
 	chooseRoute,
 	type LoadedProfiles,
 	loadRoutingProfiles,
 	type ModelRegistry,
+	type PauseNotice,
 	parseRoutingProfiles,
+	readCheckpoint,
 	routingProfilesPath,
 } from "../src/workflow/routing-profiles.ts";
 
@@ -244,4 +248,79 @@ test("an available authorized candidate is selected with its observation and the
 test("a credential flag the file adds is an unknown key, so the file is invalid", () => {
 	const data = { version: 1, profiles: [{ ...codingRaw, candidates: [{ ...lunaCandidate, credentials: true }] }] };
 	assert.equal(parseRoutingProfiles(data).status, "invalid");
+});
+
+// The paused checkpoint: a private file under the pihouse home, written atomically and verified by hash.
+const PAUSED: Extract<Choice, { status: "routed" }> = {
+	status: "routed",
+	profile: "coding",
+	profileHash: "h1",
+	result: {
+		status: "paused",
+		profile: "coding",
+		reasons: [
+			{
+				candidate: {
+					harness: "pihouse",
+					provider: "openai-codex",
+					model: "gpt-6-luna",
+					account: "openai",
+					billing: "subscription",
+					capabilities: ["code"],
+				},
+				reason: "exhausted",
+			},
+		],
+	},
+};
+
+function tempHome(): string {
+	return mkdtempSync(join(tmpdir(), "pihouse-home-"));
+}
+
+test("an exhausted profile persists a private, hash-checked checkpoint and injects one notice", () => {
+	const home = tempHome();
+	const notices: PauseNotice[] = [];
+	const outcome = checkpointPause({ home, taskId: "task-7", choice: PAUSED, now: NOW, notify: (n) => notices.push(n) });
+	assert.equal(outcome.status, "checkpointed");
+	if (outcome.status !== "checkpointed") return;
+	assert.equal(statSync(outcome.path).mode & 0o777, 0o600);
+	assert.equal(statSync(dirname(outcome.path)).mode & 0o777, 0o700);
+	assert.deepEqual(readdirSync(dirname(outcome.path)), [`${outcome.id}.json`]);
+	const read = readCheckpoint(outcome.path);
+	assert.equal(read.status, "valid");
+	if (read.status === "valid") {
+		assert.equal(read.checkpoint.body.taskId, "task-7");
+		assert.equal(read.checkpoint.body.profileHash, "h1");
+		assert.equal(read.checkpoint.hash, outcome.hash);
+	}
+	assert.equal(notices.length, 1);
+	assert.deepEqual(notices[0], {
+		kind: "routing-paused",
+		checkpointId: outcome.id,
+		hash: outcome.hash,
+		taskId: "task-7",
+		profile: "coding",
+		reasons: ["openai-codex/gpt-6-luna on openai: exhausted"],
+	});
+	assert.equal(JSON.stringify(notices[0]).includes(home), false, "the notice never carries the private path");
+});
+
+test("a tampered checkpoint is reported invalid rather than resumed", () => {
+	const home = tempHome();
+	const outcome = checkpointPause({ home, taskId: "task-7", choice: PAUSED, now: NOW, notify: () => {} });
+	if (outcome.status !== "checkpointed") assert.fail("expected a checkpoint");
+	writeFileSync(outcome.path, readFileSync(outcome.path, "utf8").replace("task-7", "task-8"));
+	assert.equal(readCheckpoint(outcome.path).status, "invalid");
+});
+
+test("a selected or fixed choice pauses nothing and writes nothing", () => {
+	const home = tempHome();
+	const notices: PauseNotice[] = [];
+	const fixed: Choice = { status: "fixed", model: FIXED, reason: "no routing profiles file" };
+	assert.deepEqual(checkpointPause({ home, taskId: "t", choice: fixed, now: NOW, notify: (n) => notices.push(n) }), {
+		status: "not-paused",
+	});
+	assert.deepEqual(readdirSync(home), []);
+	assert.equal(notices.length, 0);
 });

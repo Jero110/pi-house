@@ -8,8 +8,17 @@
 // file. Each model is named exactly as pi names it ("provider/model"); nothing is inferred from branding or a list.
 // A missing file means no routing authority at all: the fixed model stays.
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import {
+	closeSync,
+	fsyncSync,
+	mkdirSync,
+	openSync,
+	readFileSync,
+	renameSync,
+	unlinkSync,
+	writeFileSync,
+} from "node:fs";
+import { dirname, join } from "node:path";
 import { type Candidate, type Failure, type Observation, type Profile, type RoutingResult, route } from "./routing.ts";
 
 export const ROUTING_PROFILES_VERSION = 1;
@@ -212,4 +221,141 @@ export function chooseRoute(input: ChooseInput): Choice {
 		checkpoint: input.checkpoint,
 	});
 	return { status: "routed", profile: profile.id, profileHash: loaded.hash, result };
+}
+
+/** What a paused decision leaves behind: the body and its hash, both in one private file. */
+export interface CheckpointBody {
+	id: string;
+	taskId: string;
+	profile: string;
+	profileHash: string;
+	pausedAt: string;
+	reasons: { provider: string; model: string; account: string; reason: string }[];
+}
+export interface Checkpoint {
+	version: typeof ROUTING_PROFILES_VERSION;
+	hash: string;
+	body: CheckpointBody;
+}
+/** Shown to the user and to the session: fixed phrases and ids only, never the path or any provider text. */
+export interface PauseNotice {
+	kind: "routing-paused";
+	checkpointId: string;
+	hash: string;
+	taskId: string;
+	profile: string;
+	reasons: string[];
+}
+export type PauseOutcome =
+	| { status: "not-paused" }
+	| { status: "checkpointed"; id: string; hash: string; path: string };
+export interface PauseInput {
+	/** The pihouse home; the checkpoint goes under routing/paused/ in it. */
+	home: string;
+	taskId: string;
+	choice: Choice;
+	now: number;
+	notify: (notice: PauseNotice) => void;
+}
+
+/**
+ * Writes a paused decision to disk, then tells the session. Only an exhausted alternative list pauses; a selected or
+ * fixed choice writes nothing.
+ * Problem: a pause that lives only in memory is lost when the session restarts, and the user is not told why work stopped.
+ * Example: the only authorized account is exhausted at 14:00. The task must resume from the same checkpoint later, not
+ * start again on a model nobody authorized.
+ * Solution: the checkpoint is written to a temporary file with mode 0600, flushed, renamed over the final name and
+ * the directory flushed. Its body is hashed, so a changed file is reported invalid. The notice is injected only after
+ * the write, and it carries ids and the reasons, not the path.
+ */
+export function checkpointPause(input: PauseInput): PauseOutcome {
+	const { choice } = input;
+	if (choice.status !== "routed" || choice.result.status !== "paused") return { status: "not-paused" };
+	const pausedAt = new Date(input.now).toISOString();
+	const reasons = choice.result.reasons.map(({ candidate, reason }) => ({
+		provider: candidate.provider,
+		model: candidate.model,
+		account: candidate.account,
+		reason,
+	}));
+	const id = createHash("sha256")
+		.update(JSON.stringify([input.taskId, choice.profile, choice.profileHash, pausedAt]))
+		.digest("hex")
+		.slice(0, 16);
+	const body: CheckpointBody = {
+		id,
+		taskId: input.taskId,
+		profile: choice.profile,
+		profileHash: choice.profileHash,
+		pausedAt,
+		reasons,
+	};
+	const hash = sha256(JSON.stringify(body));
+	const path = join(input.home, PAUSED_DIR, `${id}.json`);
+	writeDurably(path, JSON.stringify({ version: ROUTING_PROFILES_VERSION, hash, body }, null, "\t"));
+	input.notify({
+		kind: "routing-paused",
+		checkpointId: id,
+		hash,
+		taskId: input.taskId,
+		profile: choice.profile,
+		reasons: reasons.map((r) => `${r.provider}/${r.model} on ${r.account}: ${r.reason}`),
+	});
+	return { status: "checkpointed", id, hash, path };
+}
+
+/** Reads a checkpoint back and checks its hash; a changed or foreign file is invalid, never resumed. */
+export function readCheckpoint(
+	path: string,
+): { status: "valid"; checkpoint: Checkpoint } | { status: "invalid"; reason: string } {
+	let data: unknown;
+	try {
+		data = JSON.parse(readFileSync(path, "utf8"));
+	} catch {
+		return { status: "invalid", reason: "unreadable" };
+	}
+	if (typeof data !== "object" || data === null || Array.isArray(data))
+		return { status: "invalid", reason: "malformed" };
+	const record = data as Obj;
+	if (record.version !== ROUTING_PROFILES_VERSION) return { status: "invalid", reason: "version" };
+	if (
+		typeof record.hash !== "string" ||
+		record.body === undefined ||
+		record.hash !== sha256(JSON.stringify(record.body))
+	) {
+		return { status: "invalid", reason: "hash mismatch" };
+	}
+	return { status: "valid", checkpoint: record as unknown as Checkpoint };
+}
+
+const PAUSED_DIR = join("routing", "paused");
+
+function sha256(text: string): string {
+	return createHash("sha256").update(text).digest("hex");
+}
+
+function writeDurably(path: string, text: string): void {
+	const dir = dirname(path);
+	mkdirSync(dir, { recursive: true, mode: 0o700 });
+	const temp = `${path}.${process.pid}.tmp`;
+	const fd = openSync(temp, "w", 0o600);
+	try {
+		writeFileSync(fd, text);
+		fsyncSync(fd);
+	} catch (error) {
+		closeSync(fd);
+		unlinkSync(temp);
+		throw error;
+	}
+	closeSync(fd);
+	renameSync(temp, path);
+	// The rename is only durable once the directory entry is flushed. Some platforms cannot open a directory for
+	// this; there the rename is the best available guarantee.
+	try {
+		const dirFd = openSync(dir, "r");
+		fsyncSync(dirFd);
+		closeSync(dirFd);
+	} catch {
+		// best effort, see above
+	}
 }
