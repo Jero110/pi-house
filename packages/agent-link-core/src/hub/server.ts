@@ -76,6 +76,7 @@ export async function startHub(opts: StartHubOptions): Promise<RunningHub> {
 		guard: opts.guard,
 		startup: opts.startup,
 		idlePollMs: opts.idlePollMs,
+		interruptMs: opts.interruptMs,
 		pidPollMs: opts.pidPollMs,
 	});
 	const server = createServer((req, res) => {
