@@ -14,7 +14,11 @@ import { captureRun } from "../src/workflow/capture.ts";
 import { openMemory } from "../src/workflow/memory.ts";
 import { renderEvidenceReport, renderReport } from "../src/workflow/report.ts";
 import type { Observation } from "../src/workflow/routing.ts";
-import { ROUTING_PROFILES_FILE, readRoutingDecisions } from "../src/workflow/routing-profiles.ts";
+import {
+	appendRoutingDecision,
+	ROUTING_PROFILES_FILE,
+	readRoutingDecisions,
+} from "../src/workflow/routing-profiles.ts";
 import { buildRun } from "../src/workflow/run.ts";
 
 const T0 = Date.parse("2026-01-01T00:00:00Z");
@@ -213,6 +217,59 @@ test("a quota failure replaces a worker on a second account: both decisions reac
 		assert.match(evidence, /\| w-1-id \| build \| openai-codex\/gpt-6-luna \| - \| openai \|/);
 		assert.match(evidence, /\| w-2-id \| build \| anthropic\/claude-sonnet-5-5 \| - \| claude \|/);
 	} finally {
+		rmSync(home, { recursive: true, force: true });
+	}
+});
+
+// Capture reads the journal beside its store, and the report reads the pihouse home from the environment. Under a custom
+// PIHOUSE_HOME both must resolve the same file, so neither depends on the real ~/.pihouse.
+test("capture and report resolve the same routing journal under a custom PIHOUSE_HOME", () => {
+	const home = mkdtempSync(join(tmpdir(), "pih-routing-custom-home-"));
+	const previous = process.env.PIHOUSE_HOME;
+	process.env.PIHOUSE_HOME = home;
+	try {
+		const { planner, records } = journal();
+		appendRoutingDecision(home, {
+			time: T0,
+			profile: "build",
+			task: "T1",
+			agent: "w-1",
+			model: "openai-codex/gpt-6-luna",
+			account: "openai",
+			billing: "subscription",
+			reason: "available (usage endpoint, observed 5s ago)",
+			failure: null,
+			checkpoint: null,
+		});
+		appendRoutingDecision(home, {
+			time: T0 + 61_000,
+			profile: "build",
+			task: "T1",
+			agent: "w-2",
+			model: "anthropic/claude-sonnet-5-5",
+			account: "claude",
+			billing: "subscription",
+			reason: "authorized alternative (usage endpoint, observed 5s ago)",
+			failure: "exhausted",
+			checkpoint: null,
+		});
+		// The store sits under the custom home, so its sibling routing/ folder is the journal capture reads.
+		const store = openMemory(join(home, "memory"));
+		assert.equal(captureRun(records, planner, store, { by: "planner" }), "written");
+		const stored = JSON.parse(readFileSync(join(home, "memory", "runs", "planner", "run.json"), "utf8"));
+		const account = (id: string) =>
+			(stored.evidence.participants as { id: string; routing?: { account: string } }[]).find((p) => p.id === id)
+				?.routing?.account;
+		assert.equal(account("w-1-id"), "openai", "capture read the decision for w-1");
+		assert.equal(account("w-2-id"), "claude", "capture read the decision for w-2");
+
+		// The report is given no journal: it must find the same two decisions through PIHOUSE_HOME.
+		const report = renderReport(buildRun(records, planner), { messages: false });
+		assert.match(report, /\| w-1 \| build \| openai-codex\/gpt-6-luna \| - \| openai \|/);
+		assert.match(report, /\| w-2 \| build \| anthropic\/claude-sonnet-5-5 \| - \| claude \| authorized alternative/);
+	} finally {
+		if (previous === undefined) delete process.env.PIHOUSE_HOME;
+		else process.env.PIHOUSE_HOME = previous;
 		rmSync(home, { recursive: true, force: true });
 	}
 });
