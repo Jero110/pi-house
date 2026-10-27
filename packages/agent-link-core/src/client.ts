@@ -4,7 +4,7 @@ import { spawn } from "node:child_process";
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync } from "node:fs";
 import { request } from "node:http";
 import { fileURLToPath } from "node:url";
-import type { InboxEntry, ModelResult, StatusEntry } from "./hub/hub.ts";
+import type { InboxEntry, ModelResult, ReplaceResult, StatusEntry } from "./hub/hub.ts";
 import type { SendResult } from "./hub/queue.ts";
 import { socketAnswers, TOKEN_HEADER } from "./hub/server.ts";
 import { agentLinkHome, hubPaths } from "./paths.ts";
@@ -63,6 +63,18 @@ export interface HubClient {
 		retry?: boolean;
 		interrupt?: boolean;
 	}): Promise<ErrorOr<ModelResult>>;
+	/** Replaces a worker that its harness cannot switch: fence, confirm, continue (Hub.replace). */
+	replace(body: {
+		from: string;
+		to: string;
+		harness: string;
+		model?: string;
+		name?: string;
+		notes?: string;
+		backend?: BackendName;
+		/** Default: the caller's READ_DIRS_ENV. */
+		read?: string[];
+	}): Promise<ReplaceResult>;
 	inbox(agent: string): Promise<{ messages: InboxEntry[]; error?: string }>;
 	event(body: { agent: string; type: string } & Record<string, unknown>): Promise<{ ok: boolean; error?: string }>;
 	/** Server-sent messages for `agent`, until close(). */
@@ -118,6 +130,7 @@ export function createHubClient(addr: HubAddress): HubClient {
 		agents: () => call("GET", "/agents"),
 		cancel: (body) => call("POST", "/cancel", body),
 		model: (body) => call("POST", "/model", body),
+		replace: (body) => call("POST", "/replace", { read: readDirsFromEnv(), ...body }),
 		inbox: (agent) => call("GET", `/inbox${q(agent)}`),
 		event: (body) => call("POST", "/event", body),
 		stream(agent, onMessage) {

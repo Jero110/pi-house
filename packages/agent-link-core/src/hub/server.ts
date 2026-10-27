@@ -235,6 +235,21 @@ async function handle(hub: Hub, token: string, req: IncomingMessage, res: Server
 					interrupt: body.interrupt === true,
 				}),
 			);
+		case "/replace":
+			return json(
+				res,
+				200,
+				await hub.replace({
+					from: str("from"),
+					to: str("to"),
+					harness: str("harness"),
+					model: opt("model"),
+					name: opt("name"),
+					notes: opt("notes"),
+					backend: body.backend === "cmux" || body.backend === "tmux" ? body.backend : undefined,
+					read: Array.isArray(body.read) ? body.read.filter((d): d is string => typeof d === "string") : undefined,
+				}),
+			);
 		case "/event":
 			return json(res, 200, hub.event(body as HarnessEvent));
 		default:

@@ -1,7 +1,14 @@
 // The tools every harness sees through the agent-link MCP server, their answers and the server
 // instructions. Ported from an earlier hub; the wording that real runs tuned stays:
 // "returns at once", "never call status to wait", exact names.
-import type { InboxEntry, InterruptOutcome, ModelResult, RetryOutcome, StatusEntry } from "../hub/hub.ts";
+import type {
+	InboxEntry,
+	InterruptOutcome,
+	ModelResult,
+	ReplaceResult,
+	RetryOutcome,
+	StatusEntry,
+} from "../hub/hub.ts";
 import type { SendResult } from "../hub/queue.ts";
 
 /** The JSON Schema subset the tools use; MCP clients read it as inputSchema. */
@@ -12,7 +19,7 @@ export interface ObjectSchema {
 	additionalProperties?: boolean;
 }
 
-export type ToolName = "spawn" | "send" | "permit" | "reply" | "status" | "cancel" | "model" | "inbox";
+export type ToolName = "spawn" | "send" | "permit" | "reply" | "status" | "cancel" | "model" | "replace" | "inbox";
 
 export interface ToolDef {
 	name: ToolName;
@@ -139,6 +146,28 @@ export function toolDefs(opts: { harnesses: readonly string[]; pull: boolean }):
 			},
 		},
 		{
+			name: "replace",
+			description: `Replace one of your own workers with a new agent on another harness or model, when its harness cannot switch the model in place (Claude Code, Codex, a paste worker). Use model for a switch on pi, pihouse and opencode workers, and replace when the harness refuses it. The old worker is stopped and closed, and its exit is confirmed before the replacement starts, so only one of them writes. The replacement continues the same task in the same folder, with the old worker's last text, your notes and the repository state; its live workers move to it. Answers once the old worker is confirmed closed (at most 20 s): with the replacement's name, or with the old worker's own result when it had already finished, and then nothing is spawned. The replacement's result ${arrives}.`,
+			inputSchema: {
+				type: "object",
+				properties: {
+					to: { type: "string", description: "Exact worker name, one you launched or below one" },
+					harness: { type: "string", enum: [...opts.harnesses], description: "Harness of the replacement" },
+					model: {
+						type: "string",
+						description: "Exact <provider>/<id> for the replacement; unset means the harness profile's default",
+					},
+					name: { type: "string", description: "Name for the replacement; default: <old>-r1" },
+					notes: {
+						type: "string",
+						description:
+							"What the replacement must know beyond the task and the old worker's last text, e.g. why it was replaced",
+					},
+				},
+				required: ["to", "harness"],
+			},
+		},
+		{
 			name: "inbox",
 			description: opts.pull
 				? "Read the messages that wait for you in the hub (results and questions from your workers) and mark them read. Returns at once. When it is empty, tell the user what still runs and end your turn; never call inbox in a loop to wait."
@@ -201,6 +230,17 @@ export function replyReply(res: { ok: boolean; error?: string }): ToolReply {
 
 export function cancelReply(res: { ok?: boolean; error?: string }, name: string): ToolReply {
 	return res.error ? text(`not cancelled: ${res.error}`, true) : text(`cancelled ${name} and closed its pane`);
+}
+
+export function replaceReply(res: ReplaceResult, to: string): ToolReply {
+	if ("error" in res) return text(`not replaced: ${res.error}`, true);
+	if (res.status === "finished")
+		return text(
+			`${to} had already finished, so nothing was replaced and nothing was spawned. Its result:\n\n${res.result}`,
+		);
+	return text(
+		`replaced ${res.previous} with ${res.name}, which continues its task in the same folder. ${res.previous} was stopped and closed first, and its late output is dropped. Tell the user in one line what ${res.name} does next.`,
+	);
 }
 
 export function modelReply(res: ModelResult, to: string): ToolReply {
@@ -279,7 +319,7 @@ export function instructions({ client, name, parent, pull }: InstructionsInput):
 			'- Answer a worker\'s question with send({ to: "<worker>", message }), and a permission or question it waits on with permit({ to: "<worker>", choice }). If only the user can answer, ask the user first.',
 		);
 	}
-	lines.push(`- Tools: spawn, send, permit, reply, status, cancel, model, inbox. ${NAME_RULE}`);
+	lines.push(`- Tools: spawn, send, permit, reply, status, cancel, model, replace, inbox. ${NAME_RULE}`);
 	if (/claude/i.test(client))
 		lines.push("- agent-link agents are reached only with these tools, never with SendMessage or ListAgents.");
 	return lines.join("\n");

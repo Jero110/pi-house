@@ -54,11 +54,11 @@ function mcp(opts: Omit<Parameters<typeof runMcpServer>[0], "input" | "output">)
 
 const init = (client: string) => ({ protocolVersion: "2025-06-18", clientInfo: { name: client, version: "1" } });
 
-test("eight tools, each with anthropic/alwaysLoad, with the tested wording", () => {
+test("nine tools, each with anthropic/alwaysLoad, with the tested wording", () => {
 	const tools = toolDefs({ harnesses: ["claude", "codex", "opencode", "pi"], pull: false });
 	assert.deepEqual(
 		tools.map((t) => t.name),
-		["spawn", "send", "permit", "reply", "status", "cancel", "model", "inbox"],
+		["spawn", "send", "permit", "reply", "status", "cancel", "model", "replace", "inbox"],
 	);
 	const by = (n: string) => tools.find((t) => t.name === n)?.description ?? "";
 	assert.match(by("spawn"), /Returns at once with the worker's exact name/);
@@ -76,6 +76,18 @@ test("eight tools, each with anthropic/alwaysLoad, with the tested wording", () 
 	]);
 	assert.match(by("model"), /retry: true/);
 	assert.match(by("model"), /interrupt: true/);
+	// model and replace are told apart: a switch where the harness allows one, replace where it does not.
+	assert.match(by("replace"), /cannot switch the model in place/);
+	assert.match(by("replace"), /Use model for a switch on pi, pihouse and opencode workers/);
+	assert.match(by("replace"), /exit is confirmed before the replacement starts/);
+	assert.deepEqual(tools.find((t) => t.name === "replace")?.inputSchema.required, ["to", "harness"]);
+	assert.deepEqual(Object.keys(tools.find((t) => t.name === "replace")?.inputSchema.properties ?? {}), [
+		"to",
+		"harness",
+		"model",
+		"name",
+		"notes",
+	]);
 	assert.deepEqual(tools[0]?.inputSchema.required, ["harness", "task"]);
 	assert.deepEqual(tools[0]?.inputSchema.properties.harness?.enum, ["claude", "codex", "opencode", "pi"]);
 	const pull = toolDefs({ harnesses: ["claude"], pull: true });
@@ -115,7 +127,7 @@ test("no identity: the server registers once as a pull root named after its clie
 		assert.match(String(init1.instructions), /read them with inbox\(\)/);
 		assert.match(String(init1.instructions), /never with SendMessage or ListAgents/);
 		const list = (await server.rpc("tools/list")).result as { tools: Array<{ name: string; _meta: Json }> };
-		assert.equal(list.tools.length, 8);
+		assert.equal(list.tools.length, 9);
 		assert.ok(list.tools.every((x) => x._meta["anthropic/alwaysLoad"] === true));
 
 		const spawn = await server.tool("spawn", { harness: "pi", task: "count files", name: "counter" });
@@ -339,6 +351,33 @@ test("model interrupt through the MCP server: a parent's busy worker is cancelle
 			await server.end();
 		}
 	} finally {
+		await t.stop();
+	}
+});
+
+test("replace over MCP: a refusal says why and nothing stops; a replacement is answered with its name", async () => {
+	const t = await testHub();
+	const server = mcp({ backend: "cmux", env: {}, home: t.home, cwd: t.home });
+	try {
+		await server.rpc("initialize", init("claude-code"));
+		await server.tool("spawn", { harness: "pi", task: "count files", name: "counter" });
+		const fake = await waitFor(() => t.kit.byName("counter"), "adapter");
+		await waitFor(() => fake.inTurn, "brief");
+
+		const refused = await server.tool("replace", { to: "counter", harness: "nope" });
+		assert.equal(refused.isError, true);
+		assert.match(refused.text, /^not replaced: unknown harness "nope"/);
+		assert.equal(t.running.hub.registry.get("counter")?.record.state, "working", "a refusal stops nothing");
+
+		const done = await server.tool("replace", { to: "counter", harness: "pi", notes: "quota ran out" });
+		assert.equal(done.isError, false);
+		assert.match(done.text, /^replaced counter with counter-r1, which continues its task in the same folder\./);
+		assert.match(done.text, /its late output is dropped/);
+		assert.equal(t.running.hub.registry.get("counter")?.record.state, "exited");
+		await waitFor(() => t.kit.byName("counter-r1"), "replacement adapter");
+	} finally {
+		for (const a of t.kit.all) a.releaseClose();
+		await server.end();
 		await t.stop();
 	}
 });

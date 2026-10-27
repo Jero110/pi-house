@@ -17,6 +17,7 @@ import {
 	instructions,
 	modelReply,
 	permitReply,
+	replaceReply,
 	replyReply,
 	sendReply,
 	spawnReply,
@@ -193,6 +194,23 @@ export async function runMcpServer(opts: McpServerOptions): Promise<void> {
 					return modelReply(
 						await s.client.model({ from: s.name, to, model: str("model") ?? "", retry, interrupt }),
 						to,
+					);
+				}
+				case "replace": {
+					const to = str("to") ?? "";
+					return withPullReminder(
+						replaceReply(
+							await s.client.replace({
+								from: s.name,
+								to,
+								harness: str("harness") ?? "",
+								model: str("model"),
+								name: str("name"),
+								notes: str("notes"),
+							}),
+							to,
+						),
+						s.pull,
 					);
 				}
 				case "inbox": {
