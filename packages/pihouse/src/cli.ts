@@ -3,6 +3,7 @@
 import { homedir } from "node:os";
 import { runPihouse } from "./launcher.ts";
 import { PIHOUSE_VERSION, pihousePaths } from "./paths.ts";
+import { runRoute } from "./route.ts";
 import { setup, teardown } from "./setup.ts";
 
 export const KEEPER_RETIRED =
@@ -13,6 +14,9 @@ export const USAGE = `usage: pih [pi options] [message]       start pihouse (all
                                         register pihouse's MCP servers and profile (install.sh runs this);
                                         --claude-bridge also adds the Claude models on your Claude Code login
        pih uninstall                   undo setup's registrations (keeps ~/.pihouse)
+       pih route <profile> [--current <provider/model> --failure <kind>] [--task <id>]
+                                        the exact model an authorized routing profile allows now: 0 selected,
+                                        3 paused (checkpoint written), 4 nothing authorized, 2 usage
        pih --version`;
 
 export async function main(argv: readonly string[], env: NodeJS.ProcessEnv = process.env): Promise<number> {
@@ -44,6 +48,9 @@ export async function main(argv: readonly string[], env: NodeJS.ProcessEnv = pro
 		err(KEEPER_RETIRED);
 		return 2;
 	}
+	// Problem: an executor needs one exact model per spawn, and a plain `pih` would start a whole session for it.
+	// Solution: `route` answers on stdout with exit codes that say selected, paused or unauthorized, then exits.
+	if (cmd === "route") return runRoute(rest, { env, home, out, err });
 	if (cmd === "uninstall") {
 		teardown({ paths: pihousePaths(env, home), home, env, out });
 		return 0;
