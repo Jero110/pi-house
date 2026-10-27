@@ -30,7 +30,7 @@ export function isQuiescent(snapshot: {
 	);
 }
 
-export function enqueueJob(db: DatabaseSync, id: string, revision: string, fingerprint: string): void {
+export function enqueueJob(db: DatabaseSync, id: string, revision: string | null, fingerprint: string): void {
 	db.prepare("INSERT OR IGNORE INTO jobs(id, revision_id, state, payload) VALUES (?, ?, 'pending', ?)").run(
 		id,
 		revision,
