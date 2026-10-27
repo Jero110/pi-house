@@ -271,6 +271,12 @@ export function captureRun(
 	const run = buildRun(records, root, opts.roots);
 	const { pkg, transcripts } = packageOf(run, opts);
 	const previous = readPackage(store, pkg.id);
+	const completeUsage = pkg.agents.every((agent) =>
+		["input", "output", "cacheRead", "cacheWrite"].every(
+			(key) => typeof agent.usage[key] === "number" && Number.isFinite(agent.usage[key]),
+		),
+	);
+	const completeSummaries = pkg.agents.every((agent) => agent.missing === null);
 	const evidence = {
 		lineage: pkg.id,
 		title: root.name,
@@ -302,8 +308,8 @@ export function captureRun(
 				assignedSkills,
 				loadedSkills,
 				usage,
-				activeMs,
-				messages,
+				activeMs: missing ? null : activeMs,
+				messages: missing ? null : messages,
 				missing,
 				summary: run.agents.find((item) => item.record.id === id)?.summary
 					? {
@@ -315,7 +321,14 @@ export function captureRun(
 					: null,
 			}),
 		),
-		metrics: pkg.metrics,
+		metrics: {
+			newTokens: completeUsage ? pkg.metrics.newTokens : null,
+			cacheRead: completeUsage ? pkg.metrics.cacheRead : null,
+			activeMs: completeSummaries ? pkg.metrics.activeMs : null,
+			wallMs: completeSummaries ? pkg.metrics.wallMs : null,
+			agents: pkg.metrics.agents,
+			messages: completeSummaries ? pkg.metrics.messages : null,
+		},
 		cursor: Object.fromEntries(run.agents.map((agent) => [agent.record.id, agent.record.updatedAt])),
 	};
 	const fingerprint = createHash("sha256").update(JSON.stringify(evidence)).digest("hex");

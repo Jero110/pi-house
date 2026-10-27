@@ -14,8 +14,8 @@ export interface WorkflowEvidenceParticipant {
 	assignedSkills: string[];
 	loadedSkills: string[];
 	usage: Partial<Usage>;
-	activeMs: number;
-	messages: number;
+	activeMs: number | null;
+	messages: number | null;
 	missing: string | null;
 	summary: {
 		assistantMessages?: number;
@@ -31,7 +31,14 @@ export interface WorkflowEvidence {
 	project: string;
 	plan: string | null;
 	participants: WorkflowEvidenceParticipant[];
-	metrics: { newTokens: number; cacheRead: number; activeMs: number; wallMs: number; agents: number; messages: number };
+	metrics: {
+		newTokens: number | null;
+		cacheRead: number | null;
+		activeMs: number | null;
+		wallMs: number | null;
+		agents: number;
+		messages: number | null;
+	};
 	cursor: Record<string, string>;
 }
 
@@ -115,10 +122,65 @@ function wall(run: WorkflowRun): number {
 	return starts.length && ends.length ? Math.max(...ends) - Math.min(...starts) : 0;
 }
 
+function evidenceGroups<T>(
+	participants: readonly WorkflowEvidenceParticipant[],
+	key: (participant: WorkflowEvidenceParticipant) => T,
+): Map<T, WorkflowEvidenceParticipant[]> {
+	const groups = new Map<T, WorkflowEvidenceParticipant[]>();
+	for (const participant of participants) {
+		const group = groups.get(key(participant)) ?? [];
+		group.push(participant);
+		groups.set(key(participant), group);
+	}
+	return groups;
+}
+
+function evidenceGroupRow(
+	label: string,
+	participants: readonly WorkflowEvidenceParticipant[],
+	harness = false,
+): string {
+	const known = participants.every((participant) =>
+		["input", "output", "cacheRead", "cacheWrite"].every(
+			(key) => typeof participant.usage[key as keyof Usage] === "number",
+		),
+	);
+	const usage = participants.reduce<Usage>(
+		(total, participant) => ({
+			input: total.input + (participant.usage.input ?? 0),
+			output: total.output + (participant.usage.output ?? 0),
+			cacheRead: total.cacheRead + (participant.usage.cacheRead ?? 0),
+			cacheWrite: total.cacheWrite + (participant.usage.cacheWrite ?? 0),
+		}),
+		zero(),
+	);
+	const names = [
+		...new Set(participants.map((participant) => (harness ? participant.model || "default" : participant.harness))),
+	].join(", ");
+	const answersKnown = participants.every((participant) => participant.summary?.assistantMessages !== undefined);
+	const answers = participants.reduce((sum, participant) => sum + (participant.summary?.assistantMessages ?? 0), 0);
+	return row([
+		label,
+		String(participants.length),
+		names,
+		known ? tokens(newTokens(usage)) : "unknown",
+		known ? tokens(usage.cacheRead) : "unknown",
+		answersKnown ? String(answers) : "unknown",
+		participants.every((participant) => participant.activeMs !== null)
+			? duration(participants.reduce((sum, participant) => sum + (participant.activeMs ?? 0), 0))
+			: "unknown",
+	]);
+}
+
 /** Rebuilds the reportable metrics from durable structured evidence, without transcript or native-session reads. */
 export function renderEvidenceReport(evidence: WorkflowEvidence): string {
 	const knownUsage = evidence.participants.some((participant) =>
 		Object.values(participant.usage).some((value) => typeof value === "number" && Number.isFinite(value)),
+	);
+	const completeUsage = evidence.participants.every((participant) =>
+		["input", "output", "cacheRead", "cacheWrite"].every(
+			(key) => typeof participant.usage[key as keyof Usage] === "number",
+		),
 	);
 	const totals = evidence.participants.reduce<Usage>(
 		(total, participant) => ({
@@ -135,12 +197,32 @@ export function renderEvidenceReport(evidence: WorkflowEvidence): string {
 		"",
 		`Lineage ${evidence.lineage} · project ${evidence.project} · revision cursor ${Object.keys(evidence.cursor).length} participants`,
 		knownUsage
-			? `New tokens ${tokens(newTokens(totals))} (${tokens(totals.input)} input, ${tokens(totals.output)} output, ${tokens(totals.cacheWrite)} cache write) · cache reads ${tokens(totals.cacheRead)} · wall time ${duration(evidence.metrics.wallMs)}`
-			: `Usage unavailable · wall time ${duration(evidence.metrics.wallMs)}`,
+			? `New tokens ${tokens(newTokens(totals))}${completeUsage ? "" : " (partial; some participants unavailable)"} (${tokens(totals.input)} input, ${tokens(totals.output)} output, ${tokens(totals.cacheWrite)} cache write) · cache reads ${tokens(totals.cacheRead)} · wall time ${evidence.metrics.wallMs === null ? "unknown" : duration(evidence.metrics.wallMs)}`
+			: `Usage unavailable · wall time ${evidence.metrics.wallMs === null ? "unknown" : duration(evidence.metrics.wallMs)}`,
 		"",
 		knownUsage
-			? "New tokens are input, output and cache writes; cache reads are reported separately."
+			? "New tokens are input, output and cache writes; cache reads are reported separately. Missing participant usage is unknown, not zero."
 			: "Usage measurements are unavailable, not zero.",
+		"",
+		"## By role",
+		"",
+		row(["Role", "Participants", "Harnesses", "New tokens", "Cache reads", "Answers", "Active time"]),
+		row(Array(7).fill("---")),
+	];
+	for (const [role, participants] of evidenceGroups(evidence.participants, (participant) => participant.role)) {
+		out.push(evidenceGroupRow(role, participants));
+	}
+	out.push(
+		"",
+		"## By harness",
+		"",
+		row(["Harness", "Participants", "Models", "New tokens", "Cache reads", "Answers", "Active time"]),
+		row(Array(7).fill("---")),
+	);
+	for (const [harness, participants] of evidenceGroups(evidence.participants, (participant) => participant.harness)) {
+		out.push(evidenceGroupRow(harness, participants, true));
+	}
+	out.push(
 		"",
 		"## Participants",
 		"",
@@ -160,10 +242,12 @@ export function renderEvidenceReport(evidence: WorkflowEvidence): string {
 			"State",
 		]),
 		row(Array(13).fill("---")),
-	];
+	);
 	for (const participant of evidence.participants) {
-		const participantUsageKnown = Object.values(participant.usage).some(
-			(value) => typeof value === "number" && Number.isFinite(value),
+		const participantUsageKnown = ["input", "output", "cacheRead", "cacheWrite"].every(
+			(key) =>
+				typeof participant.usage[key as keyof Usage] === "number" &&
+				Number.isFinite(participant.usage[key as keyof Usage]),
 		);
 		const usage = {
 			input: participant.usage.input ?? 0,
@@ -182,7 +266,7 @@ export function renderEvidenceReport(evidence: WorkflowEvidence): string {
 				participant.summary?.assistantMessages === undefined ? "-" : String(participant.summary.assistantMessages),
 				participantUsageKnown ? tokens(newTokens(usage)) : "-",
 				participantUsageKnown ? tokens(usage.cacheRead) : "-",
-				duration(participant.activeMs),
+				participant.activeMs === null ? "unknown" : duration(participant.activeMs),
 				participant.summary?.slowestMs === undefined ? "-" : duration(participant.summary.slowestMs),
 				participant.summary?.failedToolCalls === undefined ? "-" : String(participant.summary.failedToolCalls),
 				participant.missing ? `missing evidence: ${participant.missing}` : "captured metrics",

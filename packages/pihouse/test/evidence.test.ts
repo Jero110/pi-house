@@ -116,6 +116,10 @@ test("structured reports retain participant breakdowns, tool errors, unknowns, a
 		"codex",
 		"test-driven-development",
 		"Tool errors",
+		"## By role",
+		"## By harness",
+		"partial; some participants unavailable",
+		"unknown",
 		"| 1 |",
 		"source unavailable",
 		"New tokens 46",
@@ -150,6 +154,9 @@ test("capture persists body-free stable revisions and is idempotent", () => {
 	const first = JSON.parse(readFileSync(file, "utf8"));
 	assert.ok(first.fingerprint);
 	assert.equal(first.revision, 1);
+	assert.equal(first.evidence.metrics.newTokens, null, "missing source usage remains unknown, not zero");
+	assert.equal(first.evidence.metrics.wallMs, null, "missing source timing remains unknown, not zero");
+	assert.equal(first.evidence.participants[0].activeMs, null, "missing participant duration remains unknown");
 	assert.ok(!JSON.stringify(first).includes("secret body"));
 	assert.equal(captureRun([root], root, store, { by: "planner" }), "written");
 	const repeated = JSON.parse(readFileSync(file, "utf8"));
