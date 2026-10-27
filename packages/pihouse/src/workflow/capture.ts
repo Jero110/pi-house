@@ -10,10 +10,13 @@ import { basename, dirname, join } from "node:path";
 import type { SessionRecord } from "agent-link-core";
 import { treeOf } from "agent-link-core";
 import { locateTranscript, parsePi, type Transcript, type TranscriptRoots, type Usage } from "agent-transcripts";
+import { persistEvidence } from "./evidence-store.ts";
 import type { MemoryStore, RunAgentEntry, RunPackage, RunTranscript } from "./memory.ts";
+import { ACTIVE_MARKER } from "./migration.ts";
 import { newTokens, renderEvidenceReport, type WorkflowEvidence, type WorkflowEvidenceParticipant } from "./report.ts";
 import { buildRun, isExecutor, type RunAgent, type WorkflowRun } from "./run.ts";
 import { inspectJsonlCursor, type JsonlSourceCursor } from "./source-cursor.ts";
+import { openOperationalStore } from "./storage.ts";
 
 export type FlagBy = RunPackage["flaggedBy"];
 
@@ -617,7 +620,22 @@ export function captureRun(
 		cursor: sourceCursors,
 		...(review ? { review } : {}),
 	};
-	return store.writeRun(stored, transcripts, renderEvidenceReport(evidence));
+	const result = store.writeRun(stored, transcripts, renderEvidenceReport(evidence));
+	if (result === "written" && existsSync(join(store.dir, ACTIVE_MARKER))) {
+		const operational = openOperationalStore(join(store.dir, "memory.sqlite"), { fts: false, legacy: true });
+		try {
+			persistEvidence(operational.db, {
+				runId: pkg.id,
+				revision,
+				fingerprint,
+				evidence,
+				capturedAt: pkg.capturedAt,
+			});
+		} finally {
+			operational.close();
+		}
+	}
+	return result;
 }
 
 /** Records in run.json where a review of the run was written. A run not captured has nowhere to record it. */

@@ -7,7 +7,78 @@ import test from "node:test";
 import type { SessionRecord } from "agent-link-core";
 import { captureRun } from "../src/workflow/capture.ts";
 import { openMemory } from "../src/workflow/memory.ts";
+import { ACTIVE_MARKER } from "../src/workflow/migration.ts";
 import { renderEvidenceReport, type WorkflowEvidence } from "../src/workflow/report.ts";
+import { openOperationalStore } from "../src/workflow/storage.ts";
+
+test("activated verified capture persists operational rows and repeats idempotently", () => {
+	const home = mkdtempSync(join(tmpdir(), "pihouse-evidence-activation-"));
+	const source = join(home, "native-session.jsonl");
+	writeFileSync(
+		source,
+		`${JSON.stringify({ type: "session", id: "native-a", cwd: home })}\n${JSON.stringify({ type: "message", id: "message-a", timestamp: "2026-01-01T00:00:00.000Z", message: { role: "user", content: "synthetic" } })}\n`,
+	);
+	const root: SessionRecord = {
+		id: "root-activation",
+		name: "workflow-planner",
+		parent: null,
+		parentName: null,
+		root: "root-activation",
+		harness: "pihouse",
+		model: null,
+		cwd: home,
+		state: "exited",
+		depth: 0,
+		sessionId: "native-a",
+		transcript: source,
+		startedAt: "2026-01-01T00:00:00.000Z",
+		updatedAt: "2026-01-01T00:01:00.000Z",
+	};
+	const memoryDir = join(home, "memory");
+	const store = openMemory(memoryDir);
+	mkdirSync(memoryDir, { recursive: true });
+	writeFileSync(join(memoryDir, ACTIVE_MARKER), JSON.stringify({ active: true }));
+	assert.equal(captureRun([root], root, store, { by: "planner" }), "written");
+	assert.equal(captureRun([root], root, store, { by: "planner" }), "written");
+	const operational = openOperationalStore(join(memoryDir, "memory.sqlite"), { fts: false, legacy: true });
+	try {
+		assert.equal(operational.db.prepare("SELECT count(*) AS n FROM runs WHERE id = ?").get("root-activation")?.n, 1);
+		assert.equal(
+			operational.db.prepare("SELECT count(*) AS n FROM revisions WHERE run_id = ?").get("root-activation")?.n,
+			1,
+		);
+		assert.equal(operational.db.prepare("SELECT count(*) AS n FROM participants").get()?.n, 1);
+		assert.ok(Number(operational.db.prepare("SELECT count(*) AS n FROM metrics").get()?.n) > 0);
+	} finally {
+		operational.close();
+		rmSync(home, { recursive: true, force: true });
+	}
+});
+
+test("unactivated capture does not create an operational database", () => {
+	const home = mkdtempSync(join(tmpdir(), "pihouse-evidence-unactivated-"));
+	const root: SessionRecord = {
+		id: "root-unactivated",
+		name: "workflow-planner",
+		parent: null,
+		parentName: null,
+		root: "root-unactivated",
+		harness: "pihouse",
+		model: null,
+		cwd: home,
+		state: "exited",
+		depth: 0,
+		sessionId: "missing-transcript",
+		transcript: undefined,
+		startedAt: "2026-01-01T00:00:00.000Z",
+		updatedAt: "2026-01-01T00:01:00.000Z",
+	};
+	const memoryDir = join(home, "memory");
+	const store = openMemory(memoryDir);
+	assert.equal(captureRun([root], root, store, { by: "planner" }), "written");
+	assert.equal(existsSync(join(memoryDir, "memory.sqlite")), false);
+	rmSync(home, { recursive: true, force: true });
+});
 
 test("a report can be regenerated from retained evidence without captured transcripts", () => {
 	const home = mkdtempSync(join(tmpdir(), "pihouse-evidence-report-"));
