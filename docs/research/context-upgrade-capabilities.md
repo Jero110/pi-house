@@ -19,3 +19,17 @@ No automatic switch, route profile interface, monitoring loop, pause mechanism, 
 ## Codex output limits
 
 The installed `@earendil-works/pi-ai/dist/api/openai-codex-responses.js` passes simple options into the Codex stream, but its `buildRequestBody` does not add `max_output_tokens` or otherwise consume `maxTokens`. Therefore an isolated Codex call's `maxTokens` option is not evidence of a hard provider-enforced output limit in this installed implementation. No hard spending cap should be promised from that option. This is a source inspection, not a live provider test; future versions may differ.
+
+## Implemented conservative subset (same agent, no handoff)
+
+`packages/pihouse/src/workflow/context-upgrade.ts` (pure policy) and `packages/pihouse/src/extensions/context-upgrade.ts` (extension) change the model of the one running pi agent. They never replace a writer, move a queue or call a provider.
+
+Authority: nothing happens without the `--context-upgrade-profile` flag, a JSON profile naming exact provider, source model, target model, account, billing, `threshold` (0-1) and `headroom` (tokens). Registering the extension alone authorizes nothing, and a fixed-model plan task gets no upgrade unless its launch passes such a profile. The user's grant for this run is not a standing authority.
+
+Policy (`assess`): the current model must be the profile's source; usage must be known (a null estimate pauses, it is never zero) and match the source window; usage at or above the threshold; the target must use the same API, accept every input kind of the source, have a strictly larger window, leave at least `headroom` tokens, and be in `modelRegistry.getAvailable()` (local credentials only, not remote quota). One attempt per session, also read back from `context-upgrade` entries.
+
+Automatic, supported: monitoring on `turn_end` and `session_before_compact`. At the threshold it appends a UI-only `context-upgrade` entry (`pending` or `paused` with reason, tokens, window, threshold, headroom, target) and notifies once per session.
+
+Manual, by design: `/context-upgrade apply` awaits `ctx.waitForIdle()`, then rechecks idle, queued messages, model, usage and availability, persists an `attempt` entry, calls `pi.setModel` and records the actual model (`switched`, or `paused` when the native result is not confirmed). It does not interrupt a busy run.
+
+Pending, not implemented: a fully automatic switch. Pi documents no boundary where an extension may change the model before the next request without racing queued work; `turn_end` and `agent_before_settle` can append entries and continue but have no model-change result. Default is therefore notice plus manual apply. Also pending: parent-owned registration in `paths.ts`/`launcher.ts`, passing the flag from the executor or plan, remote quota checks, and reload: already-running workers do not have this until the extension loads at launch or reload. The Luna (272K) to Terra (500K) route is only an example profile built from the current local metadata.
