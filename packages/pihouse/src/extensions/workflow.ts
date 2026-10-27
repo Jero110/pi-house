@@ -8,8 +8,9 @@
 // ask: gives the model the architecture, the skills catalog and what is installed here, then the question.
 // The report is computed, never guessed: the model only writes the recommendations and the answers.
 import { createHash } from "node:crypto";
-import { mkdirSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import type { DatabaseSync } from "node:sqlite";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { SessionRecord } from "agent-link-core";
 import { agentLinkHome, hubPaths, readJournal } from "agent-link-core";
@@ -31,15 +32,29 @@ import {
 	sweepFlagged,
 } from "../workflow/capture.ts";
 import { LIMITS, type MemoryStore, openMemory } from "../workflow/memory.ts";
+import { ACTIVE_MARKER } from "../workflow/migration.ts";
+import { createProposalTarget } from "../workflow/proposal-target.ts";
+import {
+	applyProposal,
+	approveProposal,
+	getProposal,
+	listProposals,
+	type Proposal,
+	recoverApplying,
+	rejectProposal,
+	resolveProposalId,
+	type ScopedTarget,
+} from "../workflow/proposals.ts";
 import { renderReport } from "../workflow/report.ts";
 import { buildRun, pickRoot, type WorkflowRun } from "../workflow/run.ts";
 import { fetchSource, type SourceResult } from "../workflow/sources.ts";
+import { openOperationalStore } from "../workflow/storage.ts";
 import { sessionTitle } from "./brand.ts";
 
 export const MESSAGE_TYPE = "pihouse-workflow";
 
 export const USAGE =
-	"usage: /workflow report [--last] | /workflow review [--last] | /workflow save [reason] | /workflow ask <question>";
+	"usage: /workflow report [--last] | /workflow review [--last] | /workflow save [reason] | /workflow ask <question> | /workflow proposals | /workflow approve <id> | /workflow reject <id> [reason]";
 
 export function reviewInstructions(reportFile: string, plan: string | undefined): string {
 	return [
@@ -327,6 +342,165 @@ async function review(pi: ExtensionAPI, args: string[], ctx: ExtensionCommandCon
 	);
 }
 
+export type ProposalCommand = "proposals" | "approve" | "reject";
+
+export interface ProposalDeps {
+	/** The workflow memory folder; its memory.sqlite holds the proposals once the store is active. */
+	memory: string;
+	/** The checkout whose skills/ folder a skill proposal edits. */
+	repoRoot: string;
+}
+
+export interface CommandResult {
+	level: "info" | "warning";
+	text: string;
+}
+
+const PROPOSAL_LIST_LIMIT = 50;
+const NO_REASON = "No reason given";
+const NOT_ACTIVE =
+	"The proposal store is not active yet, so nothing changed. These commands never migrate the workflow memory.";
+const PROPOSAL_USAGE: Record<Exclude<ProposalCommand, "proposals">, string> = {
+	approve: "usage: /workflow approve <id>",
+	reject: "usage: /workflow reject <id> [reason]",
+};
+
+const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));
+
+/** What the apply step checked beyond the target's own reads: a skill is checked for frontmatter and catalog, no model. */
+const validationOf = (proposal: Proposal): string =>
+	proposal.target.startsWith("skill:")
+		? "frontmatter and catalog checks (no model or network)"
+		: "the target's own checks";
+
+/**
+ * The target a proposal applies to. A target that cannot be built (a legacy hypothesis names "(new)") becomes one whose
+ * reads fail with the reason, so the library records it as failed.
+ * Problem: createProposalTarget throws for "(new)" before the library can record why the proposal cannot apply.
+ * Example: `approve` on a legacy hypothesis must end as "failed: Legacy hypothesis ...", not as a crash.
+ * Solution: the reason travels inside the target and the library stores it, as it does for every other failure.
+ */
+function targetFor(proposal: Proposal, deps: ProposalDeps): ScopedTarget {
+	try {
+		return createProposalTarget({
+			repoRoot: deps.repoRoot,
+			storeRoot: deps.memory,
+			target: proposal.target,
+			proposalId: proposal.id,
+		});
+	} catch (error) {
+		const reason = messageOf(error);
+		return {
+			read: async () => {
+				throw new Error(reason);
+			},
+			compareAndSwap: async () => false,
+			validate: async () => false,
+			failureReason: () => reason,
+		};
+	}
+}
+
+/** The result of an apply, said only when the state is applied and its receipt is recorded. */
+function outcome(db: DatabaseSync, proposal: Proposal): CommandResult {
+	if (proposal.state !== "applied")
+		return {
+			level: "warning",
+			text: `Not applied: ${proposal.id} is ${proposal.state}${proposal.reason ? `: ${proposal.reason}` : ""}.`,
+		};
+	const receipt = db
+		.prepare("SELECT 1 AS hit FROM receipts WHERE proposal_id = ? AND kind = 'application'")
+		.get(proposal.id);
+	if (!receipt)
+		return {
+			level: "warning",
+			text: `${proposal.id} is marked applied but has no receipt; inspect it before retrying.`,
+		};
+	return {
+		level: "info",
+		text: `Applied ${proposal.id} to ${proposal.target}. Receipt recorded; checked: ${validationOf(proposal)}.`,
+	};
+}
+
+/**
+ * Approves the displayed proposal, then applies it. An approved proposal is applied without a second approval; an
+ * interrupted one (applying) is recovered to failed, so it is never applied twice.
+ */
+async function approve(db: DatabaseSync, proposal: Proposal, deps: ProposalDeps): Promise<CommandResult> {
+	const target = targetFor(proposal, deps);
+	if (proposal.state === "applying") return outcome(db, await recoverApplying(db, proposal.id, target));
+	if (proposal.state === "open") approveProposal(db, proposal.id, proposal.version);
+	else if (proposal.state !== "approved")
+		return {
+			level: "warning",
+			text: `${proposal.id} is ${proposal.state}; only open or approved proposals can be approved.`,
+		};
+	return outcome(db, await applyProposal(db, proposal.id, target));
+}
+
+/** The bounded list: one line per proposal, with the same fields for every state. */
+function listText(db: DatabaseSync): string {
+	const rows = listProposals(db, { limit: PROPOSAL_LIST_LIMIT });
+	if (rows.length === 0) return "No proposals yet.";
+	const lines = rows.map((row) => {
+		const legacy = getProposal(db, row.id).before === "" ? " (legacy hypothesis: no verified before-state)" : "";
+		const runs = `${row.supportingRuns} run${row.supportingRuns === 1 ? "" : "s"}`;
+		return `${row.id.slice(0, 8)}  ${row.kind ?? "-"}  ${row.scope ?? "-"}  ${row.target}  ${row.state}${legacy}  ${runs}  next: ${row.nextAction}`;
+	});
+	if (rows.length === PROPOSAL_LIST_LIMIT) lines.push(`The first ${PROPOSAL_LIST_LIMIT} proposals are shown.`);
+	return ["Proposals: id, kind, scope, target, state, supporting runs, next action", ...lines].join("\n");
+}
+
+/**
+ * `/workflow proposals | approve <id> | reject <id> [reason]`: the proposal library over the activated store. No model
+ * turn; it returns what to show and the handler notifies it.
+ * Problem: a proposal printed as applied before its receipt exists would tell the user a change landed that did not.
+ * Example: a crash after the file write but before the receipt insert. Solution: "Applied" is printed only when the
+ * state is applied and its receipt row exists; anything else says "Not applied" with the stored reason.
+ */
+export async function proposalCommand(
+	command: ProposalCommand,
+	args: string[],
+	deps: ProposalDeps,
+): Promise<CommandResult> {
+	const dbPath = join(deps.memory, "memory.sqlite");
+	if (!existsSync(join(deps.memory, ACTIVE_MARKER)) || !existsSync(dbPath))
+		return { level: "warning", text: NOT_ACTIVE };
+	const store = openOperationalStore(dbPath, { fts: false, legacy: true });
+	try {
+		if (command === "proposals") return { level: "info", text: listText(store.db) };
+		const [prefix = "", ...rest] = args;
+		if (!prefix) return { level: "warning", text: PROPOSAL_USAGE[command] };
+		const found = resolveProposalId(store.db, prefix);
+		if (found.status === "none")
+			return { level: "warning", text: `No proposal matches "${prefix}". /workflow proposals lists them.` };
+		if (found.status === "ambiguous")
+			return { level: "warning", text: `"${prefix}" matches ${found.matches.join(", ")}. Use a longer prefix.` };
+		if (command === "reject") {
+			const rejected = rejectProposal(store.db, found.proposal.id, rest.join(" ").trim() || NO_REASON);
+			return { level: "info", text: `Rejected ${rejected.id}: ${rejected.reason}.` };
+		}
+		return await approve(store.db, found.proposal, deps);
+	} catch (error) {
+		return { level: "warning", text: messageOf(error) };
+	} finally {
+		store.close();
+	}
+}
+
+async function runProposalCommand(
+	command: ProposalCommand,
+	args: string[],
+	ctx: ExtensionCommandContext,
+): Promise<void> {
+	try {
+		const result = await proposalCommand(command, args, { memory: pihousePaths().memory, repoRoot: REPO_ROOT });
+		ctx.ui.notify(result.text, result.level);
+	} catch (error) {
+		ctx.ui.notify(`/workflow ${command}: ${messageOf(error)}`, "warning");
+	}
+}
+
 const slugOf = (run: WorkflowRun) =>
 	(run.plan?.split("/").pop()?.replace(/\.md$/, "") ?? run.root.name).replace(/[^\w-]+/g, "-");
 
@@ -357,7 +531,7 @@ export default function workflow(pi: ExtensionAPI): void {
 	pi.registerCommand("workflow", {
 		description: "review: what the last run did and how to improve it · ask <question>: about your workflow and skills",
 		getArgumentCompletions: (prefix) =>
-			["report", "report --last", "review", "review --last", "save ", "ask "]
+			["report", "report --last", "review", "review --last", "save ", "ask ", "proposals", "approve ", "reject "]
 				.filter((c) => c.startsWith(prefix))
 				.map((c) => ({ value: c, label: c })),
 		handler: async (raw, ctx) => {
@@ -365,6 +539,7 @@ export default function workflow(pi: ExtensionAPI): void {
 			if (sub === "report") return report(rest, ctx);
 			if (sub === "review") return review(pi, rest, ctx);
 			if (sub === "save") return save(pi, rest.join(" ").trim(), ctx);
+			if (sub === "proposals" || sub === "approve" || sub === "reject") return runProposalCommand(sub, rest, ctx);
 			if (sub === "ask" && rest.join(" ").trim()) {
 				pi.sendMessage(
 					{ customType: MESSAGE_TYPE, content: await askContext(rest.join(" ").trim()), display: false },
