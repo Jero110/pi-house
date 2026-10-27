@@ -8,10 +8,17 @@
 		"node": ">=26.11.1"
 	},
 	"exports": {
-		".": "./src/contracts.ts"
+		".": "./src/contracts.ts",
+		"./mcp": "./src/mcp.ts",
+		"./cli": "./src/cli.ts"
 	},
 	"dependencies": {
 		"@napi-rs/canvas": "1.0.13",
+		"cmux-mcp": "0.1.0",
 		"pdfjs-dist": "6.4.299"
+	},
+	"bin": {
+		"books-rag": "./src/cli.ts",
+		"books-rag-mcp": "./src/mcp.ts"
 	}
 }
