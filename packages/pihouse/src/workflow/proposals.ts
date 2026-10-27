@@ -11,6 +11,7 @@ export interface Proposal {
 	version: string;
 	state: ProposalState;
 	reason?: string;
+	history?: { state: ProposalState; version: string; reason?: string; explanation: string }[];
 }
 
 export function hashBytes(value: string): string {
@@ -61,6 +62,49 @@ export function rejectProposal(db: DatabaseSync, id: string, reason: string): Pr
 	const proposal = getProposal(db, id);
 	if (!["open", "approved"].includes(proposal.state)) throw new Error("Proposal cannot be rejected");
 	return transition(db, proposal, "rejected", reason);
+}
+
+// A trusted review must identify material new evidence; matching words alone cannot
+// establish semantic equivalence or undo a prior human rejection.
+export function mergeEvidence(
+	db: DatabaseSync,
+	id: string,
+	evidence: string[],
+	decision: { kind: "merge" | "reopen"; explanation: string },
+): Proposal {
+	const proposal = getProposal(db, id);
+	if (!decision.explanation.trim() || decision.explanation.length > 1000 || evidence.length > 100)
+		throw new Error("Invalid review decision");
+	if (proposal.state !== "open" && proposal.state !== "rejected") throw new Error("Proposal cannot receive evidence");
+	if ((proposal.state === "rejected") !== (decision.kind === "reopen"))
+		throw new Error("Explicit reopen required for rejection");
+	const merged = [...new Set([...proposal.evidence, ...evidence])].sort();
+	if (merged.length === proposal.evidence.length) throw new Error("No new evidence");
+	const version = hashBytes(
+		JSON.stringify({
+			id: proposal.id,
+			target: proposal.target,
+			before: proposal.before,
+			after: proposal.after,
+			evidence: merged,
+			prior: proposal.version,
+		}),
+	);
+	const next: Proposal = {
+		...proposal,
+		state: "open",
+		evidence: merged,
+		version,
+		history: [
+			...(proposal.history ?? []),
+			{ state: proposal.state, version: proposal.version, reason: proposal.reason, explanation: decision.explanation },
+		],
+	};
+	const result = db
+		.prepare("UPDATE proposals SET state = ?, payload = ? WHERE id = ? AND state = ? AND payload = ?")
+		.run(next.state, JSON.stringify(next), id, proposal.state, JSON.stringify(proposal));
+	if (result.changes !== 1) throw new Error("Proposal changed concurrently");
+	return next;
 }
 
 // The caller must provide an atomic, target-scoped compare-and-swap. A read followed
