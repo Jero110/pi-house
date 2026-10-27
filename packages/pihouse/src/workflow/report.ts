@@ -86,16 +86,23 @@ function wall(run: WorkflowRun): number {
 export function renderReport(run: WorkflowRun, opts: { messages?: boolean } = {}): string {
 	const all = run.agents;
 	const total = all.reduce((u, a) => add(u, a.summary?.usage), zero());
+	const hasUsage = all.some((a) => a.summary?.usage !== undefined);
+	const partial = all.some((a) => a.record.state === "working" || a.record.state === "starting");
 	const out: string[] = [];
 	out.push(`# Workflow review: ${run.plan ?? run.root.name}`);
+	if (partial) out.push("", "**PARTIAL:** one or more agents are active or their evidence is unavailable.");
 	out.push("");
 	out.push(
 		`Root ${run.root.name} (${run.root.harness}) · ${all.length} agents · started ${run.root.startedAt}${run.plan ? ` · plan ${run.plan}` : ""}`,
 	);
 	out.push(
-		`New tokens ${tokens(newTokens(total))} (${tokens(total.input)} input, ${tokens(total.output)} output, ${tokens(total.cacheWrite)} cache write) · cache reads ${tokens(total.cacheRead)} · wall time ${duration(wall(run))}`,
+		hasUsage
+			? `New tokens ${tokens(newTokens(total))} (${tokens(total.input)} input, ${tokens(total.output)} output, ${tokens(total.cacheWrite)} cache write) · cache reads ${tokens(total.cacheRead)} · wall time ${duration(wall(run))}`
+			: `Usage unavailable · wall time ${duration(wall(run))}`,
 		"",
-		"New tokens are what the run processed for the first time. Cache reads are context each answer read again from the prompt cache; providers bill them at about a tenth of an input token, so they are listed apart.",
+		hasUsage
+			? "New tokens are input, output and cache writes; cache reads are reported separately."
+			: "Usage measurements are unavailable, not zero.",
 	);
 
 	out.push("", "## By role", "");

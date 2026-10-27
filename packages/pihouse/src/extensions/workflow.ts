@@ -38,7 +38,8 @@ import { sessionTitle } from "./brand.ts";
 
 export const MESSAGE_TYPE = "pihouse-workflow";
 
-export const USAGE = "usage: /workflow review [--last] | /workflow save [reason] | /workflow ask <question>";
+export const USAGE =
+	"usage: /workflow report [--last] | /workflow review [--last] | /workflow save [reason] | /workflow ask <question>";
 
 export function reviewInstructions(reportFile: string, plan: string | undefined): string {
 	return [
@@ -317,6 +318,21 @@ function save(pi: ExtensionAPI, reason: string, ctx: ExtensionCommandContext): v
 	);
 }
 
+function report(args: string[], ctx: ExtensionCommandContext): void {
+	const records = readJournal(hubPaths(agentLinkHome()).sessions);
+	const root = args.includes("--last")
+		? pickRoot(records, {})
+		: pickRoot(records, { sessionId: ctx.sessionManager.getSessionId(), agent: process.env.AGENT_LINK_AGENT });
+	const run = root
+		? buildRun(records, root)
+		: buildRun([], localRecord(ctx.sessionManager.getSessionId(), ctx.cwd, ctx.sessionManager.getSessionFile()));
+	const paths = pihousePaths();
+	mkdirSync(paths.reports, { recursive: true });
+	const file = join(paths.reports, reviewFileName(slugOf(run), new Date()));
+	writeFileSync(file, `${renderReport(run)}\n`);
+	ctx.ui.notify(`Workflow report: ${file}`, "info");
+}
+
 async function review(pi: ExtensionAPI, args: string[], ctx: ExtensionCommandContext): Promise<void> {
 	const records = readJournal(hubPaths(agentLinkHome()).sessions);
 	const store = openMemory(pihousePaths().memory);
@@ -401,11 +417,12 @@ export default function workflow(pi: ExtensionAPI): void {
 	pi.registerCommand("workflow", {
 		description: "review: what the last run did and how to improve it · ask <question>: about your workflow and skills",
 		getArgumentCompletions: (prefix) =>
-			["review", "review --last", "save ", "ask "]
+			["report", "report --last", "review", "review --last", "save ", "ask "]
 				.filter((c) => c.startsWith(prefix))
 				.map((c) => ({ value: c, label: c })),
 		handler: async (raw, ctx) => {
 			const [sub, ...rest] = raw.trim().split(/\s+/);
+			if (sub === "report") return report(rest, ctx);
 			if (sub === "review") return review(pi, rest, ctx);
 			if (sub === "save") return save(pi, rest.join(" ").trim(), ctx);
 			if (sub === "ask" && rest.join(" ").trim()) {
