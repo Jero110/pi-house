@@ -13,7 +13,7 @@ export default function contextUpgrade(pi: ExtensionAPI) {
 	pi.registerFlag("context-upgrade-profile", {
 		type: "string",
 		description:
-			"Explicit JSON context upgrade profile. Opt-in: without it nothing is monitored. Reports a pending upgrade only; no automatic switching",
+			'Opt-in, JSON: pih --context-upgrade-profile \'{"id":"coding","provider":"openai-codex","source":"gpt-small","target":"gpt-6-luna","account":"openai","billing":"subscription","threshold":0.8,"headroom":100}\'. Without it nothing is monitored or recorded. Reports a pending upgrade only; no automatic switching',
 	});
 
 	function snapshot(ctx: ExtensionContext) {

@@ -3,7 +3,7 @@ import test from "node:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import extension from "../src/extensions/context-upgrade.ts";
 import { EXTENSIONS } from "../src/paths.ts";
-import { assess, type Profile } from "../src/workflow/context-upgrade.ts";
+import { assess, type Profile, parseProfile } from "../src/workflow/context-upgrade.ts";
 
 const profile: Profile = {
 	id: "coding",
@@ -181,4 +181,29 @@ test("the help text says the monitor only reports and that automatic switching i
 	} as unknown as ExtensionAPI);
 	assert.equal(descriptions.length, 2);
 	for (const text of descriptions) assert.match(text, /no automatic switching/i);
+	// The opt-in is spelled out: the flag name and an example, and nothing happens without it.
+	assert.match(descriptions[0] ?? "", /pih --context-upgrade-profile '\{"id":"coding"/);
+	assert.match(descriptions[0] ?? "", /Without it nothing is monitored/);
 });
+
+// The example in the help text is a real opt-in: it parses, so copying it turns monitoring on.
+test("the example in the help text parses as a profile", () => {
+	const flag = extensionFlagDescription();
+	const json = /'(\{.*\})'/.exec(flag)?.[1];
+	assert.ok(json, "the help shows the JSON in quotes");
+	assert.ok(parseProfile(json), "the example is a valid profile");
+});
+
+function extensionFlagDescription(): string {
+	let text = "";
+	extension({
+		on() {},
+		registerFlag: (_name: string, options: { description?: string }) => {
+			text = options.description ?? "";
+		},
+		getFlag: () => undefined,
+		registerCommand() {},
+		appendEntry() {},
+	} as unknown as ExtensionAPI);
+	return text;
+}
