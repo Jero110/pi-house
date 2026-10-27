@@ -208,6 +208,12 @@ export async function executeDigest(
 			if (candidate) results.push({ revision: candidate.revision, status: result.status });
 			continue;
 		}
+		const freshState = options.operationalState(candidate.runId);
+		const freshFingerprint = options.currentFingerprint(candidate.revision);
+		if (!isQuiescent(freshState) || freshFingerprint !== candidate.fingerprint) {
+			results.push({ revision: candidate.revision, status: "deferred" });
+			continue;
+		}
 		const cleanup = await dispatchCleanup(options.db, candidate.id, {
 			invocation: options.invocation,
 			now: options.now,

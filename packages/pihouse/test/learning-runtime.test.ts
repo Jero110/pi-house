@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -56,6 +56,94 @@ test("candidate production requires an operational revision, retained complete p
 				operationalState: () => ({ states: ["idle"], deliveries: null, handoff: false, livenessKnown: false }),
 			}).candidates.length,
 			0,
+		);
+	} finally {
+		store.close();
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("execution defers cleanup when the run becomes active after digest commit", async () => {
+	const root = mkdtempSync(join(tmpdir(), "learning-live-cleanup-"));
+	const store = openOperationalStore(join(root, "memory.sqlite"), { fts: false });
+	try {
+		const owned = join(root, "owned");
+		const run = join(owned, "runs", "run-one");
+		mkdirSync(join(run, "transcripts"), { recursive: true });
+		mkdirSync(join(root, "digests"), { recursive: true });
+		writeFileSync(
+			join(run, "run.json"),
+			JSON.stringify({ id: "run-one", fingerprint: "source-hash", project: "fixture", agents: [{ id: "a" }] }),
+		);
+		writeFileSync(join(run, "transcripts", "a.jsonl"), "synthetic evidence\\n");
+		store.db.prepare("INSERT INTO runs(id, created_at) VALUES ('run-one', 'now')").run();
+		store.db
+			.prepare(
+				"INSERT INTO revisions(id, run_id, source_hash, created_at) VALUES ('run-one.r1', 'run-one', 'source-hash', 'now')",
+			)
+			.run();
+		store.db
+			.prepare("INSERT INTO metrics(id, revision_id, kind, value) VALUES ('m1', 'run-one.r1', 'run', '{}')")
+			.run();
+		store.db
+			.prepare("INSERT INTO participants(id, revision_id, role, payload) VALUES ('p1', 'run-one.r1', 'planner', '{}')")
+			.run();
+		let active = false;
+		const options = {
+			storeDir: join(root, "legacy"),
+			db: store.db,
+			ownedRoot: owned,
+			operationalState: () => ({
+				states: [active ? "working" : "idle"],
+				deliveries: 0,
+				handoff: false,
+				livenessKnown: true,
+			}),
+			currentFingerprint: () => "source-hash",
+		};
+		const candidate = produceDigestCandidates(options).candidates[0];
+		const sections = Object.fromEntries(
+			[
+				"objective",
+				"participants",
+				"decisions",
+				"failures",
+				"validations",
+				"artifacts",
+				"limitations",
+				"candidates",
+			].map((key) => [key, key]),
+		);
+		const result = await executeDigest(
+			{
+				...options,
+				digestRoot: join(root, "digests"),
+				outputPath: () => join(root, "out"),
+				cwd: root,
+				invocation: "x",
+				now: Date.now,
+				worker: async (job) => {
+					writeFileSync(
+						job.outputPath,
+						JSON.stringify({
+							schemaVersion: 1,
+							runId: "run-one",
+							project: "fixture",
+							revision: job.revision,
+							sections,
+						}),
+					);
+					active = true;
+					return { status: "success", outputPath: job.outputPath };
+				},
+			},
+			[candidate],
+		);
+		assert.equal(result[0].status, "deferred");
+		assert.ok(existsSync(join(run, "transcripts", "a.jsonl")));
+		assert.equal(
+			store.db.prepare("SELECT state FROM cleanup_manifests WHERE id='run-one.r1'").get()?.state,
+			"committed",
 		);
 	} finally {
 		store.close();
