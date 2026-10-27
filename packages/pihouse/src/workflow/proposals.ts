@@ -42,6 +42,69 @@ export function getProposal(db: DatabaseSync, id: string): Proposal {
 	return proposal;
 }
 
+export type ProposalIdResolution =
+	| { status: "found"; proposal: Proposal }
+	| { status: "none" }
+	| { status: "ambiguous"; matches: string[] };
+
+export function listProposals(db: DatabaseSync, options: { states?: ProposalState[]; limit?: number } = {}) {
+	const limit = options.limit ?? 50;
+	if (!Number.isInteger(limit) || limit < 1 || limit > 100)
+		throw new Error("Proposal list limit must be between 1 and 100");
+	const rows = options.states?.length
+		? db
+				.prepare(
+					`SELECT id, state, payload FROM proposals WHERE state IN (${options.states.map(() => "?").join(",")}) ORDER BY id LIMIT ?`,
+				)
+				.all(...options.states, limit)
+		: db.prepare("SELECT id, state, payload FROM proposals ORDER BY id LIMIT ?").all(limit);
+	return rows.map((row) => {
+		const value = JSON.parse(String(row.payload)) as Proposal & { kind?: string; scope?: string };
+		const supportingRuns = new Set(value.evidence).size;
+		return {
+			id: value.id,
+			target: value.target,
+			state: String(row.state) as ProposalState,
+			...(value.kind ? { kind: value.kind } : {}),
+			...(value.scope ? { scope: value.scope } : {}),
+			supportingRuns,
+			nextAction:
+				value.state === "open"
+					? "approve or reject"
+					: value.state === "approved"
+						? "apply"
+						: value.state === "applied"
+							? "none"
+							: value.state === "failed"
+								? "inspect and revise"
+								: value.state === "rejected"
+									? "none"
+									: "inspect",
+		};
+	});
+}
+
+export function resolveProposalId(db: DatabaseSync, prefix: string): ProposalIdResolution {
+	if (!/^[a-z0-9-]{1,64}$/i.test(prefix)) return { status: "none" };
+	const ids = db
+		.prepare("SELECT id FROM proposals WHERE substr(id, 1, ?) = ? ORDER BY id LIMIT 2")
+		.all(prefix.length, prefix)
+		.map((row) => String(row.id));
+	if (ids.length === 0) return { status: "none" };
+	if (ids.length > 1) return { status: "ambiguous", matches: ids };
+	return { status: "found", proposal: getProposal(db, ids[0] ?? "") };
+}
+
+export async function recoverApplying(db: DatabaseSync, id: string, target: ScopedTarget): Promise<Proposal> {
+	const proposal = getProposal(db, id);
+	if (proposal.state !== "applying") throw new Error("Proposal is not applying");
+	if (db.prepare("SELECT 1 AS hit FROM receipts WHERE proposal_id = ? AND kind = 'application'").get(id))
+		throw new Error("Application receipt exists; recovery requires explicit receipt verification");
+	const observed = await target.read();
+	const state = observed === proposal.before ? "before" : observed === proposal.after ? "after" : "other";
+	return transition(db, proposal, "failed", `Recovered interrupted application; observed target state: ${state}`);
+}
+
 function transition(db: DatabaseSync, proposal: Proposal, state: ProposalState, reason?: string): Proposal {
 	const next: Proposal = { ...proposal, state, ...(reason === undefined ? {} : { reason }) };
 	const result = db
@@ -118,6 +181,13 @@ export interface ScopedTarget {
 export async function applyProposal(db: DatabaseSync, id: string, target: ScopedTarget): Promise<Proposal> {
 	let proposal = getProposal(db, id);
 	if (proposal.state !== "approved") throw new Error("Proposal is not approved");
+	if (proposal.before === "")
+		return transition(
+			db,
+			proposal,
+			"failed",
+			"Legacy hypothesis has no verified before-state; create a concrete proposal before applying",
+		);
 	proposal = transition(db, proposal, "applying");
 	try {
 		if ((await target.read()) !== proposal.before) throw new Error("Target changed since approval");

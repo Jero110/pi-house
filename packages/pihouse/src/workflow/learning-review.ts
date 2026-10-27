@@ -5,6 +5,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { validateDigest } from "./digest-contract.ts";
 import { commitArtifact } from "./documents.ts";
 import { claimJob, type DispatchInput, type DispatchOptions, dispatchJobs, enqueueJob, finishJob } from "./jobs.ts";
+import { type IntakeResult, ingestReview } from "./proposal-intake.ts";
 
 // One self-learning invocation: prepare missing digests, scan the retained ones, review the batch in a separate agent.
 // The invocation is the authorization for all three steps; nothing here applies a change (proposal approval and
@@ -25,6 +26,8 @@ export interface AgentRequest {
 	outputPath: string;
 	/** Review only: the persisted, code-checked scan summary. */
 	scanSummaryPath?: string;
+	/** Review agents must emit this exact machine-readable proposal envelope. */
+	outputContract?: string;
 }
 export type AgentResponse = { status: "success"; artifactPath: string } | { status: "failure" | "cancelled" };
 
@@ -46,6 +49,8 @@ export interface SelfLearningOptions {
 	maxOutputChars?: number;
 	maxDigestJobs?: number;
 	maxAttempts?: number;
+	/** Proposal intake is injected so review tests and production wiring share no model dependency. */
+	intake?: (reviewId: string, artifact: string) => IntakeResult | Promise<IntakeResult>;
 }
 
 export interface GroupSummary {
@@ -486,12 +491,26 @@ export async function runSelfLearning(db: DatabaseSync, options: SelfLearningOpt
 	const reviewed = await stage(db, options, {
 		jobId: `review:${batchId}`,
 		fingerprint,
-		request: { stage: "review", batchId, manifestPath, outputPath: reviewPath, scanSummaryPath: summary.path },
+		request: {
+			stage: "review",
+			batchId,
+			manifestPath,
+			outputPath: reviewPath,
+			scanSummaryPath: summary.path,
+			outputContract:
+				'Include exactly one fenced ```json block with {"schemaVersion":1,"proposals":[...]}. Each proposal has kind, scope (project|global), target, before, after, supporting (digest revision IDs), opposing (digest revision IDs), conditions (strings), uncertainty, validation, and optional reopen explanation. Emit [] when there are no actionable proposals.',
+		},
 		accept: (path) => withinBudget(path, maxOutputChars),
 	});
 	if (!reviewed) return { ...result, status: "review-failed", reason: "review produced no valid artifact" };
 	if (!manifest.items.every(pinnedDigestIntact))
 		return { ...result, status: "blocked", reason: "a pinned digest changed during review" };
+	// Problem: a completed review was previously only prose; example: its fenced proposal block was never persisted as decisions.
+	// Solution: intake runs only after the review artifact is accepted and pinned inputs remain intact.
+	const review = readFileSync(reviewPath, "utf8");
+	const intake = (await options.intake?.(batchId, review)) ?? ingestReview(db, batchId, review);
+	if (intake.status === "failed")
+		return { ...result, status: "review-failed", reason: `proposal intake failed: ${intake.reason}` };
 	// Only the pinned members are reviewed. Failed and overflow inputs have no membership and stay pending.
 	db.prepare("UPDATE batches SET state = 'reviewed' WHERE id = ? AND state = 'open'").run(batchId);
 	return { ...result, status: "reviewed", reviewPath };

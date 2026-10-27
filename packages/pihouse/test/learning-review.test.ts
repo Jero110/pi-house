@@ -89,7 +89,9 @@ function options(f: Fixture, extra: Partial<SelfLearningOptions> = {}, decision?
 			mkdirSync(join(request.outputPath, ".."), { recursive: true });
 			writeFileSync(
 				request.outputPath,
-				request.stage === "scan" ? JSON.stringify(decision ?? { schemaVersion: 1, groups: [] }) : "full reasoning",
+				request.stage === "scan"
+					? JSON.stringify(decision ?? { schemaVersion: 1, groups: [] })
+					: 'Full reasoning.\n\n```json\n{"schemaVersion":1,"proposals":[]}\n```',
 			);
 			return { status: "success", artifactPath: request.outputPath };
 		},
@@ -144,7 +146,7 @@ test("one invocation scans then reviews pinned digests, records lineage support 
 		assert.equal(manifest.prior[0].version, prior.version);
 		assert.deepEqual(members(f, result.batchId ?? ""), [a.revision, b.revision, c.revision]);
 		assert.equal(getProposal(f.store.db, "p1").state, "rejected");
-		assert.equal(f.store.db.prepare("SELECT COUNT(*) AS n FROM receipts").get()?.n, 0);
+		assert.equal(f.store.db.prepare("SELECT COUNT(*) AS n FROM receipts WHERE kind = 'application'").get()?.n, 0);
 	} finally {
 		done(f);
 	}

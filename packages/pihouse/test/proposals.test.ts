@@ -6,8 +6,11 @@ import {
 	approveProposal,
 	createProposal,
 	getProposal,
+	listProposals,
 	mergeEvidence,
+	recoverApplying,
 	rejectProposal,
+	resolveProposalId,
 	rollbackProposal,
 } from "../src/workflow/proposals.ts";
 
@@ -62,6 +65,35 @@ test("application requires observed changed bytes and validation; rollback refus
 	bytes = "new";
 	await rollbackProposal(db, "p", target);
 	assert.equal(bytes, "old");
+	db.close();
+});
+
+test("proposal listing resolves prefixes without dumping payloads and interrupted application recovers as failed", async () => {
+	const db = new DatabaseSync(":memory:");
+	db.exec(
+		"CREATE TABLE proposals(id TEXT PRIMARY KEY, state TEXT NOT NULL, payload TEXT NOT NULL); CREATE TABLE receipts(id TEXT PRIMARY KEY, proposal_id TEXT, kind TEXT NOT NULL, payload TEXT NOT NULL)",
+	);
+	const p = createProposal(db, {
+		id: "proposal-one",
+		target: "skill:x",
+		before: "a",
+		after: "b",
+		evidence: ["run1", "run2"],
+	});
+	assert.equal(resolveProposalId(db, "proposal-o").status, "found");
+	assert.equal(listProposals(db)[0]?.supportingRuns, 2);
+	approveProposal(db, p.id, p.version);
+	const applying = db.prepare("SELECT payload FROM proposals WHERE id = ?").get(p.id);
+	const payload = JSON.parse(String(applying?.payload));
+	payload.state = "applying";
+	db.prepare("UPDATE proposals SET state = 'applying', payload = ? WHERE id = ?").run(JSON.stringify(payload), p.id);
+	const result = await recoverApplying(db, p.id, {
+		read: async () => "b",
+		compareAndSwap: async () => false,
+		validate: async () => true,
+	});
+	assert.equal(result.state, "failed");
+	assert.match(result.reason ?? "", /observed target state: after/);
 	db.close();
 });
 
