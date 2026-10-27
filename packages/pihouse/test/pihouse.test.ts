@@ -579,10 +579,10 @@ test("a run is rebuilt from the journal and transcripts: roles, plan, tasks, ski
 test("/workflow ask retrieves bounded architecture snippets and marks unsupported facts unknown", async (t) => {
 	const { home, env } = tempHome(t);
 	const text = await askContext("how are my skills organized?", { ...env, PIHOUSE_HOME: join(home, ".pihouse") });
-	assert.match(text, /Current architecture references/);
+	assert.match(text, /Relevant current-document excerpts/);
 	assert.match(text, /docs\/architecture\.md/);
 	assert.match(text, /Effective non-secret configuration/);
-	assert.match(text, /Price: unknown; quality\/validation: unknown/);
+	assert.match(text, /Price and quality\/validation: unknown/);
 	assert.match(text, /## Question\n\nhow are my skills organized\?/);
 	assert.doesNotMatch(text, /# Skills catalog/);
 });
@@ -617,7 +617,7 @@ test("/workflow ask reads the memory, the index and the matching digests, never 
 	}
 	const text = await askContext("how did caching go?", env, { memoryDir });
 	assert.match(text, /Retained search unavailable/);
-	assert.match(text, /no activated operational store/);
+	assert.match(text, /legacy metric coverage unknown/);
 	assert.doesNotMatch(text, /TRANSCRIPT-SECRET/);
 	assert.ok(text.length <= LIMITS.ask, `context is ${text.length} chars`);
 });
