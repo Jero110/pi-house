@@ -18,3 +18,10 @@ Validation snapshot: `git status --short` and `git diff -- packages/pihouse/src/
 - Dispatched to `evidence` (pihouse, `openai-codex/gpt-6-luna`) after T1 verification.
 - Result: PASS; added `/workflow report [--last]` with local fallback, explicit partial/missing-usage labels, and no LLM turn or automatic flagging. Commit `d4df594` (`feat: add code-only workflow reports`).
 - Executor verification: `node --test packages/pihouse/test/workflow-report.test.ts` passed (2/2); `npm run check` passed; `npm test` passed (367/367). The commit changes only workflow/report implementation and its test. Pre-existing statusbar files and untracked planning/spec documents remain untouched.
+
+## T3 — Durable storage primitives
+
+- Dispatched to `storage` (pihouse, `openai-codex/gpt-6-luna`).
+- Initial implementation committed as `699c977` (`feat: add durable workflow storage primitives`): versioned operational schema, artifact commits/recovery, FTS capability diagnosis. Focused storage tests passed 3/3; check passed; suite passed 370/370.
+- The first review identified the explicit backup-preservation acceptance was missing. One allowed retry added private SQLite + canonical-artifact backup support in `4f1a124` (`feat: back up workflow database and artifacts`).
+- Executor verification after retry: `node --test packages/pihouse/test/storage.test.ts` passed (4/4); `npm run check` passed (Biome checked 161 files; no fixes); `npm test` passed (371/371); `git diff --check` passed. No unrelated files included.
