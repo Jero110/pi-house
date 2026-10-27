@@ -54,5 +54,4 @@ Useful skills the user invokes by hand when needed. They never run on their own.
 | [`debugging-and-error-recovery`](extras/debugging-and-error-recovery/SKILL.md) | Addy | Find the root cause of failures and improve recovery. |
 | [`code-simplification`](extras/code-simplification/SKILL.md) | Addy | Reduce complexity without changing behavior. |
 | [`impeccable`](extras/impeccable/SKILL.md) | Paul Bakaus | Improve frontend design and visual quality: critique, polish, typography, layout, motion. |
-| [`keeper`](extras/keeper/SKILL.md) | pihouse | The workflow-memory keeper: counts pending runs, digests them on request and handles proposals. |
 

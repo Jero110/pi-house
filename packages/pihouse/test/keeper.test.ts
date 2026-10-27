@@ -1,20 +1,11 @@
-// The keeper: the digest engine against fake runs and a fake `complete`, and the extension against a fake pi.
+// The digest engine of the retired keeper (digest.ts) against fake runs and a fake `complete`: the memory pipeline
+// that the migration still reads. The keeper's extension and its commands are gone; their tests went with them.
 // No model, no network, no real pi: every context a test builds is a temp dir.
 import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, readdirSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import type { ContextEvent, ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import {
-	afterBoundary,
-	BOUNDARY,
-	CONTEXT_TYPE,
-	isSummarizeWords,
-	type KeeperDeps,
-	keeperBootstrap,
-	registerKeeper,
-} from "../src/extensions/keeper.ts";
 import type { Catalog } from "../src/workflow/catalog.ts";
 import {
 	applyProposal,
@@ -27,7 +18,6 @@ import {
 } from "../src/workflow/digest.ts";
 import { LIMITS, type MemoryStore, openMemory, type RunPackage } from "../src/workflow/memory.ts";
 
-type AgentMessage = ContextEvent["messages"][number];
 const DAY = 86_400_000;
 
 /** A clock the test moves by hand; every read advances one second so ids and order stay distinct. */
@@ -348,7 +338,7 @@ function bytesUnder(dir: string): number {
 	return n;
 }
 
-test("the bootstrap, every digest input and every consolidation input stay under the limits with 1, 5 and 20 runs", async () => {
+test("every digest input and every consolidation input stay under the limits with 1, 5 and 20 runs", async () => {
 	// A 2 MB transcript: 4,000 messages of 500 chars.
 	const big = {
 		harness: "pihouse",
@@ -372,229 +362,13 @@ test("the bootstrap, every digest input and every consolidation input stay under
 			digest: `summary: s\n${"d".repeat(1900)}`,
 			memory: `# Memory\n${"- a rule of the user\n".repeat(380)}`.slice(0, LIMITS.workflowMemory),
 		});
-		while (await digestPending(digestDeps(f, model.complete))) {
-			assert.ok(keeperBootstrap(f.store).length <= LIMITS.keeperBootstrap);
-		}
+		while (await digestPending(digestDeps(f, model.complete)));
 		assert.equal(f.store.pendingCount(), 0);
 		for (const p of model.calls) {
 			const limit = p.includes("Consolidate this batch") ? LIMITS.consolidationInput : LIMITS.digestInput;
 			assert.ok(p.length <= limit, `${total} runs: a prompt of ${p.length} chars is over ${limit}`);
 		}
-		const boot = keeperBootstrap(f.store);
-		assert.ok(boot.length <= LIMITS.keeperBootstrap, `${total} runs: bootstrap ${boot.length}`);
-		assert.match(boot, /0 runs pending/);
 		// One digest prompt per run plus one consolidation per batch of at most 10.
 		assert.equal(model.calls.length, total + Math.ceil(total / BATCH_SIZE));
 	}
-});
-
-// ---- the extension, against a fake pi ----
-
-type Handler = (event: unknown, ctx: unknown) => unknown;
-
-function fakePi() {
-	const handlers = new Map<string, Handler[]>();
-	const commands = new Map<string, (args: string, ctx: unknown) => Promise<void>>();
-	const sentUser: Array<{ text: string; options: unknown }> = [];
-	const names: string[] = [];
-	const pi = {
-		on: (event: string, h: Handler) => handlers.set(event, [...(handlers.get(event) ?? []), h]),
-		registerCommand: (name: string, o: { handler: (args: string, ctx: unknown) => Promise<void> }) =>
-			commands.set(name, o.handler),
-		sendUserMessage: async (text: string, options: unknown) => {
-			sentUser.push({ text, options });
-		},
-		sendMessage: () => {},
-		setSessionName: (n: string) => names.push(n),
-	};
-	const fire = (event: string, payload: unknown, ctx: unknown) => handlers.get(event)?.map((h) => h(payload, ctx));
-	return { pi: pi as unknown as ExtensionAPI, handlers, commands, sentUser, names, fire };
-}
-
-function keeperOf(
-	f: ReturnType<typeof fixture>,
-	model: ReturnType<typeof fakeModel>,
-	env: NodeJS.ProcessEnv = { PIHOUSE_KEEPER: "1" },
-) {
-	const fp = fakePi();
-	const deps: KeeperDeps = {
-		env,
-		store: () => f.store,
-		records: () => [],
-		catalog: () => catalog,
-		complete: () => model.complete,
-		now: f.c.now,
-	};
-	registerKeeper(fp.pi, deps);
-	const notes: string[] = [];
-	const status: Record<string, string | undefined> = {};
-	const sent: Array<{ customType: string; content: string; display: boolean }> = [];
-	const ui = {
-		notify: (m: string) => notes.push(m),
-		setStatus: (k: string, v: string | undefined) => {
-			status[k] = v;
-		},
-	};
-	const rctx = {
-		ui,
-		model: {},
-		modelRegistry: {},
-		sendMessage: async (m: { customType: string; content: string; display: boolean }) => {
-			sent.push(m);
-		},
-	};
-	const ctx = {
-		ui,
-		model: {},
-		modelRegistry: {},
-		isIdle: () => true,
-		waitForIdle: async () => {},
-		newSession: async (o?: { withSession?: (c: unknown) => Promise<void> }) => {
-			await o?.withSession?.(rctx);
-			return { cancelled: false };
-		},
-	};
-	return { ...fp, notes, status, sent, ctx };
-}
-
-test("the extension does nothing unless PIHOUSE_KEEPER=1", () => {
-	const f = fixture();
-	const k = keeperOf(f, fakeModel(), {});
-	assert.equal(k.handlers.size, 0);
-	assert.equal(k.commands.size, 0);
-});
-
-test("on start the keeper says how many runs are pending", () => {
-	const f = fixture();
-	for (const id of ["r1", "r2", "r3"]) addRun(f.store, id);
-	const k = keeperOf(f, fakeModel());
-	k.fire("session_start", { reason: "startup" }, k.ctx);
-	assert.equal(k.status.keeper, "3 runs pending");
-	assert.match(k.notes[0] ?? "", /3 runs pending/);
-});
-
-test("/keeper summarize digests in a fresh session, shows summary and proposals, then writes a boundary", async () => {
-	const f = fixture();
-	for (const id of ["r1", "r2", "r3"]) addRun(f.store, id);
-	const model = fakeModel({ proposals: [{ kind: "memory-rule", target: "(new)", change: "- a rule", evidence: "e" }] });
-	const k = keeperOf(f, model);
-	await k.commands.get("keeper")?.("summarize", k.ctx);
-	assert.equal(model.calls.length, 4);
-	assert.equal(k.sent.length, 2);
-	assert.equal(k.sent[0]?.display, true);
-	assert.match(k.sent[0]?.content ?? "", /3 runs digested/);
-	assert.match(k.sent[0]?.content ?? "", /memory-rule: - a rule/);
-	assert.equal(k.sent[1]?.customType, BOUNDARY);
-	assert.equal(k.sent[1]?.display, false);
-	assert.equal(k.status.keeper, "0 runs pending");
-});
-
-test("/keeper approve and reject work by id prefix and the rejection sticks", async () => {
-	const f = fixture();
-	addRun(f.store, "r1");
-	const model = fakeModel({
-		proposals: [
-			{ kind: "memory-rule", target: "(new)", change: "- keep", evidence: "e" },
-			{ kind: "memory-rule", target: "(new)", change: "- drop", evidence: "e" },
-		],
-	});
-	const k = keeperOf(f, model);
-	await k.commands.get("keeper")?.("summarize", k.ctx);
-	const open = f.store.readIndex().filter((e) => e.kind === "proposal");
-	assert.equal(open.length, 2);
-	const [keep, drop] = open.map((e) => e.id.slice("proposal:".length));
-	await k.commands.get("keeper")?.(`approve ${keep}`, k.ctx);
-	await k.commands.get("keeper")?.(`reject ${drop} not for me`, k.ctx);
-	assert.match(f.store.readWorkflowMemory(), /- keep/);
-	assert.doesNotMatch(f.store.readWorkflowMemory(), /- drop/);
-	assert.equal(readProposal(f.store, keep ?? "")?.status, "applied");
-	assert.equal(readProposal(f.store, drop ?? "")?.status, "rejected");
-	assert.equal(
-		f.store.propose({ kind: "memory-rule", target: "(new)", change: "- DROP", evidence: "" }).result,
-		"rejected-before",
-	);
-	await k.commands.get("keeper")?.("approve zzz", k.ctx);
-	assert.match(k.notes.at(-1) ?? "", /no unique proposal/);
-});
-
-test("the context handler drops the messages before the last boundary", () => {
-	const f = fixture();
-	const k = keeperOf(f, fakeModel());
-	const msg = (text: string, t: number): AgentMessage => ({ role: "user", content: text, timestamp: t });
-	const boundary = (t: number): AgentMessage => ({
-		role: "custom",
-		customType: BOUNDARY,
-		content: "Job done",
-		display: false,
-		timestamp: t,
-	});
-	const messages = [msg("old 1", 1), boundary(2), msg("middle", 3), boundary(4), msg("new 1", 5), msg("new 2", 6)];
-	const out = k.fire("context", { messages }, k.ctx)?.[0] as { messages: AgentMessage[] };
-	assert.deepEqual(
-		out.messages.slice(1).map((m) => (m.role === "user" ? m.content : "?")),
-		["new 1", "new 2"],
-	);
-	// With no boundary yet, everything goes through.
-	assert.equal(afterBoundary(messages.slice(0, 1)).length, 1);
-	assert.equal(afterBoundary(messages.slice(0, 2)).length, 0, "a boundary last leaves nothing before it");
-});
-
-test("every request starts with the bootstrap as a message, not in the system prompt, and it does not grow", () => {
-	const f = fixture();
-	addRun(f.store, "r1");
-	const k = keeperOf(f, fakeModel());
-	// The Claude bridge rebuilds the system prompt from pi's sections, so nothing may depend on changing it.
-	assert.equal(
-		k.fire("before_agent_start", { systemPrompt: "BASE", messageType: "user", prompt: "hi" }, k.ctx)?.[0],
-		undefined,
-	);
-	const user = (text: string, t: number): AgentMessage => ({ role: "user", content: text, timestamp: t });
-	const run = (messages: AgentMessage[]) =>
-		(k.fire("context", { messages }, k.ctx)?.[0] as { messages: AgentMessage[] } | undefined)?.messages ?? [];
-	const short = run([user("how many?", 1)]);
-	const head = short[0];
-	assert.ok(head && head.role === "custom" && head.customType === CONTEXT_TYPE && head.display === false);
-	const text = typeof head.content === "string" ? head.content : "";
-	assert.match(text, /## Now: 1 run pending/);
-	assert.ok(text.length <= LIMITS.keeperBootstrap);
-	const long = run(Array.from({ length: 50 }, (_, i) => user(`message ${i}`, i)));
-	assert.equal(long.length, 51, "one bootstrap, then the conversation");
-	assert.deepEqual(long[0], { ...head, timestamp: 0 });
-});
-
-test('plain words ("summarize them", "digest") run the digest through the command; other text goes through', async () => {
-	assert.equal(isSummarizeWords("summarize"), true);
-	assert.equal(isSummarizeWords("Summarize them."), true);
-	assert.equal(isSummarizeWords("digest"), true);
-	assert.equal(isSummarizeWords('summarize them"'), true, "a stray quote from copying the hint");
-	assert.equal(isSummarizeWords("`summarize`"), true);
-	assert.equal(isSummarizeWords("summarize the docs for me"), false);
-	assert.equal(isSummarizeWords("what did you digest?"), false);
-
-	const f = fixture();
-	addRun(f.store, "r1");
-	const k = keeperOf(f, fakeModel());
-	const handled = k.fire("input", { text: "summarize them", source: "interactive" }, k.ctx)?.[0];
-	assert.deepEqual(handled, { action: "handled" });
-	await new Promise((r) => setTimeout(r, 10));
-	assert.deepEqual(k.sentUser, [{ text: "/keeper summarize", options: { expandPromptTemplates: true } }]);
-	// What the extension sent back is the command: it digests and rotates like the typed one.
-	await k.commands.get("keeper")?.("summarize", k.ctx);
-	assert.equal(f.store.pendingCount(), 0);
-
-	assert.deepEqual(k.fire("input", { text: "what is pending?", source: "interactive" }, k.ctx)?.[0], {
-		action: "continue",
-	});
-	assert.deepEqual(k.fire("input", { text: "summarize", source: "extension" }, k.ctx)?.[0], { action: "continue" });
-	assert.equal(k.sentUser.length, 1);
-});
-
-test("/keeper with no argument shows the pending count and the open proposals; code only, no model", async () => {
-	const f = fixture();
-	addRun(f.store, "r1");
-	const model = fakeModel();
-	const k = keeperOf(f, model);
-	await k.commands.get("keeper")?.("", k.ctx);
-	assert.match(k.notes[0] ?? "", /1 run pending\nNo open proposals\./);
-	assert.equal(model.calls.length, 0);
 });

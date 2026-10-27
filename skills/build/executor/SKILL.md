@@ -102,7 +102,7 @@ COMMIT: <sha> on <branch> (or "no changes")
 CONCERNS: judgment calls outside the brief, or none
 ```
 
-The `Skills:` line lists only the skills the plan gives that task; `/workflow review` reads it.
+The `Skills:` line lists only the skills the plan gives that task; `/workflow report` reads it.
 
 ## Step 2: Supervise
 
@@ -133,7 +133,7 @@ Your final answer, the only long message:
 - **Gaps:** what did not pass, and why.
 
 Your pane is the user's now (the planner closed), so the report is for them. Close every agent still open with
-`cancel`, end by offering a review: "Run `/workflow review` here to see what ran, with which skills, tokens and
+`cancel`, end by offering a report: "Run `/workflow report` here to see what ran, with which skills, tokens and
 time?" Only offer it; never run it yourself. Then stop. Do not start post-build or extra skills; the user invokes those
 if they want them.
 

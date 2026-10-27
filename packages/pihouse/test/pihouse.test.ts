@@ -14,12 +14,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { Journal, readJournal, type SessionRecord } from "agent-link-core";
+import { Journal, readJournal } from "agent-link-core";
 import type { TranscriptRoots } from "agent-transcripts";
+import { main } from "../src/cli.ts";
 import { answersText, pickedSkillsText, showPicker, skillPickerQuestion } from "../src/extensions/ask.ts";
 import { headerLines } from "../src/extensions/brand.ts";
 import { askContext, latestReport, reviewFileName } from "../src/extensions/workflow.ts";
-import { liveKeeper, piCommand, runKeeper, runPihouse, whereRuns, withSkillsDir } from "../src/launcher.ts";
+import { piCommand, runPihouse, withSkillsDir } from "../src/launcher.ts";
 import { EXTENSIONS, PI_CLI, pihousePaths, SKILL_GROUP_DIRS, SKILLS_DIR, THEME } from "../src/paths.ts";
 import {
 	BRIDGE_SOURCE,
@@ -376,7 +377,6 @@ test("the catalog and the skills on disk match, and skills/README.md is current"
 		"debugging-and-error-recovery (Addy)",
 		"code-simplification (Addy)",
 		"impeccable (Paul Bakaus)",
-		"keeper (pihouse)",
 	]);
 	assert.ok(catalog.groups.filter((g) => g.manual).every((g) => g.id === "post-build" || g.id === "extras"));
 });
@@ -796,94 +796,38 @@ test("a review report is named for its plan and its date, and the newest one is 
 	assert.equal(latestReport(dir), join(dir, "workflow-review-aaa-2026-10-24-1000.md"));
 });
 
-function keeperRecord(extra: Partial<SessionRecord> = {}): SessionRecord {
-	return {
-		id: "20261026T100000Z-keeper",
-		name: "keeper",
-		parent: null,
-		parentName: null,
-		root: "20261026T100000Z-keeper",
-		harness: "pihouse",
-		model: null,
-		cwd: "/work",
-		state: "working",
-		depth: 0,
-		backend: "cmux",
-		place: { workspace: "workspace:2", surface: "surface:7" },
-		pid: process.pid,
-		startedAt: "2026-10-26T10:00:00.000Z",
-		updatedAt: "2026-10-26T10:00:00.000Z",
-		...extra,
-	};
-}
+// The keeper is retired: `pih keeper`, its extension and its skill are gone, and their replacements are named.
 
-test("pih keeper says where a live keeper runs and starts nothing", async (t) => {
-	const { home, env } = tempHome(t);
-	const out: string[] = [];
-	const code = await runKeeper({
-		argv: [],
-		env,
-		home,
-		cwd: home,
-		err: () => {},
-		out: (l) => out.push(l),
-		records: [keeperRecord()],
-		run: async () => assert.fail("no second keeper"),
-		root: async () => assert.fail("no second keeper"),
+test("pih keeper is retired: it names the replacements, exits non-zero and starts nothing", async (t) => {
+	const { env } = tempHome(t);
+	const stderr: string[] = [];
+	const stdout: string[] = [];
+	t.mock.method(process.stderr, "write", (chunk: string) => {
+		stderr.push(String(chunk));
+		return true;
 	});
-	assert.equal(code, 0);
-	assert.equal(out.length, 1);
-	assert.match(out[0] ?? "", /already running: keeper at cmux workspace:2 surface:7 \(\/work\)/);
+	t.mock.method(process.stdout, "write", (chunk: string) => {
+		stdout.push(String(chunk));
+		return true;
+	});
+	const code = await main(["keeper"], env);
+	assert.equal(code, 2);
+	assert.deepEqual(stdout, [], "nothing on stdout");
+	const text = stderr.join("");
+	assert.match(text, /pih keeper was retired/);
+	assert.match(text, /\/workflow proposals/);
+	assert.match(text, /\/workflow report/);
 });
 
-test("pih keeper starts a root named keeper with PIHOUSE_KEEPER=1 and the keeper skill when none is live", async (t) => {
-	const { home, env } = tempHome(t);
-	const seen: { name?: string; argv: string[] }[] = [];
-	const ran: { argv: string[]; env: Record<string, string> }[] = [];
-	const exited = keeperRecord({ state: "exited" });
-	const dead = keeperRecord({ id: "x", pid: 2 ** 22 + 7 });
-	const code = await runKeeper({
-		argv: [],
-		env,
-		home,
-		cwd: home,
-		err: () => {},
-		out: () => assert.fail("nothing to say"),
-		records: [exited, dead],
-		run: async (cmd) => {
-			ran.push({ argv: cmd.argv, env: cmd.env });
-			return 5;
-		},
-		root: async (o) => {
-			seen.push({ name: o.name, argv: [...o.argv] });
-			assert.equal(o.env?.PIHOUSE_KEEPER, "1", "the env reaches the harness the hub starts");
-			return (o.run ?? (async () => 1))({ argv: ["pihouse-from-hub"], env: { PIHOUSE_KEEPER: "1" }, cwd: home });
-		},
-	});
-	assert.equal(code, 5);
-	assert.deepEqual(seen, [{ name: "keeper", argv: ["pihouse", "/skill:keeper"] }]);
-	assert.equal(ran.length, 1, "the hub's command ran in this terminal");
-});
-
-test("a keeper is live only when it is a root named keeper, not exited, with its process still there", () => {
-	assert.ok(liveKeeper([keeperRecord()]));
-	assert.equal(liveKeeper([keeperRecord({ state: "exited" })]), undefined);
-	assert.equal(liveKeeper([keeperRecord({ name: "pihouse-6" })]), undefined);
-	assert.equal(liveKeeper([keeperRecord({ parent: "p", parentName: "x" })]), undefined);
+test("the retired keeper is not loaded, not in the catalog, has no skill folder and is not in the README", () => {
 	assert.equal(
-		liveKeeper([keeperRecord()], () => false),
-		undefined,
+		EXTENSIONS.some((e) => e.endsWith("extensions/keeper.ts")),
+		false,
 	);
-	assert.equal(whereRuns(keeperRecord({ place: undefined, backend: undefined })), "/work");
+	assert.equal(
+		readCatalog().skills.some((s) => s.name === "keeper"),
+		false,
+	);
+	assert.equal(existsSync(join(SKILLS_DIR, "extras", "keeper")), false);
+	assert.doesNotMatch(readFileSync(join(SKILLS_DIR, "README.md"), "utf8"), /keeper/);
 });
-
-test("the keeper extension is loaded with the others and the keeper skill is in the catalog", () => {
-	assert.ok(EXTENSIONS.some((e) => e.endsWith("extensions/keeper.ts")));
-	const skill = readCatalog().skills.find((s) => s.name === "keeper");
-	assert.equal(skill?.group, "extras");
-	assert.ok(existsSync(skillPath(skill ?? fail())));
-});
-
-function fail(): never {
-	throw new Error("keeper skill missing");
-}

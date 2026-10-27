@@ -221,14 +221,6 @@
 			"source": "pbakaus/impeccable/.agents/skills/impeccable",
 			"license": "Apache-2.0",
 			"summary": "Improve frontend design and visual quality: critique, polish, typography, layout, motion."
-		},
-		{
-			"name": "keeper",
-			"group": "extras",
-			"author": "pihouse",
-			"source": "this repository",
-			"license": "MIT",
-			"summary": "The workflow-memory keeper: counts pending runs, digests them on request and handles proposals."
 		}
 	]
 }

@@ -36,7 +36,7 @@ export function headerLines(theme: Theme, width: number, info: HeaderInfo): stri
 		` ${theme.fg("muted", tilde(info.cwd, info.home))}`,
 		"",
 		` ${theme.fg("accent", "/skill:planner")} ${theme.fg("dim", "plan a project, then hand it to an executor")}`,
-		` ${theme.fg("accent", "/workflow review")} ${theme.fg("dim", "what the last run did")}  ${theme.fg("accent", "/workflow ask")} ${theme.fg("dim", "<question>")}`,
+		` ${theme.fg("accent", "/workflow report")} ${theme.fg("dim", "what the last run did")}  ${theme.fg("accent", "/workflow ask")} ${theme.fg("dim", "<question>")}`,
 		` ${theme.fg(
 			"dim",
 			info.linked ? "agent-link on: pi-house can launch claude, codex, opencode and pihouse agents" : "agent-link off",

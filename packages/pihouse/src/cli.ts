@@ -1,15 +1,17 @@
 #!/usr/bin/env node
 // pihouse: the pihouse agent. `pih setup --backend cmux|tmux` is what install.sh runs once the code is in place.
 import { homedir } from "node:os";
-import { runKeeper, runPihouse } from "./launcher.ts";
+import { runPihouse } from "./launcher.ts";
 import { PIHOUSE_VERSION, pihousePaths } from "./paths.ts";
 import { setup, teardown } from "./setup.ts";
+
+export const KEEPER_RETIRED =
+	"pih keeper was retired. Use /workflow proposals, /workflow approve <id> and /workflow reject <id> [reason] in a pihouse session; /workflow report shows what a run did.";
 
 export const USAGE = `usage: pih [pi options] [message]       start pihouse (all pi options work)
        pih setup --backend cmux|tmux [--claude-bridge]
                                         register pihouse's MCP servers and profile (install.sh runs this);
                                         --claude-bridge also adds the Claude models on your Claude Code login
-       pih keeper                      start the keeper (workflow memory), or say where it already runs
        pih uninstall                   undo setup's registrations (keeps ~/.pihouse)
        pih --version`;
 
@@ -36,7 +38,12 @@ export async function main(argv: readonly string[], env: NodeJS.ProcessEnv = pro
 		setup({ paths: pihousePaths(env, home), backend, home, env, out, claudeBridge: rest.includes("--claude-bridge") });
 		return 0;
 	}
-	if (cmd === "keeper") return runKeeper({ argv: rest, env, home, err, out });
+	// Problem: `pih keeper` would start a root that no longer exists, so it would look like it worked. Solution: refuse it
+	// and name the replacements; nothing starts.
+	if (cmd === "keeper") {
+		err(KEEPER_RETIRED);
+		return 2;
+	}
 	if (cmd === "uninstall") {
 		teardown({ paths: pihousePaths(env, home), home, env, out });
 		return 0;

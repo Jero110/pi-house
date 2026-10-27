@@ -10,15 +10,7 @@
 import { spawn } from "node:child_process";
 import { constants } from "node:os";
 import { type RootOptions, runRoot } from "agent-link";
-import {
-	agentLinkHome,
-	hubPaths,
-	type PaneCommand,
-	READ_DIRS_ENV,
-	readDirsFromEnv,
-	readJournal,
-	type SessionRecord,
-} from "agent-link-core";
+import { type PaneCommand, READ_DIRS_ENV, readDirsFromEnv } from "agent-link-core";
 import { cmuxHookExtension } from "./cmux-hooks.ts";
 import { EXTENSIONS, PI_CLI, type PihousePaths, pihousePaths, SKILLS_DIR, THEME } from "./paths.ts";
 import { ensureAgentDir, writePihouseProfile } from "./setup.ts";
@@ -33,7 +25,7 @@ export interface LaunchOptions {
 	run?: (cmd: PaneCommand) => Promise<number>;
 	/** Registers as an agent-link root; tests pass a fake or a runRoot bound to a test hub. */
 	root?: (opts: RootOptions) => Promise<number>;
-	/** A fixed agent-link name for the root (`pih keeper` passes "keeper"). */
+	/** A fixed agent-link name for the root. */
 	name?: string;
 }
 
@@ -105,63 +97,6 @@ export async function runPihouse(opts: LaunchOptions): Promise<number> {
 	for (const n of notes) err(n);
 	err("pih: running without agent-link (spawning other agents is off). `agent-link status` shows the hub.");
 	return run(piCommand(paths, opts.argv, env, cwd));
-}
-
-/** The name the keeper is registered under (ADR-001, D2). */
-export const KEEPER_NAME = "keeper";
-/** What the keeper starts with: its skill, which says how it works. */
-export const KEEPER_START = "/skill:keeper";
-
-const processAlive = (pid: number): boolean => {
-	try {
-		process.kill(pid, 0);
-		return true;
-	} catch (e) {
-		return (e as NodeJS.ErrnoException).code === "EPERM";
-	}
-};
-
-/** The keeper root that is running, if any: named `keeper`, not exited, its process still there. */
-export function liveKeeper(
-	records: readonly SessionRecord[],
-	alive: (pid: number) => boolean = processAlive,
-): SessionRecord | undefined {
-	return records.find(
-		(r) => r.parent === null && r.name === KEEPER_NAME && r.state !== "exited" && (r.pid === undefined || alive(r.pid)),
-	);
-}
-
-/** Where a root runs, as far as the journal knows. */
-export function whereRuns(r: SessionRecord): string {
-	const p = r.place;
-	const pane = p?.surface ?? p?.tmuxPane ?? r.pane;
-	const where = [r.backend, p?.workspace, pane].filter(Boolean).join(" ");
-	return where ? `${where} (${r.cwd})` : r.cwd;
-}
-
-/**
- * `pih keeper`: the keeper is one durable agent. If a live `keeper` is in the journal, say where it runs and stop;
- * otherwise start pihouse as the root named `keeper`, with PIHOUSE_KEEPER=1 (which turns its extension on) and its
- * skill as the first message. Problem: a second `pih keeper` would start `keeper-2` and split the memory's reader in
- * two. Solution: look first.
- */
-export async function runKeeper(
-	opts: LaunchOptions & { out?: (line: string) => void; records?: readonly SessionRecord[] },
-): Promise<number> {
-	const env = opts.env ?? process.env;
-	const out = opts.out ?? ((l: string) => process.stdout.write(`${l}\n`));
-	const records = opts.records ?? readJournal(hubPaths(agentLinkHome(env)).sessions);
-	const running = liveKeeper(records);
-	if (running) {
-		out(`The keeper is already running: ${running.name} at ${whereRuns(running)}.`);
-		return 0;
-	}
-	return runPihouse({
-		...opts,
-		env: { ...env, PIHOUSE_KEEPER: "1" },
-		argv: [...opts.argv, KEEPER_START],
-		name: KEEPER_NAME,
-	});
 }
 
 /**
