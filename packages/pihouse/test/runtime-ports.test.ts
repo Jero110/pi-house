@@ -17,9 +17,11 @@ import test from "node:test";
 import type { SessionRecord } from "agent-link-core";
 import { captureRun } from "../src/workflow/capture.ts";
 import { isQuiescent } from "../src/workflow/jobs.ts";
+import { produceDigestCandidates } from "../src/workflow/learning-runtime.ts";
 import { openMemory } from "../src/workflow/memory.ts";
 import { migrateLegacyStore } from "../src/workflow/migration.ts";
 import { runtimePorts } from "../src/workflow/runtime-ports.ts";
+import { openOperationalStore } from "../src/workflow/storage.ts";
 
 // Fake journal files and fake pi JSONL sources only. Nothing here reaches a hub, a harness or a real session.
 
@@ -168,6 +170,92 @@ test("the current fingerprint recomputes the revision's fingerprint from its sou
 		assert.equal(ports.currentFingerprint(`${RUN}.r9`), undefined);
 		assert.equal(ports.currentFingerprint("not-a-revision"), undefined);
 		assert.equal(existsSync(join(memoryDir, "runs", RUN, "run.json")), true);
+	} finally {
+		rmSync(home, { recursive: true, force: true });
+	}
+});
+
+/** A run captured with its root and one worker, both in the journal, ready for the candidate gate. */
+function capturedRun(home: string, childState: SessionRecord["state"]) {
+	const { source, memoryDir, journalDir, store } = setup(home);
+	// The worker has its own fake pi stream: a participant without a verifiable source is never a candidate.
+	const childSource = join(home, "child.jsonl");
+	writeFileSync(
+		childSource,
+		`${JSON.stringify({ type: "session", id: "native-child", cwd: home })}\n${message("c1", "child-note")}\n`,
+	);
+	const planner = { ...root(home, source), state: "exited" as const };
+	const child = { ...worker(RUN, "worker-known", childState), sessionId: "native-child", transcript: childSource };
+	captureRun([planner, child], planner, store, { by: "planner" });
+	writeJournal(journalDir, [planner, child]);
+	const operational = openOperationalStore(join(memoryDir, "memory.sqlite"), { fts: false, legacy: true });
+	return { memoryDir, journalDir, planner, child, operational };
+}
+
+test("a run whose whole journal tree is exited is quiescent end to end and becomes a digest candidate", () => {
+	const home = mkdtempSync(join(tmpdir(), "runtime-ports-exited-"));
+	try {
+		const { memoryDir, journalDir, operational } = capturedRun(home, "exited");
+		try {
+			const ports = runtimePorts({ storeDir: memoryDir, journalDir });
+			assert.equal(ports.operationalState(RUN).deliveries, 0);
+			assert.equal(ports.operationalState(RUN).handoff, false);
+			const candidates = produceDigestCandidates({
+				storeDir: memoryDir,
+				db: operational.db,
+				ownedRoot: memoryDir,
+				...ports,
+			});
+			assert.deepEqual(
+				candidates.candidates.map((candidate) => candidate.revision),
+				[`${RUN}.r1`],
+			);
+		} finally {
+			operational.close();
+		}
+	} finally {
+		rmSync(home, { recursive: true, force: true });
+	}
+});
+
+test("a live participant in any state keeps deliveries and handoff unknown, so the run is deferred", () => {
+	const home = mkdtempSync(join(tmpdir(), "runtime-ports-done-"));
+	try {
+		const { memoryDir, journalDir, operational } = capturedRun(home, "done");
+		try {
+			const ports = runtimePorts({ storeDir: memoryDir, journalDir });
+			assert.equal(ports.operationalState(RUN).deliveries, null);
+			assert.equal(ports.operationalState(RUN).handoff, null);
+			assert.equal(
+				produceDigestCandidates({ storeDir: memoryDir, db: operational.db, ownedRoot: memoryDir, ...ports }).candidates
+					.length,
+				0,
+			);
+		} finally {
+			operational.close();
+		}
+	} finally {
+		rmSync(home, { recursive: true, force: true });
+	}
+});
+
+test("a stored participant missing from the journal keeps the run deferred even when the rest exited", () => {
+	const home = mkdtempSync(join(tmpdir(), "runtime-ports-missing-"));
+	try {
+		const { memoryDir, journalDir, child, operational } = capturedRun(home, "exited");
+		try {
+			rmSync(join(journalDir, `${child.id}.json`));
+			const ports = runtimePorts({ storeDir: memoryDir, journalDir });
+			assert.equal(ports.operationalState(RUN).livenessKnown, false);
+			assert.equal(ports.operationalState(RUN).deliveries, null);
+			assert.equal(
+				produceDigestCandidates({ storeDir: memoryDir, db: operational.db, ownedRoot: memoryDir, ...ports }).candidates
+					.length,
+				0,
+			);
+		} finally {
+			operational.close();
+		}
 	} finally {
 		rmSync(home, { recursive: true, force: true });
 	}

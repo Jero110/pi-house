@@ -64,8 +64,12 @@ function rootOf(records: readonly SessionRecord[], runId: string): SessionRecord
  * was launched after the digest and is still working; cleanup must wait for it.
  * Solution: the journal tree of the run gives every participant's state. A participant the stored package names but
  * the journal no longer has, or a missing journal, is unknown.
- * Deliveries and handoff are not recorded in the journal, so they stay null and the run is never quiescent from
- * this source alone; a hub that records them can replace these two fields without changing the rest.
+ * Deliveries and handoff are not in the journal, so they are known only in the safe case below.
+ *
+ * Problem: a run with a live participant may still receive a queued message or hand off, and the journal cannot show
+ * either. Example: a root in "done" waits for a user message, so cleanup must not assume its queue is empty.
+ * Solution: when every participant of the run is "exited", the hub has closed them. A closed agent's queue is emptied
+ * and it cannot hand off, so deliveries are 0 and handoff is false. Any other state keeps both null.
  */
 export function runtimePorts(
 	options: RuntimePortOptions,
@@ -78,11 +82,13 @@ export function runtimePorts(
 			if (!root || !stored) return { states: [], deliveries: null, handoff: null, livenessKnown: false };
 			const tree = treeOf(records, root.id);
 			const known = new Set(tree.map((record) => record.id));
+			const livenessKnown = stored.agents.length > 0 && stored.agents.every((agent) => known.has(agent.id));
+			const closed = livenessKnown && tree.every((record) => record.state === "exited");
 			return {
 				states: tree.map((record) => runtimeState(record.state)),
-				deliveries: null,
-				handoff: null,
-				livenessKnown: stored.agents.length > 0 && stored.agents.every((agent) => known.has(agent.id)),
+				deliveries: closed ? 0 : null,
+				handoff: closed ? false : null,
+				livenessKnown,
 			};
 		},
 		currentFingerprint: (revision) => {
