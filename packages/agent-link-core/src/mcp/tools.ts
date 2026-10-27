@@ -1,4 +1,4 @@
-// The six tools every harness sees through the agent-link MCP server, their answers and the server
+// The tools every harness sees through the agent-link MCP server, their answers and the server
 // instructions. Ported from an earlier hub; the wording that real runs tuned stays:
 // "returns at once", "never call status to wait", exact names.
 import type { InboxEntry, StatusEntry } from "../hub/hub.ts";
@@ -12,7 +12,7 @@ export interface ObjectSchema {
 	additionalProperties?: boolean;
 }
 
-export type ToolName = "spawn" | "send" | "permit" | "reply" | "status" | "cancel" | "inbox";
+export type ToolName = "spawn" | "send" | "permit" | "reply" | "status" | "cancel" | "model" | "inbox";
 
 export interface ToolDef {
 	name: ToolName;
@@ -116,6 +116,19 @@ export function toolDefs(opts: { harnesses: readonly string[]; pull: boolean }):
 			},
 		},
 		{
+			name: "model",
+			description:
+				"Change the model of one of your own workers, without typing into its pane. Use it when a worker needs a different one, for example its context nears its limit and a larger model you are authorized to use exists (a Haiku worker to Sonnet). You decide which model; the tool never picks one. Give the exact <provider>/<id>. A worker that is busy switches before its next turn; one whose harness has no switch, or an unknown or unauthenticated model, is refused and keeps its model.",
+			inputSchema: {
+				type: "object",
+				properties: {
+					to: { type: "string", description: "Exact worker name, one you launched or below one" },
+					model: { type: "string", description: "Exact <provider>/<id>, e.g. anthropic/claude-sonnet-5-5" },
+				},
+				required: ["to", "model"],
+			},
+		},
+		{
 			name: "inbox",
 			description: opts.pull
 				? "Read the messages that wait for you in the hub (results and questions from your workers) and mark them read. Returns at once. When it is empty, tell the user what still runs and end your turn; never call inbox in a loop to wait."
@@ -180,6 +193,16 @@ export function cancelReply(res: { ok?: boolean; error?: string }, name: string)
 	return res.error ? text(`not cancelled: ${res.error}`, true) : text(`cancelled ${name} and closed its pane`);
 }
 
+export function modelReply(
+	res: { status: "applied" | "pending"; model: string; previous: string | null } | { error: string },
+	to: string,
+): ToolReply {
+	if ("error" in res) return text(`model not changed: ${res.error}`, true);
+	if (res.status === "pending")
+		return text(`${to} is busy: it switches to ${res.model} before its next turn. status shows the model once it did.`);
+	return text(`${to} now uses ${res.model}${res.previous ? ` (it was ${res.previous})` : ""}`);
+}
+
 /** One line per agent with its relation to `me`, and a reminder that results come by themselves. */
 export function statusReply(me: string, agents: readonly StatusEntry[], pull: boolean): ToolReply {
 	const names = new Set(agents.map((a) => a.name));
@@ -233,7 +256,7 @@ export function instructions({ client, name, parent, pull }: InstructionsInput):
 			'- Answer a worker\'s question with send({ to: "<worker>", message }), and a permission or question it waits on with permit({ to: "<worker>", choice }). If only the user can answer, ask the user first.',
 		);
 	}
-	lines.push(`- Tools: spawn, send, permit, reply, status, cancel, inbox. ${NAME_RULE}`);
+	lines.push(`- Tools: spawn, send, permit, reply, status, cancel, model, inbox. ${NAME_RULE}`);
 	if (/claude/i.test(client))
 		lines.push("- agent-link agents are reached only with these tools, never with SendMessage or ListAgents.");
 	return lines.join("\n");

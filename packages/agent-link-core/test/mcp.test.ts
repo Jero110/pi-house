@@ -54,16 +54,20 @@ function mcp(opts: Omit<Parameters<typeof runMcpServer>[0], "input" | "output">)
 
 const init = (client: string) => ({ protocolVersion: "2025-06-18", clientInfo: { name: client, version: "1" } });
 
-test("seven tools, each with anthropic/alwaysLoad, with the tested wording", () => {
+test("eight tools, each with anthropic/alwaysLoad, with the tested wording", () => {
 	const tools = toolDefs({ harnesses: ["claude", "codex", "opencode", "pi"], pull: false });
 	assert.deepEqual(
 		tools.map((t) => t.name),
-		["spawn", "send", "permit", "reply", "status", "cancel", "inbox"],
+		["spawn", "send", "permit", "reply", "status", "cancel", "model", "inbox"],
 	);
 	const by = (n: string) => tools.find((t) => t.name === n)?.description ?? "";
 	assert.match(by("spawn"), /Returns at once with the worker's exact name/);
 	assert.match(by("send"), /Returns at once/);
 	assert.match(by("status"), /never call status to wait/);
+	assert.match(by("model"), /Change the model of one of your own workers/);
+	assert.match(by("model"), /context.*nears its limit/);
+	assert.match(by("model"), /You decide which model; the tool never picks one/);
+	assert.deepEqual(tools.find((t) => t.name === "model")?.inputSchema.required, ["to", "model"]);
 	assert.deepEqual(tools[0]?.inputSchema.required, ["harness", "task"]);
 	assert.deepEqual(tools[0]?.inputSchema.properties.harness?.enum, ["claude", "codex", "opencode", "pi"]);
 	const pull = toolDefs({ harnesses: ["claude"], pull: true });
@@ -103,7 +107,7 @@ test("no identity: the server registers once as a pull root named after its clie
 		assert.match(String(init1.instructions), /read them with inbox\(\)/);
 		assert.match(String(init1.instructions), /never with SendMessage or ListAgents/);
 		const list = (await server.rpc("tools/list")).result as { tools: Array<{ name: string; _meta: Json }> };
-		assert.equal(list.tools.length, 7);
+		assert.equal(list.tools.length, 8);
 		assert.ok(list.tools.every((x) => x._meta["anthropic/alwaysLoad"] === true));
 
 		const spawn = await server.tool("spawn", { harness: "pi", task: "count files", name: "counter" });
@@ -128,6 +132,19 @@ test("no identity: the server registers once as a pull root named after its clie
 		const inbox = await server.tool("inbox");
 		assert.equal(inbox.text, "[agent-link] counter (pi · claude-bridge/claude-haiku-5-5) finished:\n\n42 files");
 		assert.match((await server.tool("inbox")).text, /^inbox empty/);
+		const switched = await server.tool("model", { to: "counter", model: "anthropic/claude-sonnet-5-5" });
+		assert.equal(switched.isError, false);
+		assert.equal(switched.text, "counter now uses anthropic/claude-sonnet-5-5 (it was claude-bridge/claude-haiku-5-5)");
+		assert.deepEqual(fake.modelRequests, ["anthropic/claude-sonnet-5-5"]);
+		fake.setModelResult = { status: "pending", model: "anthropic/claude-opus-5-5" };
+		const later = await server.tool("model", { to: "counter", model: "anthropic/claude-opus-5-5" });
+		assert.equal(
+			later.text,
+			"counter is busy: it switches to anthropic/claude-opus-5-5 before its next turn. status shows the model once it did.",
+		);
+		const bad = await server.tool("model", { to: "counter", model: "opus" });
+		assert.equal(bad.isError, true);
+		assert.match(bad.text, /^model not changed: .*exact <provider>\/<id>/);
 		const cancel = await server.tool("cancel", { name: "counter" });
 		assert.equal(cancel.text, "cancelled counter and closed its pane");
 		const reply = await server.tool("reply", { result: "x" });

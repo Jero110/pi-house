@@ -55,6 +55,12 @@ export interface HubClient {
 	/** Every agent of the hub, each root followed by its tree. */
 	agents(): Promise<{ agents: Array<StatusEntry & { backend?: BackendName; pane?: string; startedAt: number }> }>;
 	cancel(body: { from: string; name: string }): Promise<{ ok?: boolean; error?: string }>;
+	/** Changes the model of a worker (Hub.model); `status` "pending" means it applies before the worker's next turn. */
+	model(body: {
+		from: string;
+		to: string;
+		model: string;
+	}): Promise<ErrorOr<{ status: "applied" | "pending"; model: string; previous: string | null }>>;
 	inbox(agent: string): Promise<{ messages: InboxEntry[]; error?: string }>;
 	event(body: { agent: string; type: string } & Record<string, unknown>): Promise<{ ok: boolean; error?: string }>;
 	/** Server-sent messages for `agent`, until close(). */
@@ -109,6 +115,7 @@ export function createHubClient(addr: HubAddress): HubClient {
 		status: (agent) => call("GET", `/status${q(agent)}`),
 		agents: () => call("GET", "/agents"),
 		cancel: (body) => call("POST", "/cancel", body),
+		model: (body) => call("POST", "/model", body),
 		inbox: (agent) => call("GET", `/inbox${q(agent)}`),
 		event: (body) => call("POST", "/event", body),
 		stream(agent, onMessage) {

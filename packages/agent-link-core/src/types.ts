@@ -87,7 +87,11 @@ export type SessionUpdate =
 	/** The harness process is gone (pane closed, crash). */
 	| { kind: "exited"; code?: number; detail?: string }
 	/** The harness's own session, once the adapter knows it; the hub writes it to the session journal. */
-	| { kind: "session"; sessionId?: string; transcript?: string };
+	| { kind: "session"; sessionId?: string; transcript?: string }
+	/** A model switch that setModel() answered "pending" now took effect: the model the agent runs. */
+	| { kind: "model"; model: string }
+	/** A pending model switch failed when it was due; the agent keeps the model it had. */
+	| { kind: "model_error"; model: string; error: string };
 
 /** What a pane runs. Paths are absolute. */
 export interface PaneCommand {
@@ -144,7 +148,16 @@ export interface AgentAdapter {
 	 * pane. `choice` is what the parent passed to permit(): option numbers or texts (see ask.ts).
 	 */
 	answer?(choice: string): Promise<{ answered: string } | { error: string }>;
+	/**
+	 * Switches the model the agent runs, through the harness's own documented path, never the pane. `model` is an
+	 * exact `<provider>/<id>`. "applied": the agent runs it from now on. "pending": a turn runs, so the switch waits
+	 * for a boundary (never overlapping the turn) and a `model` update follows. An error keeps the current model.
+	 * Optional: an adapter without a documented switch leaves it out and the hub says so.
+	 */
+	setModel?(model: string): Promise<SetModelResult>;
 }
+
+export type SetModelResult = { status: "applied" | "pending"; model: string } | { error: string };
 
 export type AdapterFactory = (deps: AdapterDeps) => AgentAdapter;
 

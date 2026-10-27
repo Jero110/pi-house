@@ -221,6 +221,8 @@ async function handle(hub: Hub, token: string, req: IncomingMessage, res: Server
 			const r = await hub.cancel({ from: str("from"), name: str("name") });
 			return json(res, 200, r.ok ? { ok: true } : { error: r.error });
 		}
+		case "/model":
+			return json(res, 200, await hub.model({ from: str("from"), to: str("to"), model: str("model") }));
 		case "/event":
 			return json(res, 200, hub.event(body as HarnessEvent));
 		default:

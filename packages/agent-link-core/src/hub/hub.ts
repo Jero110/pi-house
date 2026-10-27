@@ -27,6 +27,7 @@ import type {
 	Profile,
 	PromptResponse,
 	SessionUpdate,
+	SetModelResult,
 } from "../types.ts";
 import {
 	askNotice,
@@ -550,6 +551,19 @@ export class Hub {
 			this.journalUpdate(agent, { sessionId: u.sessionId, transcript: u.transcript });
 			return;
 		}
+		if (u.kind === "model") {
+			this.log.event(name, "model-applied", { model: u.model });
+			this.setRecordModel(agent, u.model);
+			return;
+		}
+		if (u.kind === "model_error") {
+			this.log.event(name, "model-failed", { model: u.model, error: u.error });
+			this.notifyParent(
+				agent,
+				`${name} could not switch to ${u.model}: ${u.error}. It keeps ${agent.record.model ?? "its model"}.`,
+			);
+			return;
+		}
 		this.log.event(name, `update-${u.kind}`, u.kind === "state" ? { state: u.state, detail: u.detail } : {});
 		if (agent.closing) return;
 		if (u.kind === "exited") {
@@ -754,6 +768,44 @@ export class Hub {
 		return { ok: true };
 	}
 
+	/**
+	 * Changes the model of a worker, on behalf of an agent above it. The adapter does the switch through its harness's
+	 * own path; the record and the journal follow what it reports ("applied" now, "pending" via a model update).
+	 */
+	async model(req: {
+		from: string;
+		to: string;
+		model: string;
+	}): Promise<{ status: "applied" | "pending"; model: string; previous: string | null } | { error: string }> {
+		const target = this.registry.get(req.to);
+		if (!target) return { error: this.registry.unknownAgent(req.to, req.from) };
+		if (!this.registry.isAncestor(req.from, req.to))
+			return { error: `${req.from} cannot change the model of ${req.to}: only its parent (or an agent above it) can.` };
+		if (target.record.state === "exited" || target.closing) return { error: `${req.to} has exited` };
+		if (!isExactModel(req.model))
+			return {
+				error: `the model must be an exact <provider>/<id> (e.g. anthropic/claude-sonnet-5-5), not ${JSON.stringify(req.model)}`,
+			};
+		if (!target.adapter?.setModel)
+			return { error: `${req.to} cannot change its model through agent-link: its adapter has no model switch` };
+		const previous = target.record.model;
+		let res: SetModelResult;
+		try {
+			res = await target.adapter.setModel(req.model);
+		} catch (e) {
+			res = { error: errorText(e) };
+		}
+		this.log.event(req.to, "model", { by: req.from, model: req.model, ...res });
+		if ("error" in res) return res;
+		if (res.status === "applied") this.setRecordModel(target, res.model);
+		return { status: res.status, model: res.model, previous };
+	}
+
+	private setRecordModel(agent: Agent, model: string): void {
+		agent.record.model = model;
+		this.journalUpdate(agent, { model });
+	}
+
 	/** Pull agents: the messages that wait, oldest first; they count as delivered and read. */
 	inbox(name: string): { messages: InboxEntry[]; error?: string } {
 		const agent = this.registry.get(name);
@@ -906,6 +958,16 @@ function processAlive(pid: number): boolean {
 		// EPERM: it runs, under another user.
 		return (e as NodeJS.ErrnoException).code === "EPERM";
 	}
+}
+
+/**
+ * Problem: a model name that is only close ("sonnet", "claude-sonnet-5") would be resolved by guesswork somewhere.
+ * Example: two providers both serve "claude-sonnet-5-5"; a bare id could switch the worker to the wrong one.
+ * Solution: only `<provider>/<id>` with no spaces or wildcards passes; the id may hold more slashes
+ * (openrouter/anthropic/claude-sonnet-5-5), the provider is what precedes the first one.
+ */
+export function isExactModel(model: string): boolean {
+	return /^[^\s/*?]+\/[^\s*?]+$/.test(model) && !model.endsWith("/");
 }
 
 export function errorText(e: unknown): string {

@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { createHubClient } from "../src/client.ts";
 import { placeOf } from "../src/hub/hub.ts";
+import { readJournal } from "../src/journal.ts";
 import { hubPaths } from "../src/paths.ts";
 import { IDENTITY_ENV, READ_DIRS_ENV, readDirsFromEnv } from "../src/types.ts";
 import { echoResponder } from "./fakes/adapter.ts";
@@ -808,4 +809,110 @@ test("a root may ask for a name; the hub keeps it unique and falls back to the h
 		assert.equal(first.name, "keeper");
 		assert.equal(second.name, "keeper-2");
 		assert.equal(plain.name, "codex");
+	}));
+
+const journalOf = (t: TestHub, name: string) => readJournal(hubPaths(t.home).sessions).find((r) => r.name === name);
+
+test("model: only an agent above the worker may change its model; the record and the journal follow", () =>
+	withHub(async (t) => {
+		const root = await pullRoot(t.client);
+		const lead = await spawned(t, root, "claude", "lead");
+		await waitFor(() => t.kit.byName(lead)?.inTurn, "lead brief");
+		const sub = await t.client.spawn({ from: lead, harness: "pi", task: "sub task", name: "sub", backend: "cmux" });
+		assert.ok("name" in sub);
+		const fake = await waitFor(() => t.kit.byName("sub"), "sub adapter");
+
+		const sideways = await t.client.model({ from: "sub", to: lead, model: "anthropic/claude-sonnet-5-5" });
+		assert.match("error" in sideways ? sideways.error : "", /only its parent \(or an agent above it\)/);
+		const unknown = await t.client.model({ from: root, to: "nobody", model: "anthropic/claude-sonnet-5-5" });
+		assert.match("error" in unknown ? unknown.error : "", /nobody/);
+		assert.deepEqual(fake.modelRequests, [], "nothing reached the adapter");
+
+		// The grandparent is above the worker too.
+		const done = await t.client.model({ from: root, to: "sub", model: "anthropic/claude-sonnet-5-5" });
+		assert.deepEqual(done, {
+			status: "applied",
+			model: "anthropic/claude-sonnet-5-5",
+			previous: "claude-bridge/claude-haiku-5-5",
+		});
+		assert.deepEqual(fake.modelRequests, ["anthropic/claude-sonnet-5-5"]);
+		assert.equal(t.running.hub.registry.get("sub")?.record.model, "anthropic/claude-sonnet-5-5");
+		assert.equal(journalOf(t, "sub")?.model, "anthropic/claude-sonnet-5-5");
+	}));
+
+test("model: only an exact <provider>/<id> reaches the adapter", () =>
+	withHub(async (t) => {
+		const root = await pullRoot(t.client);
+		const w = await spawned(t, root, "pi", "w");
+		const fake = await waitFor(() => t.kit.byName(w), "adapter");
+		for (const bad of [
+			"",
+			"sonnet",
+			"claude-sonnet-5-5",
+			"anthropic/",
+			"/claude",
+			"anthropic/claude *",
+			"anthropic/claude-*",
+			" anthropic/claude-sonnet-5-5",
+		]) {
+			const res = await t.client.model({ from: root, to: w, model: bad });
+			assert.match("error" in res ? res.error : "", /exact <provider>\/<id>/, JSON.stringify(bad));
+		}
+		assert.deepEqual(fake.modelRequests, []);
+		// An id may itself hold slashes: the provider is what precedes the first one.
+		const ok = await t.client.model({ from: root, to: w, model: "openrouter/anthropic/claude-sonnet-5-5" });
+		assert.ok("status" in ok);
+		assert.deepEqual(fake.modelRequests, ["openrouter/anthropic/claude-sonnet-5-5"]);
+	}));
+
+test("model: an adapter without setModel, a pull root and an exited worker answer clearly and change nothing", () =>
+	withHub(async (t) => {
+		const root = await pullRoot(t.client);
+		const w = await spawned(t, root, "pi", "w");
+		const fake = await waitFor(() => t.kit.byName(w), "adapter");
+		(fake as { setModel?: unknown }).setModel = undefined;
+		const res = await t.client.model({ from: root, to: w, model: "anthropic/claude-sonnet-5-5" });
+		assert.match(
+			"error" in res ? res.error : "",
+			/w cannot change its model through agent-link: its adapter has no model switch/,
+		);
+		assert.equal(t.running.hub.registry.get(w)?.record.model, "claude-bridge/claude-haiku-5-5");
+
+		const other = await pullRoot(t.client, "claude");
+		const lead = await spawned(t, root, "claude", "lead");
+		await t.client.cancel({ from: root, name: lead });
+		const gone = await t.client.model({ from: root, to: lead, model: "anthropic/claude-sonnet-5-5" });
+		assert.match("error" in gone ? gone.error : "", /lead has exited/);
+		const pull = await t.client.model({ from: other, to: other, model: "anthropic/claude-sonnet-5-5" });
+		assert.ok("error" in pull);
+	}));
+
+test("model: an adapter error keeps the model; a pending answer waits for the adapter's model update", () =>
+	withHub(async (t) => {
+		const root = await pullRoot(t.client);
+		const w = await spawned(t, root, "pi", "w");
+		const fake = await waitFor(() => t.kit.byName(w), "adapter");
+		const before = "claude-bridge/claude-haiku-5-5";
+
+		fake.setModelResult = { error: "unknown model anthropic/nope" };
+		const failed = await t.client.model({ from: root, to: w, model: "anthropic/nope" });
+		assert.deepEqual(failed, { error: "unknown model anthropic/nope" });
+		assert.equal(t.running.hub.registry.get(w)?.record.model, before);
+		assert.equal(journalOf(t, w)?.model, before);
+
+		fake.setModelResult = { status: "pending", model: "anthropic/claude-sonnet-5-5" };
+		const pending = await t.client.model({ from: root, to: w, model: "anthropic/claude-sonnet-5-5" });
+		assert.deepEqual(pending, { status: "pending", model: "anthropic/claude-sonnet-5-5", previous: before });
+		assert.equal(t.running.hub.registry.get(w)?.record.model, before, "still the old one while pending");
+
+		fake.emit({ kind: "model", model: "anthropic/claude-sonnet-5-5" });
+		assert.equal(t.running.hub.registry.get(w)?.record.model, "anthropic/claude-sonnet-5-5");
+		assert.equal(journalOf(t, w)?.model, "anthropic/claude-sonnet-5-5");
+
+		// A failed switch at the boundary tells the parent and keeps the model.
+		fake.emit({ kind: "model_error", model: "anthropic/gone", error: "no API key for anthropic" });
+		assert.equal(t.running.hub.registry.get(w)?.record.model, "anthropic/claude-sonnet-5-5");
+		assert.ok(
+			(await inboxTexts(t, root)).some((x) => /could not switch to anthropic\/gone: no API key for anthropic/.test(x)),
+		);
 	}));

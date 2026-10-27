@@ -10,6 +10,7 @@ import type {
 	PromptRequest,
 	PromptResponse,
 	SessionUpdate,
+	SetModelResult,
 	StopReason,
 } from "../../src/types.ts";
 
@@ -58,6 +59,15 @@ export class FakeAdapter implements AgentAdapter {
 
 	connectFail(message: string): void {
 		this.failConnect?.(new Error(message));
+	}
+
+	/** What setModel() was asked for, in order; setModelResult is the answer (default: applied). */
+	readonly modelRequests: string[] = [];
+	setModelResult?: SetModelResult;
+
+	async setModel(model: string): Promise<SetModelResult> {
+		this.modelRequests.push(model);
+		return this.setModelResult ?? { status: "applied", model };
 	}
 
 	async answer(choice: string): Promise<{ answered: string } | { error: string }> {

@@ -1,4 +1,4 @@
-// The agent-link MCP server over stdio: the six tools, backed by the hub. agent-link-cmux and agent-link-tmux call
+// The agent-link MCP server over stdio: the tools, backed by the hub. agent-link-cmux and agent-link-tmux call
 // runMcpServer() with their backend; nothing else differs between them.
 // Minimal JSON-RPC (initialize, tools/list, tools/call, ping), no SDK on purpose. Ported from xi
 // packages/mcp/src/server.ts.
@@ -15,6 +15,7 @@ import {
 	errorReply,
 	inboxReply,
 	instructions,
+	modelReply,
 	permitReply,
 	replyReply,
 	sendReply,
@@ -184,6 +185,10 @@ export async function runMcpServer(opts: McpServerOptions): Promise<void> {
 				case "cancel": {
 					const name = str("name") ?? "";
 					return cancelReply(await s.client.cancel({ from: s.name, name }), name);
+				}
+				case "model": {
+					const to = str("to") ?? "";
+					return modelReply(await s.client.model({ from: s.name, to, model: str("model") ?? "" }), to);
 				}
 				case "inbox": {
 					const res = await s.client.inbox(s.name);
