@@ -55,7 +55,17 @@ test("private path-style S3 PUT/GET/HEAD/delete use signed headers, pinned conte
 	const calls: { method: string; path: string; body: Buffer }[] = [];
 	const storage = new Map<string, { bytes: Buffer; hash: string }>();
 	let corrupt = false;
+	let unsigned = 0;
 	const server = createServer(async (req, res) => {
+		if (!req.headers.authorization) {
+			unsigned++;
+			assert.equal(req.url, "/storage/v1/s3/private-books/library/private-probe");
+			assert.equal(req.method, "GET");
+			assert.equal(req.headers["x-amz-date"], undefined);
+			res.writeHead(403);
+			res.end("denied");
+			return;
+		}
 		const parts: Buffer[] = [];
 		for await (const chunk of req) parts.push(Buffer.from(chunk as Uint8Array));
 		const bytes = Buffer.concat(parts);
@@ -118,14 +128,20 @@ test("private path-style S3 PUT/GET/HEAD/delete use signed headers, pinned conte
 		prefix: "library/",
 		...example,
 		privateBucketConfirmed: true as const,
+		privateProbeKey: "library/private-probe",
 		retries: 0,
 	};
 	const client = new Objects(options);
 	const content = Buffer.from("synthetic-image-bytes");
 	const receipt = await client.put("library/version/figure.png", content, "image/png");
 	assert.equal(receipt.hash, `sha256:${createHash("sha256").update(content).digest("hex")}`);
-	assert.deepEqual(await client.get(receipt.key, receipt.hash), content);
-	assert.deepEqual(await client.head(receipt.key, receipt.hash), receipt);
+	const [retrieved, described] = await Promise.all([
+		client.get(receipt.key, receipt.hash),
+		client.head(receipt.key, receipt.hash),
+	]);
+	assert.deepEqual(retrieved, content);
+	assert.deepEqual(described, receipt);
+	assert.equal(unsigned, 1);
 	corrupt = true;
 	await assert.rejects(client.get(receipt.key, receipt.hash), /hash mismatch/u);
 	corrupt = false;
@@ -179,10 +195,69 @@ test("private path-style S3 PUT/GET/HEAD/delete use signed headers, pinned conte
 	assert.throws(() => new Objects({ ...options, privateBucketConfirmed: false } as never), /private bucket/u);
 });
 
-test("S3 bounded retries, timeouts, concurrency and redacted failures use fake loopback only", async (t) => {
+test("S3 unsigned known-object probe fails closed for public/missing objects and accepts only explicit refusal", async (t) => {
+	let status = 200;
+	let signed = 0;
+	let unsigned = 0;
+	const server = createServer((req, res) => {
+		if (req.headers.authorization) {
+			signed++;
+			res.end();
+		} else {
+			unsigned++;
+			res.writeHead(status);
+			res.end();
+		}
+	});
+	server.listen(0, "127.0.0.1");
+	await new Promise<void>((resolve) => server.once("listening", resolve));
+	t.after(() => {
+		server.closeAllConnections();
+		server.close();
+	});
+	const options = {
+		endpoint: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
+		region: "us-east-1",
+		bucket: "books",
+		prefix: "library/",
+		...example,
+		privateBucketConfirmed: true as const,
+		privateProbeKey: "library/private-probe",
+		retries: 0,
+	};
+	await assert.rejects(
+		new Objects(options).put("library/catalog", Buffer.from("{}"), "application/json"),
+		/Bucket appears public/u,
+	);
+	assert.equal(signed, 0);
+	status = 404;
+	await assert.rejects(new Objects(options).put("library/catalog", Buffer.from("{}"), "application/json"), /404/u);
+	assert.equal(signed, 0);
+	for (const refusal of [400, 401, 403]) {
+		status = refusal;
+		await new Objects(options).put("library/catalog", Buffer.from("{}"), "application/json");
+	}
+	assert.equal(signed, 3);
+	assert.equal(unsigned, 5);
+	const expiring = new Objects({ ...options, verificationTtlMs: 1 });
+	await expiring.put("library/catalog", Buffer.from("{}"), "application/json");
+	status = 200;
+	await new Promise((resolve) => setTimeout(resolve, 5));
+	await assert.rejects(
+		expiring.put("library/catalog", Buffer.from("{}"), "application/json"),
+		/Bucket appears public/u,
+	);
+});
+
+test("S3 bounded retries, timeouts, queue waits and redacted failures use fake loopback only", async (t) => {
 	let count = 0;
 	let mode = "transient";
-	const server = createServer((_req, res) => {
+	const server = createServer((req, res) => {
+		if (!req.headers.authorization) {
+			res.writeHead(403);
+			res.end();
+			return;
+		}
 		count++;
 		if (mode === "timeout") return;
 		res.writeHead(mode === "denied" ? 403 : 429, { "retry-after": "0" });
@@ -201,6 +276,8 @@ test("S3 bounded retries, timeouts, concurrency and redacted failures use fake l
 		prefix: "library/",
 		...example,
 		privateBucketConfirmed: true,
+		privateProbeKey: "library/private-probe",
+		queueWaitMs: 10,
 		retryDelayMs: 0,
 		timeoutMs: 30,
 	});
@@ -218,6 +295,6 @@ test("S3 bounded retries, timeouts, concurrency and redacted failures use fake l
 	assert.equal(count, 5);
 	mode = "timeout";
 	const active = call();
-	await assert.rejects(call(), /concurrency/u);
+	await assert.rejects(call(), /queue wait timed out/u);
 	await assert.rejects(active, /bounded attempts/u);
 });

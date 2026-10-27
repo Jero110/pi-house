@@ -1,6 +1,14 @@
 import { embeddingInputBound, passageEmbeddingInput } from "./chunks.ts";
 import type { HttpOptions } from "./config.ts";
-import { AdapterError, boundedInteger, endpoint, record, requestJson } from "./config.ts";
+import {
+	AdapterError,
+	BoundedQueue,
+	boundedInteger,
+	endpoint,
+	record,
+	requestJson,
+	VerificationCache,
+} from "./config.ts";
 
 export const embeddingIdentity = Object.freeze({
 	runtime: "ollama",
@@ -45,7 +53,8 @@ export class LocalEmbeddings {
 	readonly identity = embeddingIdentity;
 	private readonly base: URL;
 	private readonly options: EmbeddingOptions;
-	private busy = false;
+	private readonly queue: BoundedQueue;
+	private readonly verification: VerificationCache;
 	private inputs = 0;
 	constructor(options: EmbeddingOptions) {
 		this.base = endpoint(options.url, true);
@@ -55,6 +64,8 @@ export class LocalEmbeddings {
 		assertEmbeddingIdentity(options.identity ?? embeddingIdentity);
 		boundedInteger(options.maxInputs ?? 20000, 1, 20000, "embedding run");
 		this.options = { ...options };
+		this.queue = new BoundedQueue(options.queueWaitMs);
+		this.verification = new VerificationCache(options.verificationTtlMs);
 	}
 	private call(path: string, body?: unknown): Promise<unknown> {
 		return requestJson(
@@ -101,21 +112,17 @@ export class LocalEmbeddings {
 			throw new AdapterError("identity_mismatch", "Unsupported embedding model parameter override");
 	}
 	async doctor(): Promise<EmbeddingIdentity> {
-		if (this.busy) throw new AdapterError("resource_limit", "Embedding concurrency limit is one");
-		this.busy = true;
-		try {
-			await this.verify();
+		return this.queue.run(async () => {
+			await this.verification.verify(() => this.verify(), true);
 			return this.identity;
-		} finally {
-			this.busy = false;
-		}
+		});
 	}
 	async documents(
 		passages: readonly Parameters<typeof passageEmbeddingInput>[0][],
 		expected: unknown,
 	): Promise<readonly number[][]> {
 		boundedInteger(passages.length, 1, 8, "embedding batch");
-		return this.embed(passages.map(passageEmbeddingInput), expected);
+		return this.embed(passages.map(passageEmbeddingInput), expected, true);
 	}
 	async query(text: string, expected: unknown): Promise<number[]> {
 		if (!text.trim()) throw new AdapterError("resource_limit", "Empty embedding query");
@@ -124,7 +131,7 @@ export class LocalEmbeddings {
 		if (!vector) throw new AdapterError("invalid_response", "Missing query embedding");
 		return vector;
 	}
-	private async embed(inputs: readonly string[], expected: unknown): Promise<readonly number[][]> {
+	private async embed(inputs: readonly string[], expected: unknown, writeRun = false): Promise<readonly number[][]> {
 		assertEmbeddingIdentity(expected);
 		boundedInteger(inputs.length, 1, 8, "embedding batch");
 		for (const input of inputs)
@@ -133,23 +140,23 @@ export class LocalEmbeddings {
 					"resource_limit",
 					"Embedding input exceeds conservative context bound; truncation forbidden",
 				);
-		if (this.busy) throw new AdapterError("resource_limit", "Embedding concurrency limit is one");
-		if (this.inputs + inputs.length > (this.options.maxInputs ?? 20000))
-			throw new AdapterError("resource_limit", "Embedding run budget exhausted");
-		this.inputs += inputs.length;
-		this.busy = true;
-		try {
-			await this.verify();
-			const result = record(
-				await this.call("/api/embed", { model: embeddingIdentity.model, input: inputs, truncate: false }),
-			);
-			if (!Array.isArray(result.embeddings) || result.embeddings.length !== inputs.length)
-				throw new AdapterError("invalid_response", "Embedding batch size mismatch");
-			if (typeof result.prompt_eval_count === "number" && result.prompt_eval_count > inputs.length * 2048)
-				throw new AdapterError("invalid_response", "Embedding context exceeded");
-			return result.embeddings.map(validateVector);
-		} finally {
-			this.busy = false;
-		}
+		return this.queue.run(async () => {
+			if (this.inputs + inputs.length > (this.options.maxInputs ?? 20000))
+				throw new AdapterError("resource_limit", "Embedding run budget exhausted");
+			this.inputs += inputs.length;
+			await this.verification.verify(() => this.verify(), writeRun);
+			try {
+				const result = record(
+					await this.call("/api/embed", { model: embeddingIdentity.model, input: inputs, truncate: false }),
+				);
+				if (!Array.isArray(result.embeddings) || result.embeddings.length !== inputs.length)
+					throw new AdapterError("invalid_response", "Embedding batch size mismatch");
+				if (typeof result.prompt_eval_count === "number" && result.prompt_eval_count > inputs.length * 2048)
+					throw new AdapterError("invalid_response", "Embedding context exceeded");
+				return result.embeddings.map(validateVector);
+			} catch (error) {
+				return this.verification.recheck(error, () => this.verify());
+			}
+		});
 	}
 }

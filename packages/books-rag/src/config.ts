@@ -7,7 +7,8 @@ export class AdapterError extends Error {
 		| "resource_limit"
 		| "unavailable"
 		| "quota"
-		| "invalid_response";
+		| "invalid_response"
+		| "busy";
 	constructor(code: AdapterError["code"], message: string) {
 		super(message);
 		this.name = "AdapterError";
@@ -54,6 +55,8 @@ export interface BooksConfig {
 		readonly accessKeyId: string;
 		readonly secretAccessKey: string;
 		readonly prefix: string;
+		readonly privateBucketConfirmed: true;
+		readonly privateProbeKey: string;
 	};
 }
 export function loadConfig(options: { readonly env?: NodeJS.ProcessEnv; readonly envFile?: string } = {}): BooksConfig {
@@ -78,6 +81,8 @@ export function loadConfig(options: { readonly env?: NodeJS.ProcessEnv; readonly
 			throw new AdapterError("configuration", `${key} requires an S3 credential, not a Supabase personal access token`);
 		return value;
 	};
+	if (env.S3_BUCKET_PRIVATE_CONFIRMED !== "true")
+		throw new AdapterError("configuration", "S3_BUCKET_PRIVATE_CONFIRMED must be true after operator verification");
 	return {
 		dataDirectory: required("BOOKS_DATA_DIR"),
 		ollamaUrl: env.OLLAMA_URL ?? "http://127.0.0.1:11434",
@@ -95,6 +100,8 @@ export function loadConfig(options: { readonly env?: NodeJS.ProcessEnv; readonly
 			accessKeyId: credential("S3_ACCESS_KEY_ID"),
 			secretAccessKey: credential("S3_SECRET_ACCESS_KEY"),
 			prefix: required("S3_LIBRARY_PREFIX"),
+			privateBucketConfirmed: true,
+			privateProbeKey: required("S3_PRIVATE_PROBE_KEY"),
 		},
 	};
 }
@@ -133,14 +140,80 @@ export interface HttpOptions {
 	readonly timeoutMs?: number;
 	readonly retries?: number;
 	readonly retryDelayMs?: number;
+	readonly queueWaitMs?: number;
+	readonly verificationTtlMs?: number;
+}
+
+/** One active operation, four FIFO waiters. Timeout removes the waiter rather
+ * than leaving cancelled work to execute later or accumulating hidden promises. */
+export class BoundedQueue {
+	private active = false;
+	private readonly waiting: {
+		readonly resolve: () => void;
+		readonly timer: ReturnType<typeof setTimeout>;
+	}[] = [];
+	private readonly waitMs: number;
+	constructor(waitMs = 15000) {
+		this.waitMs = boundedInteger(waitMs, 1, 60000, "queue wait");
+	}
+	private acquire(): Promise<void> {
+		if (!this.active) {
+			this.active = true;
+			return Promise.resolve();
+		}
+		if (this.waiting.length >= 4)
+			return Promise.reject(new AdapterError("busy", "Adapter busy: bounded queue is full"));
+		return new Promise((resolve, reject) => {
+			const timer = setTimeout(() => {
+				const index = this.waiting.findIndex((entry) => entry.timer === timer);
+				if (index >= 0) this.waiting.splice(index, 1);
+				reject(new AdapterError("busy", "Adapter busy: queue wait timed out"));
+			}, this.waitMs);
+			this.waiting.push({ resolve, timer });
+		});
+	}
+	async run<T>(work: () => Promise<T>): Promise<T> {
+		await this.acquire();
+		try {
+			return await work();
+		} finally {
+			const next = this.waiting.shift();
+			if (next) {
+				clearTimeout(next.timer);
+				next.resolve();
+			} else this.active = false;
+		}
+	}
+}
+
+export class VerificationCache {
+	private expires = 0;
+	private readonly ttl: number;
+	constructor(ttl = 600000) {
+		this.ttl = boundedInteger(ttl, 1, 600000, "verification TTL");
+	}
+	async verify(probe: () => Promise<void>, force = false): Promise<void> {
+		if (!force && Date.now() < this.expires) return;
+		this.expires = 0;
+		await probe();
+		this.expires = Date.now() + this.ttl;
+	}
+	async recheck(error: unknown, probe: () => Promise<void>): Promise<never> {
+		if (error instanceof AdapterError && ["identity_mismatch", "invalid_response"].includes(error.code)) {
+			this.expires = 0;
+			await this.verify(probe, true);
+		}
+		throw error;
+	}
 }
 /** Shared bounded transport. Provider bodies and fetch causes never escape: both
- * can echo secrets. Serial adapters reject concurrent use instead of queueing
- * unbounded work. Each retry obtains a fresh signature from the caller. */
+ * can echo secrets. Adapters bound in-flight work and queue waits separately.
+ * Each retry obtains a fresh signature from the caller. */
 export async function requestBytes(
 	make: () => { readonly url: URL; readonly init: RequestInit },
 	limit: number,
 	options: HttpOptions = {},
+	responseOptions: { readonly acceptedStatuses?: readonly number[]; readonly statusOnly?: boolean } = {},
 ): Promise<{ readonly bytes: Buffer; readonly headers: Headers; readonly status: number }> {
 	const timeout = boundedInteger(options.timeoutMs ?? 15000, 1, 60000, "timeout");
 	const retries = boundedInteger(options.retries ?? 2, 0, 2, "retry");
@@ -152,6 +225,10 @@ export async function requestBytes(
 		try {
 			const { url, init } = make();
 			const response = await fetch(url, { ...init, signal: controller.signal, redirect: "error" });
+			if (responseOptions.statusOnly && (response.ok || responseOptions.acceptedStatuses?.includes(response.status))) {
+				await response.body?.cancel();
+				return { bytes: Buffer.alloc(0), headers: response.headers, status: response.status };
+			}
 			const chunks: Uint8Array[] = [];
 			let size = 0;
 			if (response.body) {
@@ -172,7 +249,8 @@ export async function requestBytes(
 				}
 			}
 			const bytes = Buffer.concat(chunks);
-			if (response.ok) return { bytes, headers: response.headers, status: response.status };
+			if (response.ok || responseOptions.acceptedStatuses?.includes(response.status))
+				return { bytes, headers: response.headers, status: response.status };
 			const body = bytes.toString("utf8");
 			if (
 				response.status === 402 ||

@@ -1,6 +1,14 @@
 import type { ChunkStructure } from "./chunks.ts";
 import type { HttpOptions } from "./config.ts";
-import { AdapterError, boundedInteger, endpoint, record, requestJson } from "./config.ts";
+import {
+	AdapterError,
+	BoundedQueue,
+	boundedInteger,
+	endpoint,
+	record,
+	requestJson,
+	VerificationCache,
+} from "./config.ts";
 import type { Passage, PdfLocation, TextRange } from "./contracts.ts";
 import { assertSourceIdentity } from "./contracts.ts";
 import { assertEmbeddingIdentity, validateVector } from "./embeddings.ts";
@@ -177,7 +185,8 @@ export class Pinecone {
 	private readonly options: PineconeOptions;
 	private readonly host: URL;
 	private readonly control: URL;
-	private busy = false;
+	private readonly queue: BoundedQueue;
+	private readonly verification: VerificationCache;
 	private written = 0;
 	private requests = 0;
 	private bytes = 0;
@@ -185,6 +194,8 @@ export class Pinecone {
 	private lastQuery = 0;
 	constructor(options: PineconeOptions) {
 		this.options = { ...options };
+		this.queue = new BoundedQueue(options.queueWaitMs);
+		this.verification = new VerificationCache(options.verificationTtlMs);
 		this.host = endpoint(options.host.includes("://") ? options.host : `https://${options.host}`);
 		this.control = endpoint(options.controlUrl ?? "https://api.pinecone.io");
 		if (options.controlUrl && !["127.0.0.1", "[::1]"].includes(this.control.hostname))
@@ -228,7 +239,10 @@ export class Pinecone {
 			{ ...this.options, retryDelayMs: this.options.retryDelayMs ?? 1000 },
 		);
 	}
-	private async verify(): Promise<void> {
+	private verify(force = false): Promise<void> {
+		return this.verification.verify(() => this.probe(), force);
+	}
+	private async probe(): Promise<void> {
 		const index = record(await this.call(this.control, `/indexes/${this.options.indexName}`));
 		const spec = record(index.spec);
 		const status = record(index.status);
@@ -257,19 +271,19 @@ export class Pinecone {
 	}
 	async doctor(): Promise<void> {
 		await this.exclusive(async () => {
-			await this.verify();
+			await this.verify(true);
 		});
 	}
 	private async exclusive<T>(work: () => Promise<T>): Promise<T> {
-		if (this.busy) throw new AdapterError("resource_limit", "Pinecone concurrency limit is one");
-		if (++this.requests > (this.options.maxRequests ?? 10000))
-			throw new AdapterError("resource_limit", "Pinecone run request budget exhausted");
-		this.busy = true;
-		try {
-			return await work();
-		} finally {
-			this.busy = false;
-		}
+		return this.queue.run(async () => {
+			if (++this.requests > (this.options.maxRequests ?? 10000))
+				throw new AdapterError("resource_limit", "Pinecone run request budget exhausted");
+			try {
+				return await work();
+			} catch (error) {
+				return this.verification.recheck(error, () => this.probe());
+			}
+		});
 	}
 	private async throttle(kind: "write" | "query"): Promise<void> {
 		const interval =
@@ -300,21 +314,30 @@ export class Pinecone {
 		)
 			throw new AdapterError("resource_limit", "Pinecone batch/run budget exhausted");
 		await this.exclusive(async () => {
-			await this.verify();
-			this.written += vectors.length;
+			await this.verify(true);
+			if (
+				this.written + detached.length > (this.options.maxVectors ?? 20000) ||
+				this.bytes + size > (this.options.maxWriteBytes ?? 100000000)
+			)
+				throw new AdapterError("resource_limit", "Pinecone batch/run budget exhausted");
+			this.written += detached.length;
 			this.bytes += size;
 			await this.throttle("write");
 			const result = record(await this.call(this.host, "/vectors/upsert", body));
-			if (result.upsertedCount !== vectors.length)
+			if (result.upsertedCount !== detached.length)
 				throw new AdapterError("invalid_response", "Pinecone upsert acknowledgement mismatch");
 		});
 	}
 	async query(
 		vector: readonly number[],
 		expected: unknown,
-		options: { readonly generation: string; readonly topK?: number; readonly versionIds?: readonly string[] },
+		inputOptions: { readonly generation: string; readonly topK?: number; readonly versionIds?: readonly string[] },
 	): Promise<readonly PineconeMatch[]> {
 		assertEmbeddingIdentity(expected);
+		const options = {
+			...inputOptions,
+			...(inputOptions.versionIds ? { versionIds: [...inputOptions.versionIds] } : {}),
+		};
 		assertGeneration(options.generation);
 		const values = validateVector(vector);
 		const topK = boundedInteger(options.topK ?? 20, 1, 20, "Pinecone topK");
@@ -370,8 +393,13 @@ export class Pinecone {
 		)
 			throw new AdapterError("resource_limit", "Pinecone delete run budget exhausted");
 		await this.exclusive(async () => {
-			await this.verify();
-			this.written += ids.length;
+			await this.verify(true);
+			if (
+				this.written + body.ids.length > (this.options.maxVectors ?? 20000) ||
+				this.bytes + size > (this.options.maxWriteBytes ?? 100000000)
+			)
+				throw new AdapterError("resource_limit", "Pinecone delete run budget exhausted");
+			this.written += body.ids.length;
 			this.bytes += size;
 			await this.throttle("write");
 			await this.call(this.host, "/vectors/delete", body);

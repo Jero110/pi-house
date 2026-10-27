@@ -3,7 +3,7 @@ import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { test } from "node:test";
 import { passageEmbeddingInput } from "../src/chunks.ts";
-import { AdapterError, loadConfig, parseEnv, requestBytes } from "../src/config.ts";
+import { AdapterError, BoundedQueue, loadConfig, parseEnv, requestBytes } from "../src/config.ts";
 import { embeddingIdentity, LocalEmbeddings, validateVector } from "../src/embeddings.ts";
 
 test("local embeddings verify pinned runtime, model digest and show metadata; preserve task prefixes and truncate:false", async (t) => {
@@ -67,6 +67,15 @@ test("local embeddings verify pinned runtime, model digest and show metadata; pr
 		],
 	);
 	assert.ok(calls.every((c) => ["/api/version", "/api/tags", "/api/show", "/api/embed"].includes(c.path)));
+	const probes = calls.filter((c) => c.path === "/api/show").length;
+	await client.query("cached", embeddingIdentity);
+	await client.query("cached-again", embeddingIdentity);
+	assert.equal(calls.filter((c) => c.path === "/api/show").length, probes);
+	const expiring = new LocalEmbeddings({ url, verificationTtlMs: 1 });
+	await expiring.query("ttl", embeddingIdentity);
+	await new Promise((resolve) => setTimeout(resolve, 5));
+	await expiring.query("ttl", embeddingIdentity);
+	assert.equal(calls.filter((c) => c.path === "/api/show").length, probes + 2);
 	digest = embeddingIdentity.digest.slice(7);
 	await client.doctor();
 	digest = embeddingIdentity.digest;
@@ -82,26 +91,31 @@ test("local embeddings verify pinned runtime, model digest and show metadata; pr
 	);
 	assert.equal(calls.length, count);
 	digest = "sha256:wrong";
-	await assert.rejects(client.query("x", embeddingIdentity), /not installed/u);
+	await assert.rejects(client.doctor(), /not installed/u);
 	digest = embeddingIdentity.digest;
 	dimension = 384;
-	await assert.rejects(client.query("x", embeddingIdentity), /dimension/u);
+	await assert.rejects(client.doctor(), /dimension/u);
 	dimension = 768;
 	runtime = "another";
-	await assert.rejects(client.query("x", embeddingIdentity), /version mismatch/u);
+	await assert.rejects(client.doctor(), /version mismatch/u);
 	runtime = "0.40.11";
+	await client.doctor();
 	malformed = true;
+	const beforeMismatch = calls.filter((c) => c.path === "/api/show").length;
 	await assert.rejects(client.query("x", embeddingIdentity), /768 finite/u);
+	assert.equal(calls.filter((c) => c.path === "/api/show").length, beforeMismatch + 1);
 	malformed = false;
 	blocked = () => {};
 	const previousCount = calls.length;
 	const active = client.query("x", embeddingIdentity);
 	while (calls.length <= previousCount || calls.at(-1)?.path !== "/api/embed")
 		await new Promise((resolve) => setTimeout(resolve, 1));
-	await assert.rejects(client.query("x", embeddingIdentity), /concurrency/u);
-	blocked();
-	await active;
+	const queued = client.query("x", embeddingIdentity);
+	const release = blocked;
 	blocked = undefined;
+	release();
+	await active;
+	await queued;
 	const tiny = new LocalEmbeddings({ url, maxInputs: 1 });
 	await tiny.query("x", embeddingIdentity);
 	await assert.rejects(tiny.query("x", embeddingIdentity), /budget/u);
@@ -159,13 +173,72 @@ test("dotenv/config errors name keys but never echo credential values", () => {
 		S3_ACCESS_KEY_ID: "fake-id",
 		S3_SECRET_ACCESS_KEY: "fake-secret",
 		S3_LIBRARY_PREFIX: "library/",
+		S3_BUCKET_PRIVATE_CONFIRMED: "true",
+		S3_PRIVATE_PROBE_KEY: "library/private-probe",
 	};
 	assert.equal(loadConfig({ env }).objects.bucket, "books");
+	assert.equal(loadConfig({ env }).objects.privateBucketConfirmed, true);
+	assert.throws(() => loadConfig({ env: { ...env, S3_BUCKET_PRIVATE_CONFIRMED: "false" } }), /PRIVATE_CONFIRMED/u);
 	assert.throws(
 		() => loadConfig({ env: { ...env, S3_ACCESS_KEY_ID: "sbp_not-a-real-token" } }),
 		(e: unknown) => e instanceof Error && /personal access token/u.test(e.message) && !e.message.includes("sbp_"),
 	);
 	assert.throws(() => loadConfig({ env: { ...env, PINE_CONE_API: "" } }), /PINE_CONE_API/u);
+});
+
+test("bounded queue preserves FIFO parallel calls, rejects a fifth waiter, times out and removes waiting work", async () => {
+	const queue = new BoundedQueue(1000);
+	let release: (() => void) | undefined;
+	const active = queue.run(
+		() =>
+			new Promise<void>((resolve) => {
+				release = resolve;
+			}),
+	);
+	const order: number[] = [];
+	const waiting = [1, 2, 3, 4].map((n) =>
+		queue.run(async () => {
+			order.push(n);
+		}),
+	);
+	await assert.rejects(
+		queue.run(async () => {}),
+		/queue is full/u,
+	);
+	if (!release) throw new Error("Missing active queue operation");
+	release();
+	await active;
+	await Promise.all(waiting);
+	assert.deepEqual(order, [1, 2, 3, 4]);
+	const short = new BoundedQueue(10);
+	let unblock: (() => void) | undefined;
+	const held = short.run(
+		() =>
+			new Promise<void>((resolve) => {
+				unblock = resolve;
+			}),
+	);
+	let ran = false;
+	await assert.rejects(
+		short.run(async () => {
+			ran = true;
+		}),
+		/wait timed out/u,
+	);
+	if (!unblock) throw new Error("Missing held operation");
+	unblock();
+	await held;
+	assert.equal(ran, false);
+	await assert.rejects(
+		short.run(async () => {
+			throw new Error("synthetic failure");
+		}),
+		/synthetic failure/u,
+	);
+	await short.run(async () => {
+		ran = true;
+	});
+	assert.equal(ran, true);
 });
 
 test("transport caps retries, response bytes, timeouts, redirects and redacts echoed provider errors", async (t) => {

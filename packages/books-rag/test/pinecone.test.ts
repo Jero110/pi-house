@@ -117,7 +117,6 @@ test("Pinecone checks exact read-only index before writes; scoped text/citations
 		[
 			["GET", "/indexes/books"],
 			["POST", "/vectors/upsert"],
-			["GET", "/indexes/books"],
 			["POST", "/query"],
 			["GET", "/indexes/books"],
 			["POST", "/vectors/delete"],
@@ -133,13 +132,22 @@ test("Pinecone checks exact read-only index before writes; scoped text/citations
 	assert.equal(item.metadata.sourceHash, passage().sourceHash);
 	assert.deepEqual(JSON.parse(String(item.metadata.spans)), passage().spans);
 	assert.deepEqual(JSON.parse(String(item.metadata.headingPath)), passage().headingPath);
+	const probes = calls.filter((c) => c.path === "/indexes/books").length;
+	await client.query(vector, embeddingIdentity, { generation });
+	await client.query(vector, embeddingIdentity, { generation });
+	assert.equal(calls.filter((c) => c.path === "/indexes/books").length, probes);
+	const expiring = new Pinecone({ ...options, verificationTtlMs: 1 });
+	await expiring.query(vector, embeddingIdentity, { generation });
+	await new Promise((resolve) => setTimeout(resolve, 5));
+	await expiring.query(vector, embeddingIdentity, { generation });
+	assert.equal(calls.filter((c) => c.path === "/indexes/books").length, probes + 2);
 	for (const mode of ["dimension", "host", "pod"]) {
 		compatible = mode !== "dimension";
 		mismatchHost = mode === "host";
 		invalidMode = mode === "pod";
 		const before = calls.length;
 		await assert.rejects(client.upsert([item], embeddingIdentity), /serverless dense cosine/u);
-		assert.equal(calls.length, before + 1);
+		assert.equal(calls.length, before + 2);
 	}
 	compatible = true;
 	mismatchHost = false;
@@ -243,16 +251,18 @@ test("Pinecone transient retries are bounded and quota 429 is not retried; error
 	assert.equal(count, 4);
 });
 
-test("Pinecone refuses concurrent work and malformed/stale query results", async (t) => {
+test("Pinecone queues concurrent work and re-probes malformed/stale query results", async (t) => {
 	let host = "";
 	let release: (() => void) | undefined;
 	let hold = true;
 	let mode = "malformed";
+	let probes = 0;
 	const server = createServer(async (req, res) => {
 		for await (const _chunk of req) {
 			/* Drain fake request without retaining text. */
 		}
 		if (req.url === "/indexes/books") {
+			probes++;
 			const send = () =>
 				res.end(
 					JSON.stringify({
@@ -295,11 +305,15 @@ test("Pinecone refuses concurrent work and malformed/stale query results", async
 	});
 	const active = client.doctor();
 	while (!release) await new Promise((resolve) => setTimeout(resolve, 1));
-	await assert.rejects(client.doctor(), /concurrency/u);
+	const queued = client.doctor();
+	hold = false;
 	release();
 	await active;
-	hold = false;
+	await queued;
+	const beforeMismatch = probes;
 	await assert.rejects(client.query(vector, embeddingIdentity, { generation }), /JSON/u);
+	assert.equal(probes, beforeMismatch + 1);
 	mode = "stale";
 	await assert.rejects(client.query(vector, embeddingIdentity, { generation }), /stale/u);
+	assert.equal(probes, beforeMismatch + 2);
 });
