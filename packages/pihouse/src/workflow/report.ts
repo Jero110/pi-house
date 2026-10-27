@@ -3,6 +3,38 @@
 import type { Usage } from "agent-transcripts";
 import type { Role, RunAgent, WorkflowRun } from "./run.ts";
 
+export interface WorkflowEvidenceParticipant {
+	id: string;
+	parent: string | null;
+	role: Role;
+	harness: string;
+	model: string;
+	taskId: string | null;
+	taskTitle: string | null;
+	assignedSkills: string[];
+	loadedSkills: string[];
+	usage: Partial<Usage>;
+	activeMs: number;
+	messages: number;
+	missing: string | null;
+	summary: {
+		assistantMessages?: number;
+		slowestMs?: number;
+		failedToolCalls?: number;
+		toolCalls?: number;
+	} | null;
+}
+
+export interface WorkflowEvidence {
+	lineage: string;
+	title: string;
+	project: string;
+	plan: string | null;
+	participants: WorkflowEvidenceParticipant[];
+	metrics: { newTokens: number; cacheRead: number; activeMs: number; wallMs: number; agents: number; messages: number };
+	cursor: Record<string, string>;
+}
+
 const ROLE_ORDER: Role[] = ["planner", "helper", "executor", "worker", "root"];
 
 const zero = (): Usage => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
@@ -81,6 +113,83 @@ function wall(run: WorkflowRun): number {
 	const starts = run.agents.map((a) => a.transcript?.startedAt).filter((x): x is number => x !== undefined);
 	const ends = run.agents.map((a) => a.transcript?.endedAt).filter((x): x is number => x !== undefined);
 	return starts.length && ends.length ? Math.max(...ends) - Math.min(...starts) : 0;
+}
+
+/** Rebuilds the reportable metrics from durable structured evidence, without transcript or native-session reads. */
+export function renderEvidenceReport(evidence: WorkflowEvidence): string {
+	const knownUsage = evidence.participants.some((participant) =>
+		Object.values(participant.usage).some((value) => typeof value === "number" && Number.isFinite(value)),
+	);
+	const totals = evidence.participants.reduce<Usage>(
+		(total, participant) => ({
+			input: total.input + (participant.usage.input ?? 0),
+			output: total.output + (participant.usage.output ?? 0),
+			cacheRead: total.cacheRead + (participant.usage.cacheRead ?? 0),
+			cacheWrite: total.cacheWrite + (participant.usage.cacheWrite ?? 0),
+		}),
+		zero(),
+	);
+	const name = evidence.plan ?? evidence.title;
+	const out = [
+		`# Workflow evidence: ${name}`,
+		"",
+		`Lineage ${evidence.lineage} · project ${evidence.project} · revision cursor ${Object.keys(evidence.cursor).length} participants`,
+		knownUsage
+			? `New tokens ${tokens(newTokens(totals))} (${tokens(totals.input)} input, ${tokens(totals.output)} output, ${tokens(totals.cacheWrite)} cache write) · cache reads ${tokens(totals.cacheRead)} · wall time ${duration(evidence.metrics.wallMs)}`
+			: `Usage unavailable · wall time ${duration(evidence.metrics.wallMs)}`,
+		"",
+		knownUsage
+			? "New tokens are input, output and cache writes; cache reads are reported separately."
+			: "Usage measurements are unavailable, not zero.",
+		"",
+		"## Participants",
+		"",
+		row([
+			"Participant",
+			"Role",
+			"Harness · model",
+			"Task",
+			"Skills assigned",
+			"Skills loaded",
+			"Answers",
+			"New tokens",
+			"Cache read",
+			"Active",
+			"Slowest",
+			"Tool errors",
+			"State",
+		]),
+		row(Array(13).fill("---")),
+	];
+	for (const participant of evidence.participants) {
+		const participantUsageKnown = Object.values(participant.usage).some(
+			(value) => typeof value === "number" && Number.isFinite(value),
+		);
+		const usage = {
+			input: participant.usage.input ?? 0,
+			output: participant.usage.output ?? 0,
+			cacheRead: participant.usage.cacheRead ?? 0,
+			cacheWrite: participant.usage.cacheWrite ?? 0,
+		};
+		out.push(
+			row([
+				participant.id,
+				participant.role,
+				`${participant.harness} · ${participant.model || "default"}`,
+				[participant.taskId, participant.taskTitle].filter(Boolean).join(": ") || "-",
+				participant.assignedSkills.join(", ") || "-",
+				participant.loadedSkills.join(", ") || "-",
+				participant.summary?.assistantMessages === undefined ? "-" : String(participant.summary.assistantMessages),
+				participantUsageKnown ? tokens(newTokens(usage)) : "-",
+				participantUsageKnown ? tokens(usage.cacheRead) : "-",
+				duration(participant.activeMs),
+				participant.summary?.slowestMs === undefined ? "-" : duration(participant.summary.slowestMs),
+				participant.summary?.failedToolCalls === undefined ? "-" : String(participant.summary.failedToolCalls),
+				participant.missing ? `missing evidence: ${participant.missing}` : "captured metrics",
+			]),
+		);
+	}
+	return `${out.join("\n")}\n`;
 }
 
 export function renderReport(run: WorkflowRun, opts: { messages?: boolean } = {}): string {

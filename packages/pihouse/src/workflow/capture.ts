@@ -273,6 +273,7 @@ export function captureRun(
 	const previous = readPackage(store, pkg.id);
 	const evidence = {
 		lineage: pkg.id,
+		title: root.name,
 		project: pkg.project,
 		plan: pkg.plan ?? null,
 		participants: pkg.agents.map(
