@@ -389,6 +389,15 @@ test("pihouse's own skills fix no model and ask only through ask_user_question",
 	}
 });
 
+test("the executor caps quota-backed workers and allows only known-free OpenCode overflow", () => {
+	const text = readFileSync(join(SKILLS_DIR, "build/executor", "SKILL.md"), "utf8").replace(/\s+/g, " ");
+	assert.match(text, /at most four quota-backed workers at once, in total across all descendants/i);
+	assert.match(text, /not four per provider/i);
+	assert.match(text, /explicitly known free model\/account route/i);
+	assert.match(text, /never activate a paid OpenCode route automatically/i);
+	assert.match(text, /never retry quota failures in a loop/i);
+});
+
 // ---------------------------------------------------------------------------------------------- workflow
 
 function fakeRun(t: { after: (fn: () => void) => void }) {

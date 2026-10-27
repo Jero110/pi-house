@@ -29,8 +29,22 @@ the format; you rarely need it.
 
 - **Look for safe parallel work by default**, at startup and after each result; do not wait for the user to request it.
   A task is ready only when every task that blocks it is done and verified. Dispatch ready tasks in plan order,
-  running independent ready tasks concurrently (at most 4 agents at once). Before dispatch, check both prerequisite
-  independence and file ownership; separate worktrees isolate edits but do not make dependent tasks independent.
+  running independent ready tasks concurrently. Before dispatch, check both prerequisite independence and file
+  ownership; separate worktrees isolate edits but do not make dependent tasks independent.
+- **At most four quota-backed workers at once, in total across all descendants.** A worker that consumes a
+  subscription or provider quota counts toward one cap of four for the whole run, including indirect workers a worker
+  starts; it is not four per provider, harness, branch or worktree. Count the workers already running, including
+  descendants, before crossing the cap, and keep fanout proportional to work that is actually independent.
+- Problem: a provider quota is one shared budget, but a harness name can look free and a worker can start helpers the
+  executor does not directly see. Example: four quota-backed workers each spawn one helper on the same subscription,
+  so six quota consumers run and later spawns fail; separately, a supposedly free overflow worker starts on a paid
+  OpenCode route. Solution: count every descendant against the four-worker cap, leave room before adding another
+  worker, and name the model/account route before treating a worker as free.
+- **Free OpenCode overflow only.** Beyond the quota-backed cap, extra workers are allowed only for lightweight,
+  independent tasks on OpenCode through an explicitly known free model/account route. OpenCode is not free because of
+  its harness name; with no known free route, do not use it. Never activate a paid OpenCode route automatically, and
+  never substitute a model for a fixed-model task without user or plan authorization. Keep free fanout proportional
+  to useful independent work and close each completed pane promptly.
 - Problem: waiting for one worker can leave unrelated ready work idle. Example: an isolated renderer check can run
   while a storage worker finishes, but a migration that needs its unfinished schema cannot. Solution: record the
   independence check and owned files in the ledger, then dispatch only the work that can safely proceed. If the plan
@@ -44,10 +58,12 @@ the format; you rarely need it.
   spawns. Never spawn on an account it reports `exhausted`. `stale` or `unknown` is not proof of exhaustion: you may
   spawn, but watch that agent's first result.
 - **When the plan's model cannot be used** (its account is `exhausted`, or a worker fails with a quota, rate or auth
-  error), pick an alternative the plan or the user authorized; never an unconfigured account or API billing. Record it
-  in the ledger as `ASSUMED:` (or `AMENDED:` when it changes a plan Decision). Then spawn on the alternative, or, for a
-  live worker, use agent-link's `model` tool: `retry: true` after a failed turn, `interrupt: true` only when waiting is
-  worse than cutting the current turn.
+  error), pause the affected work and switch only to a profile, account or model the plan or the user authorized;
+  never an unconfigured account or API billing, and never a substitute model for a fixed-model task without that
+  authorization. Record it in the ledger as `ASSUMED:` (or `AMENDED:` when it changes a plan Decision). Then spawn on
+  the alternative, or, for a live worker, use agent-link's `model` tool: `retry: true` after a failed turn,
+  `interrupt: true` only when waiting is worse than cutting the current turn. Switch once; never retry quota failures
+  in a loop.
 - **A model must be an exact id.** If a plan's model is words instead of `<provider>/<model-id>`, resolve it first with
   `PIHOUSE_NO_LINK=1 pihouse --list-models <words>` (it lists only providers the user is logged in to) and spawn with the id
   it prints; never pass the words, as pi matches them loosely and can pick a provider that is not configured. If an
@@ -125,6 +141,7 @@ if they want them.
 
 - Calling `ask_user_question` or waiting for the user.
 - Doing a task yourself that the plan gave to another agent, or spawning without the plan's harness and model.
+- Crossing four quota-backed workers at once, counting a harness name as free, or retrying a quota failure in a loop.
 - A brief without its `Skills:` line, or with skills the plan did not give that task.
 - Counting a result without command output as a pass.
 - A third attempt at the same task.
