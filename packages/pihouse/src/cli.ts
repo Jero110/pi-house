@@ -14,9 +14,10 @@ export const USAGE = `usage: pih [pi options] [message]       start pihouse (all
                                         register pihouse's MCP servers and profile (install.sh runs this);
                                         --claude-bridge also adds the Claude models on your Claude Code login
        pih uninstall                   undo setup's registrations (keeps ~/.pihouse)
-       pih route <profile> [--current <provider/model> --failure <kind>] [--task <id>]
+       pih route <profile> [--current <provider/model> --failure <kind>] [--task <id>] [--agent <name>]
                                         the exact model an authorized routing profile allows now: 0 selected,
-                                        3 paused (checkpoint written), 4 nothing authorized, 2 usage
+                                        3 paused (checkpoint written), 4 nothing authorized, 2 usage;
+                                        --agent names the worker a decision is recorded for
        pih --version`;
 
 export async function main(argv: readonly string[], env: NodeJS.ProcessEnv = process.env): Promise<number> {
