@@ -1,5 +1,6 @@
 // The routing profile file: strict parsing of <pihouseHome>/routing-profiles.json on temporary files. No model, provider
 // or network is touched; a profile only names what the user authorized.
+
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { mkdtempSync, readdirSync, readFileSync, statSync, utimesSync, writeFileSync } from "node:fs";
@@ -8,6 +9,7 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
+import type { ModelRegistry as PiModelRegistry } from "@earendil-works/pi-coding-agent";
 import { MAX_AGE_MS, observeAccounts } from "../src/account-usage.ts";
 import type { Observation, Profile } from "../src/workflow/routing.ts";
 import {
@@ -148,6 +150,15 @@ function fakeRegistry(models: { provider: string; id: string; authed: boolean }[
 		},
 	};
 	return { registry, lookups };
+}
+
+// Problem: chooseRoute() is written against a small ModelRegistry interface, not pi's class, so a pi upgrade that
+// renamed find() or hasConfiguredAuth() would only fail at run time inside an extension.
+// Example: pi 1.3.0 has find(provider, modelId): Model<Api> | undefined and hasConfiguredAuth(model: Model<Api>).
+// Solution: this assignment is checked by `npm run check`; it fails to compile if pi's registry no longer fits.
+// chooseRoute() only passes back the object find() returned, so pi always receives its own Model.
+export function piRegistryFits(registry: PiModelRegistry): ModelRegistry {
+	return registry;
 }
 
 // The file's own shape, parsed the way loadRoutingProfiles() parses it.
