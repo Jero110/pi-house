@@ -34,6 +34,11 @@ Do not read any row marked "not run" as validated.
 - **No hidden behavior.** The server only reads. It never ingests, never writes to a service and never creates a local store.
 - **Privacy.** Book text sits in Pinecone and figures in your bucket, both third parties. Text and images a tool returns
   can also reach your agent's model provider. Returned content is labeled untrusted reference data.
+- **Trust boundary of the bucket.** Anyone who can write to your bucket can already forge the catalog. Internally, reads
+  of hosted objects (`Objects.discover`) accept any key under `S3_LIBRARY_PREFIX` whose name passes the safe-character
+  check and whose self-declared `x-amz-meta-sha256` matches the bytes; that is not limited to catalog and figure keys. No MCP
+  argument can reach it (figure reads use manifest-pinned hashes), and this is an accepted boundary: keep the bucket
+  and its keys private, and use a dedicated prefix.
 
 ## Prerequisites
 
@@ -96,6 +101,9 @@ override file values. The MCP server reads only `BOOKS_ENV_FILE`.
 | `OLLAMA_URL` | no | Default `http://127.0.0.1:11434`; loopback only. |
 | `OLLAMA_MODEL` | no | Default `nomic-embed-text:v1.5`; the digest is verified regardless. |
 | `BOOKS_ENV_FILE` | no | Env file for the MCP and the CLI. |
+| `BOOKS_RELEVANCE_FLOOR` | no | Search relevance floor, a plain decimal in (0, 1]. Default `0.78` (gate `synthetic-cosine-v1`). Any override reports gate `operator-cosine-v1`. See "Live recalibration". |
+| `BOOKS_RELEVANCE_MARGIN` | no | Largest allowed score drop behind the best candidate, a plain decimal in [0, 1]. Default `0.08`. |
+| `BOOKS_CHUNK_BOUND` | no | Default for `ingest --chunk-bound`; integer 100-1800 (default 1800). |
 | `BOOKS_MCP_IMAGES` | no | `off` returns figure metadata and caption without the image block. |
 | `BOOKS_PINECONE_CONTROL_URL` | no | Loopback-only test hook; Pinecone rejects any other value. Leave unset. |
 
@@ -107,6 +115,8 @@ node packages/books-rag/src/cli.ts --help
 node packages/books-rag/src/cli.ts doctor   --env-file ~/.config/books-rag.env
 node packages/books-rag/src/cli.ts ingest   --input /path/to/book.pdf --env-file ~/.config/books-rag.env
 node packages/books-rag/src/cli.ts index    --env-file ~/.config/books-rag.env
+node packages/books-rag/src/cli.ts prune    --env-file ~/.config/books-rag.env          # dry run
+node packages/books-rag/src/cli.ts prune    --env-file ~/.config/books-rag.env --yes    # delete superseded IDs
 node packages/books-rag/src/cli.ts evaluate --synthetic
 ```
 
@@ -114,6 +124,27 @@ node packages/books-rag/src/cli.ts evaluate --synthetic
 the canary once; that is expected. `ingest` takes a PDF or a directory (not recursive), rejects non-PDFs and symlinks per
 file, and never modifies originals. `index` publishes as the single writer. After a successful index you may delete
 originals yourself; the tool never does.
+
+**New editions.** A file with new bytes becomes a **new book** unless you say otherwise. To record a changed original as a
+new version of the **same** book, pass its ID: `ingest --input /path/to/new-edition.pdf --book <bookId>` (the IDs are in
+`books_list`, and `ingest` prints a note with the exact command when the same path was already ingested with different
+content). This is the only supersede rule: titles and file names are never matched for you. After the next `index` the old
+version is no longer current and cannot be returned as fresh evidence; `index` leaves it out of the catalog. Re-ingesting
+an earlier edition's exact bytes does not make it current again.
+
+**Changed originals during `index`.** A current version whose original file changed after ingestion is skipped, with a
+named line (`Skipped version_... (book book_...)`) on stderr, and the other books are published. Nothing changed is ever
+re-read as if unchanged. If every current version is skipped, nothing is published and `index` fails. A skipped book that was
+published earlier disappears from the catalog, and `prune` would then offer its hosted IDs, so read the dry run first.
+
+**Chunk bound.** `ingest --chunk-bound <n>` (or `BOOKS_CHUNK_BOUND`) sets the chunk size bound, 100 to 1800 units. It is part of
+the version identity: a different bound is a new version of the same book. Use a smaller bound when `index` reports a
+passage above the record budget.
+
+**Pruning.** `index` remembers each catalog it replaces in `BOOKS_DATA_DIR/previous-catalog-<commit>.json`. `prune` compares
+those with the committed hosted catalog and lists the passage IDs that are no longer current. It deletes nothing without
+`--yes`; with it, it deletes exactly those explicit IDs inside the configured namespace (never by filter or namespace) and
+removes the saved files. It refuses to run while a publication is pending. Hosted figure objects in the bucket are not pruned.
 
 ## Connect a client (opt-in, manual)
 
@@ -193,18 +224,42 @@ No code can establish billing. Check your accounts' current terms on the day you
   object exists (`<prefix>writer.json`), or two runs overlapped. The tool never steals a claim. Confirm no other run is
   active, then decide deliberately; deleting the claim object is a manual operator action in your bucket.
 - **Stale lock** `BOOKS_DATA_DIR/.index.lock` after a crash: remove it by hand once you know no `index` is running.
-- **Schema 1 records** (written before schema 2): readers refuse them. Update the checkout, re-run `ingest` (it reuses the stored versions) if the
-  local store was built by an older version, then run `index` to republish with schema 2.
-- **Changed original**: `index` fails with "Original hash differs from the recorded version" and uploads nothing. Ingest the new
-  file as its own version, or restore the original. A missing original is fine; stored evidence is published.
+- **Schema 1 records** (written before schema 2): a reader drops each such candidate with an `identity_mismatch`
+  diagnostic ("schema 1 is incompatible ... re-run `index`"), reports the corpus as incomplete, and still returns valid
+  schema 2 evidence. On the writer, update the checkout and run `index` to republish with schema 2.
+- **Changed original**: `index` skips that version by name and publishes the rest (fails only if all are skipped); restore
+  the original, or run `ingest --input <file> --book <bookId>` to record the new edition as a new version of the same book. A
+  missing original is fine; stored evidence is published.
 - **Unavailable runtime or backend**: searches return `unavailable` with a diagnostic naming the failing stage; retry later.
 
 ## Model-version rebuilds
 
-Every vector is tied to the pinned runtime and model digest. If you change the model, digest or chunk bound, version
-identity changes: re-ingest (the local store keeps history) and run `index` to publish a new generation. Readers on the old
-model get `model_mismatch` rather than mixed results. Superseded hosted records are pruned only through an explicit
-operation and never by namespace or filter deletion.
+Every vector is tied to the pinned runtime and model digest. Changing the model or digest does **not** change a version's
+identity (the source version ID is derived from the book, original bytes, extractor and chunk configuration): the same
+passage IDs are rewritten in place under a new generation by `index`, and the catalog records the new embedding identity.
+Readers on the old model get `model_mismatch`, and until the catalog commit a reader sees digest or generation mismatches
+and fails closed rather than mixing results. Changing the chunk bound or extractor does change identity: re-ingest and run
+`index`. Superseded hosted records are removed only by `prune`, and never by namespace or filter deletion.
+
+## Live recalibration (pending operator step)
+
+The relevance gate (`synthetic-cosine-v1`: floor 0.78, drop 0.08) was frozen on deterministic fake vectors. Nobody has measured
+it with the real `nomic-embed-text` model, whose cosine scores for genuinely relevant passages may sit well below 0.78. If so,
+a live install answers `insufficient_evidence` to everything. **Until you do this, do not rely on abstention.** Every
+`books_search` result carries `gate.version`, `gate.minimumScore` and `gate.maximumDrop`, so an over-abstaining install is
+attributable.
+
+1. Pick a few labeled real questions before you look at any score: some the books answer (note the expected page) and some
+   they certainly do not.
+2. Set a deliberately low floor (`BOOKS_RELEVANCE_FLOOR=0.01`, `BOOKS_RELEVANCE_MARGIN=1`) for the measurement only, so
+   nothing is gated, and run each question through `books_search`. Record `scores.dense` of the best answering passage and of
+   the best passage for each unanswerable question.
+3. Choose **one** floor and margin for the whole library from the gap between the two groups; do not tune per question. If the groups overlap, no
+   floor separates them: keep the gate loose and rely on reading the passage.
+4. Put the chosen values in the env file and re-run the questions. Keep the notes (model digest, library, values, scores).
+   Overrides report `operator-cosine-v1`; changing the frozen defaults in source needs a new gate version name and a rerun of
+   `evaluate --synthetic`.
+5. Re-measure after any model, chunk-bound or corpus change.
 
 ## Extraction gaps
 
@@ -215,6 +270,8 @@ operation and never by namespace or filter deletion.
   Figures link by explicit reference; uncertain cases return a labeled full page.
 - Page numbers are physical PDF pages, not printed pagination.
 - The 1800-unit chunk bound is a conservative proxy (UTF-8 bytes plus 32), not measured tokens.
+- **Search latency grows with the number of books** (known limit, not changed): a search makes one Pinecone query per
+  selected book, at least 500 ms apart, so about 10 s for 20 books, plus a few catalog reads. Pass `bookIds` to narrow it.
 
 ## Backups
 
