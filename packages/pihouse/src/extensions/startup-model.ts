@@ -2,6 +2,7 @@
 // subscription model only when its quota is confirmed available; stale/unknown data is never called available.
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { MAX_AGE_MS } from "../account-usage.ts";
+import { pollClaudeUsage, usableClaudeObservation } from "../claude-usage.ts";
 import { chooseStartupModel, hasExplicitModelArgument, type StartupModelCandidate } from "../startup-model.ts";
 import { CLAUDE_CODE_RATE_LIMITS, pollChatGptUsage, readClaudeCodeObservation } from "../usage.ts";
 import type { Observation, PollState } from "../workflow/routing.ts";
@@ -16,6 +17,7 @@ export interface StartupModelDependencies {
 		now: number,
 	) => { windows: { label: string; percent: number; resetsAt?: number }[]; observedAt: number } | undefined;
 	readOpenAi?: (ctx: ExtensionContext, poll: PollState, now: number) => Promise<Observation | undefined>;
+	readClaudeUsage?: (now: number) => Promise<Observation | undefined>;
 }
 
 function stateOf(observation: Observation | undefined, now: number): StartupModelCandidate["state"] {
@@ -88,6 +90,12 @@ export function createStartupModelExtension(dependencies: StartupModelDependenci
 					source: "Claude Code rate limits",
 					windows,
 				});
+			}
+			if (models.some((model) => model.provider === "claude-bridge") && !dependencies.readClaude) {
+				const result = dependencies.readClaudeUsage
+					? await dependencies.readClaudeUsage(now)
+					: await pollClaudeUsage(now).then((read) => (read.status === "observed" ? read.observation : undefined));
+				if (result && usableClaudeObservation(result, now)) observations.set("claude", result);
 			}
 			if (models.some((model) => model.provider === "openai-codex")) {
 				const openai = dependencies.readOpenAi

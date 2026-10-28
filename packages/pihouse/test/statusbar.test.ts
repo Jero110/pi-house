@@ -4,18 +4,30 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { fetchCodexWindows, providerLabel, sessionTotals, shortCwd, statusLine } from "../src/extensions/statusbar.ts";
+import {
+	fetchCodexWindows,
+	providerLabel,
+	sessionTotals,
+	shortCwd,
+	statusLine,
+	thinkingEffort,
+	usageStatus,
+} from "../src/extensions/statusbar.ts";
 import { chatgptEmail, claudeEmail, gitBranch } from "../src/identity.ts";
 import { THEME } from "../src/paths.ts";
 import {
 	chatgptAccountId,
 	formatLeft,
 	parseDuration,
+	pollChatGptUsage,
 	readClaudeCodeUsage,
+	subscriptionWindowsFromHeaders,
+	USAGE_MAX_AGE_MS,
 	windowLabel,
 	windowsFromHeaders,
 	windowsFromJson,
 } from "../src/usage.ts";
+import type { PollState } from "../src/workflow/routing.ts";
 
 const plain = { fg: (_c: string, t: string) => t, bold: (t: string) => t } as Parameters<typeof statusLine>[0];
 const NOW = Date.parse("2026-10-26T12:00:00Z");
@@ -84,6 +96,35 @@ test("ChatGPT headers and the usage endpoint give the same kind of window", () =
 		{ label: "5h", percent: 55, resetsAt: NOW + 120_000 },
 		{ label: "7d", percent: 9, resetsAt: NOW + 86_400_000 },
 	]);
+});
+
+test("expired ChatGPT windows are omitted and duplicate window labels are represented only once", () => {
+	const body = {
+		rate_limit: {
+			primary_window: { used_percent: 100, limit_window_seconds: 18000, reset_at: NOW / 1000 - 1 },
+			duplicate: { used_percent: 100, limit_window_seconds: 18000, reset_at: NOW / 1000 - 1 },
+			secondary_window: { used_percent: 20, limit_window_seconds: 604800, reset_after_seconds: 600 },
+		},
+	};
+	assert.deepEqual(windowsFromJson(body, NOW), [{ label: "7d", percent: 20, resetsAt: NOW + 600_000 }]);
+});
+
+test("subscription observers ignore API-key token headers but retain Codex subscription headers", () => {
+	const apiLimits = {
+		"x-ratelimit-limit-tokens": "1000",
+		"x-ratelimit-remaining-tokens": "0",
+		"x-ratelimit-reset-tokens": "1m",
+	};
+	assert.deepEqual(subscriptionWindowsFromHeaders("openai-codex", apiLimits, NOW), []);
+	assert.deepEqual(
+		subscriptionWindowsFromHeaders("openai-codex", { ...apiLimits, "x-codex-primary-window-minutes": "300" }, NOW),
+		[],
+		"irrelevant Codex headers must not unlock API-key token limits",
+	);
+	assert.deepEqual(
+		subscriptionWindowsFromHeaders("openai-codex", { ...apiLimits, "x-codex-primary-used-percent": "40" }, NOW),
+		[{ label: "5h", percent: 40 }],
+	);
 });
 
 test("an API key with only token limits shows a one-minute window; no limits show nothing", () => {
@@ -159,14 +200,23 @@ const win = (label: string, percent: number, resetsAt?: number) => ({
 	...(resetsAt ? { resetsAt } : {}),
 });
 
+test("effort appears only when the selected model supports reasoning", () => {
+	assert.equal(thinkingEffort({ reasoning: true }, "high"), "high");
+	assert.equal(thinkingEffort({ reasoning: false }, "off"), undefined);
+	assert.equal(thinkingEffort(undefined, "medium"), undefined);
+});
+
 test("the first line is the session: user@host, folder, model, effort and context", () => {
 	const [head, ...rest] = statusLine(plain, { ...base, width: 80, effort: "high" });
 	assert.match(head ?? "", /^Sonnet 5\.5 {2}effort: high {2}ctx: 32% {2,}me@mac {2}~\/project$/);
 	assert.equal(visibleWidth(head ?? ""), 80, "the place ends at the right edge");
-	assert.deepEqual(rest, [], "no account has a window, so nothing else");
+	assert.deepEqual(rest, [
+		"◷ claude used/left 5h: unknown, 7d: unknown",
+		"◷ openai used/left 5h: unknown, 7d: unknown",
+	]);
 });
 
-test("each account with a window gets its own line, with its limits and resets, aligned", () => {
+test("all subscription windows share one compact line, with resets and per-account colors", () => {
 	const lines = statusLine(plain, {
 		...base,
 		accounts: [
@@ -179,9 +229,85 @@ test("each account with a window gets its own line, with its limits and resets, 
 			{ name: "gemini", active: false, windows: [] },
 		],
 	});
-	assert.equal(lines.length, 3, "the session line and two accounts; an account without windows has no line");
-	assert.match(lines[1] ?? "", /^◷ claude {2}5h: 23% \(2h15m → \d\d:\d\d\) {3}7d: 31% \(3d0h\)$/);
-	assert.match(lines[2] ?? "", /^◷ openai {2}5h: 41% \(1h0m → \d\d:\d\d\)$/);
+	assert.equal(lines.length, 3, "the session header and one compact quota line per provider");
+	assert.match(lines[1] ?? "", /claude used\/left 5h: 23\/77% \(2h15m → \d\d:\d\d\), 7d: 31\/69% \(3d0h\)/);
+	assert.match(lines[2] ?? "", /openai used\/left 5h: 41\/59% \(1h0m → \d\d:\d\d\), 7d: unknown/);
+});
+
+test("Claude usage file freshness is based on its write time, not when the bar rereads it", () => {
+	assert.equal(usageStatus([{ label: "5h", percent: 20 }], NOW - 12 * 60 * 60_000, NOW), "stale");
+	assert.equal(usageStatus([{ label: "5h", percent: 20, resetsAt: NOW - 1 }], NOW - 60_000, NOW), "unknown");
+	assert.equal(usageStatus([{ label: "5h", percent: 20, resetsAt: NOW + 60_000 }], NOW - 60_000, NOW), undefined);
+});
+
+test("Claude and OpenAI always retain visible 5h and 7d rows without inventing missing values", () => {
+	const lines = statusLine(plain, {
+		...base,
+		accounts: [
+			{ name: "claude", active: true, windows: [win("5h", 40, NOW + 60_000)] },
+			{ name: "openai", active: false, windows: [win("7d", 20, NOW + 600_000)] },
+		],
+	});
+	assert.equal(lines.length, 3, "each provider has a single quota line below the session header");
+	assert.match(lines[1] ?? "", /claude used\/left 5h: 40\/60%.*7d: unknown/);
+	assert.match(lines[2] ?? "", /openai used\/left 5h: unknown.*7d: 20\/80%/);
+});
+
+test("usage windows show remaining share and unknown or stale accounts are explicit", () => {
+	const lines = statusLine(plain, {
+		...base,
+		accounts: [
+			{ name: "openai", active: true, windows: [win("5h", 40, NOW + 60_000)] },
+			{ name: "claude", active: false, windows: [win("5h", 23, NOW + 60_000)], status: "stale" },
+			{ name: "gemini", active: false, windows: [], status: "unknown" },
+		],
+	});
+	assert.match(lines[1] ?? "", /claude used\/left 5h: 23\/77% \(1m →.*\) stale, 7d: unknown/);
+	assert.match(lines[2] ?? "", /openai used\/left 5h: 40\/60% \(1m →.*\), 7d: unknown/);
+	assert.match(lines[3] ?? "", /◷ gemini.*unknown/);
+});
+
+test("the status bar polls partial ChatGPT windows and shows their used, remaining, and reset data", async () => {
+	const state: PollState = new Map();
+	const response = (async () => ({
+		ok: true,
+		status: 200,
+		json: async () => ({
+			rate_limit: { primary_window: { used_percent: 25, limit_window_seconds: 18000, reset_at: NOW / 1000 + 3600 } },
+		}),
+	})) as unknown as typeof fetch;
+	const result = await pollChatGptUsage(state, "fake-token", NOW, response, "http://local/usage");
+	assert.equal(result.status, "observed");
+	if (result.status !== "observed") return;
+	const lines = statusLine(plain, {
+		...base,
+		accounts: [{ name: "openai", active: true, windows: result.observation.windows ?? [] }],
+	});
+	assert.match(lines[2] ?? "", /openai used\/left 5h: 25\/75% \(1h0m →.*\), 7d: unknown/);
+	assert.equal(result.observation.windows?.length, 1, "a missing 7d sibling is not invented");
+});
+
+test("the status bar shares bounded ChatGPT timeout and auth backoff semantics", async () => {
+	const state: PollState = new Map();
+	let calls = 0;
+	const refused = (async () => {
+		calls++;
+		return { ok: false, status: 401 };
+	}) as unknown as typeof fetch;
+	const first = await pollChatGptUsage(state, "fake-token", NOW, refused, "http://local/usage", 10);
+	const backoff = await pollChatGptUsage(state, "fake-token", NOW + 500, refused, "http://local/usage", 10);
+	assert.equal(first.status, "observed");
+	assert.equal(first.status === "observed" && first.observation.state, "auth");
+	assert.equal(backoff.status, "backoff");
+	assert.equal(calls, 1);
+	assert.equal(USAGE_MAX_AGE_MS, 15 * 60_000);
+	const network = (async () => {
+		calls++;
+		throw new Error("private provider payload must not escape");
+	}) as unknown as typeof fetch;
+	const failed = await pollChatGptUsage(new Map(), "fake-token", NOW, network, "http://local/usage");
+	assert.equal(failed.status, "observed");
+	assert.equal(failed.status === "observed" && failed.observation.state, "network");
 });
 
 test("account names are padded to one width so the limits line up", () => {
@@ -192,8 +318,9 @@ test("account names are padded to one width so the limits line up", () => {
 			{ name: "copilot-x", active: false, windows: [win("5h", 5)] },
 		],
 	});
-	assert.equal(lines[1], "◷ openai     5h: 41%");
-	assert.equal(lines[2], "◷ copilot-x  5h: 5%");
+	assert.equal(lines[1], "◷ claude used/left 5h: unknown, 7d: unknown");
+	assert.equal(lines[2], "◷ openai used/left 5h: 41/59%, 7d: unknown");
+	assert.equal(lines[3], "◷ copilot-x  5h: 5% used (95% left)");
 });
 
 test("the account in use is named in lilac (accent) and the others in white (text)", () => {
@@ -209,14 +336,14 @@ test("the account in use is named in lilac (accent) and the others in white (tex
 			{ name: "openai", active: false, windows: [win("5h", 10)] },
 		],
 	});
-	assert.match(lines[1] ?? "", /^<accent>◷ claude<\/accent>/);
+	assert.match(lines[1] ?? "", /^◷ <accent>claude<\/accent> used\/left/);
 	assert.match(lines[0] ?? "", /<accent>⎇ main<\/accent>/);
-	assert.match(lines[2] ?? "", /^<text>◷ openai<\/text>/);
+	assert.match(lines[2] ?? "", /^◷ <text>openai<\/text> used\/left/);
 });
 
 test("with no windows the session's tokens and cost take the line below; with no model the line says so", () => {
 	const spent = statusLine(plain, { ...base, input: 12_345, output: 800, cost: 0.0421 });
-	assert.equal(spent[1], "↑12.3k ↓800  $0.042");
+	assert.equal(spent[3], "↑12.3k ↓800  $0.042");
 	const none = statusLine(plain, { ...base, model: undefined, contextPercent: null });
 	assert.match(none[0] ?? "", /^ctx: -- {2,}me@mac {2}~\/project$/);
 });
@@ -229,13 +356,13 @@ test("a narrow first line drops the least important parts first and never overfl
 		for (const l of lines) assert.ok(visibleWidth(l) <= width, `${width}: ${l}`);
 		assert.ok(visibleWidth(lines[0] ?? "") <= previous);
 		previous = visibleWidth(lines[0] ?? "");
-		assert.equal(lines.length, 2, "the account keeps its own line at every width");
+		assert.equal(lines.length, 3, "each provider keeps one row at every width");
 	}
 	const medium = statusLine(plain, { ...input, width: 40 })[0] ?? "";
-	assert.match(medium, /~\/project/);
 	assert.match(medium, /Sonnet 5\.5/);
-	assert.doesNotMatch(medium, /me@mac|effort/, "user@host and effort go before the folder and the model");
-	assert.ok(medium.endsWith("~/project"));
+	assert.match(medium, /effort: high/);
+	assert.match(medium, /ctx: 32%/);
+	assert.doesNotMatch(medium, /~\/project|me@mac/, "the folder and the host go before the session status");
 });
 
 test("context and usage are colored by how close the limit is", () => {
@@ -250,9 +377,9 @@ test("context and usage are colored by how close the limit is", () => {
 			accounts: [{ name: "claude", active: true, windows: [win("5h", percent)] }],
 		}).join("\n");
 	assert.match(at(10), /<muted>ctx: 10%<\/muted>/);
-	assert.match(at(10), /<text>5h: 10%<\/text>/);
+	assert.match(at(10), /<text>5h: 10\/90%<\/text>/);
 	assert.match(at(75), /<warning>ctx: 75%<\/warning>/);
-	assert.match(at(95), /<error>5h: 95%<\/error>/);
+	assert.match(at(95), /<error>5h: 95\/5%<\/error>/);
 });
 
 test("session totals add up only assistant messages", () => {
@@ -300,12 +427,44 @@ test("the theme has exactly the colors pi's schema asks for", () => {
 	);
 });
 
-test("the first line names the git branch and the login when they are known, and drops the login first", () => {
+test("the first line names the git branch and the login when they are known, and drops folder and branch before context", () => {
 	const [head] = statusLine(plain, { ...base, width: 100, branch: "main", login: "me@mail.com" });
 	assert.match(head ?? "", /^Sonnet 5\.5 {2}ctx: 32% {2,}me@mac {2}~\/project {2}⎇ main {2}me@mail\.com$/);
+	// The folder and the branch (main included) leave first; the context, the model and the account stay.
 	const [narrow] = statusLine(plain, { ...base, width: 45, branch: "main", login: "me@mail.com" });
-	assert.doesNotMatch(narrow ?? "", /me@mail\.com/);
-	assert.match(narrow ?? "", /⎇ main/);
+	assert.match(narrow ?? "", /Sonnet 5\.5 {2}ctx: 32%/);
+	assert.match(narrow ?? "", /me@mail\.com$/);
+	assert.doesNotMatch(narrow ?? "", /~\/project|⎇/);
+	// Then the host and the login go; the context and the model are the last pair.
+	const [tighter] = statusLine(plain, { ...base, width: 40, branch: "main", login: "me@mail.com" });
+	assert.match(tighter ?? "", /Sonnet 5\.5 {2}ctx: 32%/);
+	assert.match(tighter ?? "", /me@mail\.com$/);
+	assert.doesNotMatch(tighter ?? "", /~\/project|⎇|me@mac/);
+	// The login leaves before the context does.
+	const [lean] = statusLine(plain, { ...base, width: 30, branch: "main", login: "me@mail.com" });
+	assert.equal(lean, "Sonnet 5.5  ctx: 32%");
+	const [end] = statusLine(plain, { ...base, width: 18, branch: "main", login: "me@mail.com" });
+	assert.equal(end, "Sonnet 5.5");
+});
+
+test("at impossible widths the folder is truncated from its start and every line still fits", () => {
+	const input = {
+		...base,
+		branch: "main",
+		login: "me@mail.com",
+		accounts: [{ name: "claude", active: true, windows: [win("5h", 95)] }],
+	};
+	for (const width of [8, 5, 4, 3, 2, 1]) {
+		const lines = statusLine(plain, { ...input, width });
+		assert.ok(lines.length >= 1, `${width}: at least the session line`);
+		for (const l of lines) assert.ok(visibleWidth(l) <= width, `${width}: ${l}`);
+	}
+	assert.ok((statusLine(plain, { ...input, width: 8 })[0] ?? "").startsWith("Son"), "the model keeps its start");
+	assert.equal(
+		visibleWidth(statusLine(plain, { ...input, width: 1 })[0] ?? ""),
+		1,
+		"one column still shows one column",
+	);
 });
 
 test("the branch is read from HEAD, through worktrees and detached heads, and is absent outside a repo", () => {

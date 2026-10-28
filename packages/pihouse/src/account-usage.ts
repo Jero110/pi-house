@@ -11,6 +11,7 @@
 //
 // The ChatGPT subscription fetch and poll policy are shared with the status bar so both surfaces classify one source
 // consistently; this tool injects a configurable URL, timeout and fakeable fetch for its offline tests.
+import { pollClaudeUsage, usableClaudeObservation } from "./claude-usage.ts";
 import {
 	CLAUDE_CODE_RATE_LIMITS,
 	pollChatGptUsage,
@@ -43,6 +44,8 @@ export interface GatherInput {
 	/** Provider ids of the logins and keys that can run a model here. */
 	providers: readonly string[];
 	claudeDir?: string;
+	/** An injected fake replaces the Claude Code SDK control request in offline tests. */
+	claudeUsage?: () => Promise<Observation | undefined>;
 	headers: SeenHeaders;
 	/** The ChatGPT login's token, or undefined when there is none. */
 	openaiToken?: () => Promise<string | undefined>;
@@ -156,11 +159,19 @@ export async function observeAccounts(input: GatherInput): Promise<AccountObserv
 		const seen = input.headers[account];
 		if (seen) candidates.push(fromWindows(account, seen.windows, seen.at, "response headers", input.now));
 		if (account === "claude") {
+			// An explicit fixture directory must never trigger a real SDK process in tests.
+			const result = input.claudeDir === undefined && !input.claudeUsage ? await pollClaudeUsage(input.now) : undefined;
+			const endpoint = input.claudeUsage
+				? await input.claudeUsage().catch(() => undefined)
+				: result?.status === "observed"
+					? result.observation
+					: undefined;
+			if (endpoint && usableClaudeObservation(endpoint, input.now)) candidates.push(endpoint);
 			const file = readClaudeCodeObservation(input.claudeDir ?? CLAUDE_CODE_RATE_LIMITS, input.now);
 			if (file) {
 				candidates.push(fromWindows("claude", file.windows, file.observedAt, "Claude Code rate limits", input.now));
 			} else if (!candidates.length) {
-				note = "no Claude Code rate-limit file and no response headers yet";
+				note = "no current Claude usage observation, status-line file, or response headers";
 			}
 		} else if (account === "openai") {
 			const read = await readOpenAi(input, poll);

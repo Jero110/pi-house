@@ -42,6 +42,33 @@ const codexBody = (percent: number) => ({
 
 const find = (reports: AccountReport[], account: string) => reports.find((r) => r.account === account);
 
+test("fresh Claude SDK usage supersedes a stale status-line file without calling a model", async () => {
+	const dir = claudeDir({ used_percentage: 100, resets_at: NOW / 1000 + 600 }, NOW - 3_600_000);
+	const [claude] = await gatherAccountUsage({
+		now: NOW,
+		providers: ["claude-bridge"],
+		claudeDir: dir,
+		headers: {},
+		claudeUsage: async () => ({
+			provider: "claude",
+			account: "claude",
+			observedAt: NOW,
+			source: "Claude Code usage endpoint",
+			state: "available",
+			windows: [
+				{ label: "5h", percent: 12, resetsAt: NOW + 3_600_000 },
+				{ label: "7d", percent: 32, resetsAt: NOW + 86_400_000 },
+			],
+		}),
+	});
+	assert.equal(claude?.status, "available");
+	assert.equal(claude?.source, "Claude Code usage endpoint");
+	assert.deepEqual(
+		claude?.windows.map((window) => window.percent),
+		[12, 32],
+	);
+});
+
 test("a Claude Code file seen a minute ago is available, with its windows and reset", async () => {
 	const dir = claudeDir(
 		{
