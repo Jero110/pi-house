@@ -9,16 +9,16 @@
 // own rule (route(), so "available / exhausted / stale / unknown" mean the same everywhere) and print only what is
 // safe to show: no token, no header, no error text.
 //
-// The ChatGPT fetch is duplicated from extensions/statusbar.ts on purpose: that file has uncommitted edits, so it is
-// not touched, and this fetch needs a configurable URL and timeout.
+// The ChatGPT subscription fetch and poll policy are shared with the status bar so both surfaces classify one source
+// consistently; this tool injects a configurable URL, timeout and fakeable fetch for its offline tests.
 import {
 	CLAUDE_CODE_RATE_LIMITS,
-	chatgptAccountId,
+	pollChatGptUsage,
 	readClaudeCodeObservation,
+	USAGE_MAX_AGE_MS,
 	type UsageWindow,
-	windowsFromJson,
 } from "./usage.ts";
-import { type Observation, type PollState, type Profile, pollAccount, route } from "./workflow/routing.ts";
+import { type Observation, type PollState, type Profile, route } from "./workflow/routing.ts";
 
 export type AccountStatus = "available" | "exhausted" | "stale" | "unknown";
 
@@ -53,10 +53,8 @@ export interface GatherInput {
 	poll?: PollState;
 }
 
-const CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
 /** An observation older than this no longer proves the account has room (Claude Code writes on its own refresh). */
-export const MAX_AGE_MS = 15 * 60_000;
-const TIMEOUT_MS = 4000;
+export const MAX_AGE_MS = USAGE_MAX_AGE_MS;
 
 /** What a provider id is called here: the account that owns its usage. */
 function accountOf(provider: string): string {
@@ -88,35 +86,6 @@ function fromWindows(
 	return { provider: account, account, state, observedAt, source, windows: [...windows] };
 }
 
-/** One poll of the ChatGPT usage endpoint. Every outcome is an observation: a failure says which kind it was. */
-async function fetchOpenAi(input: GatherInput, token: string): Promise<Observation> {
-	const fail = (state: Observation["state"]): Observation => ({
-		provider: "openai",
-		account: "openai",
-		state,
-		observedAt: input.now,
-		source: "usage endpoint",
-	});
-	try {
-		const id = chatgptAccountId(token);
-		const res = await (input.fetchFn ?? fetch)(input.openaiUrl ?? CODEX_USAGE_URL, {
-			headers: {
-				authorization: `Bearer ${token}`,
-				accept: "application/json",
-				...(id ? { "chatgpt-account-id": id } : {}),
-			},
-			signal: AbortSignal.timeout(input.timeoutMs ?? TIMEOUT_MS),
-		});
-		if (res.status === 401 || res.status === 403) return fail("auth");
-		if (res.status === 429) return fail("rate");
-		if (!res.ok) return fail("network");
-		const windows = windowsFromJson(await res.json(), input.now);
-		return fromWindows("openai", windows, input.now, "usage endpoint", input.now);
-	} catch {
-		return fail("network");
-	}
-}
-
 /** The usage endpoint through the shared poll state: concurrent callers wait for one request, and failures back off. */
 async function readOpenAi(
 	input: GatherInput,
@@ -124,7 +93,7 @@ async function readOpenAi(
 ): Promise<{ observation?: Observation; retryAt?: number }> {
 	const token = await input.openaiToken?.().catch(() => undefined);
 	if (!token) return {};
-	const polled = await pollAccount(poll, "openai", "openai", input.now, () => fetchOpenAi(input, token));
+	const polled = await pollChatGptUsage(poll, token, input.now, input.fetchFn, input.openaiUrl, input.timeoutMs);
 	return polled.status === "observed" ? { observation: polled.observation } : { retryAt: polled.retryAt };
 }
 

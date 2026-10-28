@@ -19,6 +19,7 @@ import type { TranscriptRoots } from "agent-transcripts";
 import { main } from "../src/cli.ts";
 import { answersText, pickedSkillsText, showPicker, skillPickerQuestion } from "../src/extensions/ask.ts";
 import { headerLines } from "../src/extensions/brand.ts";
+import { createStartupModelExtension } from "../src/extensions/startup-model.ts";
 import { askContext, latestReport, reviewFileName } from "../src/extensions/workflow.ts";
 import { piCommand, runPihouse, withSkillsDir } from "../src/launcher.ts";
 import { BOOKS_MCP, EXTENSIONS, PI_CLI, pihousePaths, SKILL_GROUP_DIRS, SKILLS_DIR, THEME } from "../src/paths.ts";
@@ -33,6 +34,7 @@ import {
 	teardown,
 	writePihouseProfile,
 } from "../src/setup.ts";
+import { chooseStartupModel, hasExplicitModelArgument } from "../src/startup-model.ts";
 import { catalogReadme, readCatalog, skillPath } from "../src/workflow/catalog.ts";
 import { LIMITS, openMemory } from "../src/workflow/memory.ts";
 import { renderReport } from "../src/workflow/report.ts";
@@ -430,6 +432,209 @@ test("pihouse shares its skills folder with every worker, after any folders alre
 	assert.equal(withSkillsDir({}), SKILLS_DIR);
 	assert.equal(withSkillsDir({ AGENT_LINK_READ_DIRS: "/refs" }), `/refs:${SKILLS_DIR}`);
 	assert.equal(withSkillsDir({ AGENT_LINK_READ_DIRS: SKILLS_DIR }), SKILLS_DIR, "not added twice");
+});
+
+test("the startup selector extension is installed on every pihouse command", () => {
+	assert.ok(EXTENSIONS.some((extension) => extension.endsWith("/startup-model.ts")));
+});
+
+test("explicit --model is recognized in both CLI forms and saved/default arguments are not mistaken for it", () => {
+	assert.equal(hasExplicitModelArgument(["--model", "openai-codex/gpt-5.5"]), true);
+	assert.equal(hasExplicitModelArgument(["--model=openai-codex/gpt-5.5"]), true);
+	assert.equal(hasExplicitModelArgument(["--continue"]), false);
+});
+
+test("fresh interactive startup sets the exact available OpenAI registry model when saved Claude is exhausted", async () => {
+	const claude = { provider: "claude-bridge", id: "claude-sonnet-5-5" };
+	const openai = { provider: "openai-codex", id: "gpt-5.5" };
+	let start: ((event: { reason: string }, context: unknown) => Promise<void> | void) | undefined;
+	const selected: unknown[] = [];
+	const notices: string[] = [];
+	const extension = createStartupModelExtension({
+		argv: () => [],
+		isAgentLinked: () => false,
+		now: () => 1_000_000,
+		readClaude: () => ({ windows: [{ label: "5h", percent: 100, resetsAt: 1_060_000 }], observedAt: 1_000_000 }),
+		readOpenAi: async () => ({
+			provider: "openai",
+			account: "openai",
+			state: "available",
+			observedAt: 1_000_000,
+			source: "fake quota endpoint",
+			windows: [{ label: "5h", percent: 20 }],
+		}),
+	});
+	const api = {
+		on: (_name: string, handler: typeof start) => {
+			start = handler;
+		},
+		setModel: async (model: unknown) => {
+			selected.push(model);
+			return true;
+		},
+	};
+	const context = {
+		mode: "tui",
+		model: claude,
+		sessionManager: { getBranch: () => [] },
+		modelRegistry: {
+			getAvailable: () => [claude, openai],
+			hasConfiguredAuth: () => true,
+			isUsingOAuth: () => true,
+		},
+		ui: { notify: (text: string) => notices.push(text) },
+	};
+	extension(api as never);
+	await start?.({ reason: "startup" }, context);
+	assert.deepEqual(selected, [openai], "startup must select the registered OAuth model without requiring /model");
+	assert.match(notices.join("\n"), /confirmed available/);
+});
+
+test("startup never overrides a worker model chosen by routing", async () => {
+	const previous = process.env.AGENT_LINK_AGENT;
+	process.env.AGENT_LINK_AGENT = "routed-worker";
+	try {
+		let start: ((event: { reason: string }, context: unknown) => Promise<void> | void) | undefined;
+		const selected: unknown[] = [];
+		const extension = createStartupModelExtension({
+			argv: () => [],
+			isAgentLinked: () => true,
+			now: () => 1_000_000,
+			readClaude: () => ({ windows: [{ label: "5h", percent: 100, resetsAt: 1_060_000 }], observedAt: 1_000_000 }),
+			readOpenAi: async () => ({
+				provider: "openai",
+				account: "openai",
+				state: "available",
+				observedAt: 1_000_000,
+				source: "fake quota endpoint",
+				windows: [{ label: "5h", percent: 20 }],
+			}),
+		});
+		const api = {
+			on: (_name: string, handler: typeof start) => {
+				start = handler;
+			},
+			setModel: async (model: unknown) => {
+				selected.push(model);
+				return true;
+			},
+		};
+		const context = {
+			mode: "tui",
+			model: { provider: "claude-bridge", id: "claude-sonnet-5-5" },
+			sessionManager: { getBranch: () => [] },
+			modelRegistry: {
+				getAvailable: () => [
+					{ provider: "claude-bridge", id: "claude-sonnet-5-5" },
+					{ provider: "openai-codex", id: "gpt-5.5" },
+				],
+				hasConfiguredAuth: () => true,
+				isUsingOAuth: () => true,
+			},
+			ui: { notify: () => {} },
+		};
+		extension(api as never);
+		await start?.({ reason: "startup" }, context);
+		assert.deepEqual(selected, [], "routing selected the worker model; startup defaults must not supersede it");
+	} finally {
+		if (previous === undefined) delete process.env.AGENT_LINK_AGENT;
+		else process.env.AGENT_LINK_AGENT = previous;
+	}
+});
+
+test("startup leaves explicit model, resumed session, and no-login states authoritative/actionable", async () => {
+	const calls: string[] = [];
+	let start: ((event: { reason: string }, context: unknown) => Promise<void> | void) | undefined;
+	const api = {
+		on: (_name: string, handler: typeof start) => {
+			start = handler;
+		},
+		setModel: async () => {
+			calls.push("set");
+			return true;
+		},
+	};
+	const context = {
+		mode: "tui",
+		model: { provider: "claude-bridge", id: "claude-sonnet-5-5" },
+		sessionManager: { getBranch: () => [] },
+		modelRegistry: { getAvailable: () => [], hasConfiguredAuth: () => false, isUsingOAuth: () => false },
+		ui: { notify: (text: string) => calls.push(text) },
+	};
+	createStartupModelExtension({ argv: () => ["--model", "openai-codex/gpt-5.5"], isAgentLinked: () => false })(
+		api as never,
+	);
+	await start?.({ reason: "startup" }, context);
+	assert.deepEqual(calls, [], "explicit --model is not overridden");
+
+	createStartupModelExtension({ argv: () => [], isAgentLinked: () => false, now: () => 1_000_000 })(api as never);
+	await start?.({ reason: "resume" }, context);
+	assert.deepEqual(calls, [], "resumed session is not overridden");
+
+	createStartupModelExtension({ argv: () => [], isAgentLinked: () => false, now: () => 1_000_000 })(api as never);
+	await start?.({ reason: "startup" }, context);
+	assert.match(calls[0] ?? "", /no authenticated Claude or OpenAI subscription model.*\/login.*\/model/);
+});
+
+test("startup model selection avoids an exhausted saved Claude default and chooses available OpenAI without /model", () => {
+	const selected = chooseStartupModel(
+		[
+			{
+				provider: "claude-bridge",
+				id: "claude-sonnet-5-5",
+				account: "claude",
+				state: "exhausted",
+				authenticated: true,
+				model: { id: "claude-sonnet-5-5" },
+			},
+			{
+				provider: "openai-codex",
+				id: "gpt-5.5",
+				account: "openai",
+				state: "available",
+				authenticated: true,
+				model: { id: "gpt-5.5" },
+			},
+		],
+		{ provider: "claude-bridge", id: "claude-sonnet-5-5" },
+	);
+	assert.equal(selected?.model.provider, "openai-codex");
+	assert.equal(selected?.model.id, "gpt-5.5");
+	assert.equal(selected?.uncertain, false);
+});
+
+test("startup keeps an available preference, allows only explicitly uncertain authenticated fallback, and refuses all exhausted", () => {
+	const claude = {
+		provider: "claude-bridge",
+		id: "claude-sonnet-5-5",
+		account: "claude",
+		state: "available",
+		authenticated: true,
+		model: { id: "claude-sonnet-5-5" } as { id: string },
+	} as const;
+	const openai = {
+		provider: "openai-codex",
+		id: "gpt-5.5",
+		account: "openai",
+		state: "available",
+		authenticated: true,
+		model: { id: "gpt-5.5" } as { id: string },
+	} as const;
+	assert.equal(chooseStartupModel([claude, openai], claude)?.model, claude, "available saved preference wins");
+	const unknown = { ...openai, state: "unknown" } as const;
+	assert.equal(chooseStartupModel([{ ...claude, state: "exhausted" }, unknown], claude)?.model.id, "gpt-5.5");
+	assert.equal(chooseStartupModel([{ ...claude, state: "exhausted" }, unknown], claude)?.uncertain, true);
+	assert.equal(
+		chooseStartupModel(
+			[
+				{ ...claude, state: "exhausted" },
+				{ ...openai, state: "exhausted" },
+			],
+			claude,
+		),
+		undefined,
+	);
+	assert.equal(chooseStartupModel([{ ...openai, state: "available", authenticated: false }], claude), undefined);
 });
 
 test("piCommand keeps the user's arguments last", () => {

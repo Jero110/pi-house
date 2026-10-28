@@ -55,6 +55,8 @@ Start a plan with `/skill:planner <idea>`, or use the workflow commands directly
 
 `/workflow review`, `/keeper`, and `pih keeper` are retired and return concise guidance; they are not aliases. Digest and review require an agent-link-enabled pihouse session. The initiating conversation gets short status and paths, not full generated output. Approval never means a proposal was silently or automatically applied.
 
+On a fresh interactive `pih` start, pihouse may replace the saved default with an exact, authenticated Claude-bridge or OpenAI-Codex model only when its subscription quota has a fresh observation confirming room. If quota is unknown, it may keep/select an authenticated candidate with a clear uncertainty warning; if all observed accounts are exhausted, it makes no automatic selection and tells you to wait or use `/login` and `/model`. This is not universal quota visibility: providers without a supported usage source cannot be confirmed. Explicit `--model`, resumed/forked sessions, and later manual `/model` choices remain authoritative. The temporary choice does not change the saved default; `/model` remains available and `Ctrl+S` there saves a new default.
+
 ## Self-learning and data
 
 Planner/executor runs are selected automatically; other conversations require `/workflow save`. Reports and structured metrics are computed by code. Digesting and cross-run review are explicit, isolated model work. Unstable or unverifiable runs are deferred. Validated digest cleanup can remove only pi-house-owned captured conversational copies; it does not delete native harness sessions, repository files, or migration backups. Summaries can omit detail, and the system does not claim lossless transcript replacement.
@@ -144,7 +146,7 @@ flowchart LR
   R -. optional context monitor: recommendation only .-> H
 ```
 
-The [architecture guide](docs/architecture.md) explains responsibility boundaries and limitations. These diagrams distinguish code decisions, model work, persistent state, and human authorization; they do not claim universal quota visibility, and cross-harness continuation is the explicit, fenced `replace` tool, never an automatic switch.
+The [architecture guide](docs/architecture.md) explains responsibility boundaries and limitations. These diagrams distinguish code decisions, model work, persistent state, and human authorization; they do not claim universal quota visibility. The pihouse initial model preference is separate from profile-based task routing; cross-harness continuation remains the explicit, fenced `replace` tool, never an automatic switch.
 
 ## Skills
 

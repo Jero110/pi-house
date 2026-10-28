@@ -28,6 +28,7 @@ export const EXTENSIONS = [
 	"workflow.ts",
 	"claude-login.ts",
 	"account-usage.ts",
+	"startup-model.ts",
 	"context-upgrade.ts",
 ].map((f) => fileURLToPath(new URL(`./extensions/${f}`, import.meta.url)));
 

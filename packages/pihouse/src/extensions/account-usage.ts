@@ -7,7 +7,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { formatAccountUsage, gatherAccountUsage, type SeenHeaders } from "../account-usage.ts";
-import { windowsFromHeaders } from "../usage.ts";
+import { subscriptionWindowsFromHeaders } from "../usage.ts";
 import type { PollState } from "../workflow/routing.ts";
 
 const Params = Type.Object(
@@ -28,7 +28,7 @@ export default function accountUsage(pi: ExtensionAPI): void {
 		const provider = ctx.model?.provider;
 		if (!provider) return;
 		const now = Date.now();
-		const windows = windowsFromHeaders(event.headers, now);
+		const windows = subscriptionWindowsFromHeaders(provider, event.headers, now);
 		const account =
 			provider.includes("claude") || provider === "anthropic"
 				? "claude"

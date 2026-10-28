@@ -207,6 +207,58 @@ test("an endpoint that hangs is reported as unknown within the timeout", async (
 	}
 });
 
+test("partial ChatGPT windows remain usable while missing windows are not invented", async () => {
+	const server = await usageServer((res) => {
+		res.setHeader("content-type", "application/json");
+		res.end(
+			JSON.stringify({
+				rate_limit: { primary_window: { used_percent: 40, limit_window_seconds: 18000, reset_at: NOW / 1000 + 1800 } },
+			}),
+		);
+	});
+	try {
+		const [report] = await gatherAccountUsage({
+			now: NOW,
+			providers: ["openai-codex"],
+			headers: {},
+			openaiToken: async () => SECRET,
+			openaiUrl: server.url,
+		});
+		assert.equal(report?.status, "available");
+		assert.deepEqual(
+			report?.windows.map((w) => [w.label, w.percent, w.resetsAt]),
+			[["5h", 40, new Date(NOW + 1_800_000).toISOString()]],
+		);
+		assert.match(formatAccountUsage(report ? [report] : [], NOW), /5h 40% \(60% remaining\), resets in 30m/);
+	} finally {
+		server.close();
+	}
+});
+
+test("an expired ChatGPT response has no live windows and is unknown", async () => {
+	const server = await usageServer((res) => {
+		res.setHeader("content-type", "application/json");
+		res.end(
+			JSON.stringify({
+				rate_limit: { primary_window: { used_percent: 5, limit_window_seconds: 18000, reset_at: NOW / 1000 - 1 } },
+			}),
+		);
+	});
+	try {
+		const [report] = await gatherAccountUsage({
+			now: NOW,
+			providers: ["openai-codex"],
+			headers: {},
+			openaiToken: async () => SECRET,
+			openaiUrl: server.url,
+		});
+		assert.equal(report?.status, "unknown");
+		assert.deepEqual(report?.windows, []);
+	} finally {
+		server.close();
+	}
+});
+
 test("an endpoint error status is unknown", async () => {
 	const server = await usageServer((res) => {
 		res.statusCode = 500;

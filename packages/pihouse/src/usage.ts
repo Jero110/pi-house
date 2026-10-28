@@ -9,6 +9,7 @@
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { type PollResult, type PollState, pollAccount } from "./workflow/routing.ts";
 
 export interface UsageWindow {
 	/** "5h", "7d", "1m": how long the window is. */
@@ -112,6 +113,22 @@ export function windowsFromHeaders(raw: Record<string, string>, now: number): Us
 	return out.sort(bySize);
 }
 
+/** Ignore generic OpenAI API-key token limits when collecting subscription usage observations. */
+export function subscriptionWindowsFromHeaders(
+	provider: string,
+	headers: Record<string, string>,
+	now: number,
+): UsageWindow[] {
+	const openai = provider.startsWith("openai") || provider === "azure";
+	const codex = Object.keys(headers).some((key) => key.toLowerCase().startsWith("x-codex-"));
+	if (!openai) return windowsFromHeaders(headers, now);
+	if (!codex) return [];
+	const subscriptionHeaders = Object.fromEntries(
+		Object.entries(headers).filter(([key]) => !key.toLowerCase().startsWith("x-ratelimit-")),
+	);
+	return windowsFromHeaders(subscriptionHeaders, now);
+}
+
 /**
  * The windows in a usage endpoint's JSON: every object with a numeric `used_percent`, wherever it sits.
  * Its length comes from `window_minutes` or `limit_window_seconds`, its reset from `reset_at` (epoch) or
@@ -141,7 +158,12 @@ export function windowsFromJson(body: unknown, now: number): UsageWindow[] {
 		for (const v of Object.values(o)) walk(v, depth + 1);
 	};
 	walk(body, 0);
-	return out.sort(bySize);
+	const unique = new Map<string, UsageWindow>();
+	for (const window of out) {
+		if (window.resetsAt !== undefined && window.resetsAt <= now) continue;
+		if (!unique.has(window.label)) unique.set(window.label, window);
+	}
+	return [...unique.values()].sort(bySize);
 }
 
 /** The account id a ChatGPT token carries, which the usage endpoint wants as a header. */
@@ -158,6 +180,56 @@ export function chatgptAccountId(token: string): string | undefined {
 	} catch {
 		return undefined;
 	}
+}
+
+const CHATGPT_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
+const CHATGPT_TIMEOUT_MS = 4000;
+export const USAGE_MAX_AGE_MS = 15 * 60_000;
+
+/** Read only the ChatGPT subscription usage endpoint; API-key rate-limit headers are deliberately not consulted. */
+export async function fetchChatGptUsage(
+	token: string,
+	now: number,
+	fetchFn: typeof fetch = fetch,
+	url = CHATGPT_USAGE_URL,
+	timeoutMs = CHATGPT_TIMEOUT_MS,
+): Promise<import("./workflow/routing.ts").Observation> {
+	const base = { provider: "openai", account: "openai", observedAt: now, source: "usage endpoint" } as const;
+	try {
+		const accountId = chatgptAccountId(token);
+		const response = await fetchFn(url, {
+			headers: {
+				authorization: `Bearer ${token}`,
+				accept: "application/json",
+				...(accountId ? { "chatgpt-account-id": accountId } : {}),
+			},
+			signal: AbortSignal.timeout(timeoutMs),
+		});
+		if (response.status === 401 || response.status === 403) return { ...base, state: "auth" };
+		if (response.status === 429) return { ...base, state: "rate" };
+		if (!response.ok) return { ...base, state: "network" };
+		const windows = windowsFromJson(await response.json(), now);
+		const live = windows.filter((window) => window.resetsAt === undefined || window.resetsAt > now);
+		return {
+			...base,
+			state: !live.length ? "unknown" : live.some((w) => w.percent >= 100) ? "exhausted" : "available",
+			windows: live,
+		};
+	} catch {
+		return { ...base, state: "network" };
+	}
+}
+
+/** The same account-keyed bounded poll policy is used by the tool and status bar. */
+export function pollChatGptUsage(
+	state: PollState,
+	token: string,
+	now: number,
+	fetchFn: typeof fetch = fetch,
+	url = CHATGPT_USAGE_URL,
+	timeoutMs = CHATGPT_TIMEOUT_MS,
+): Promise<PollResult> {
+	return pollAccount(state, "openai", "openai", now, () => fetchChatGptUsage(token, now, fetchFn, url, timeoutMs));
 }
 
 /**
