@@ -50,6 +50,84 @@ function passage(): Passage {
 	};
 }
 
+test("2025-10 LIST is read-only, paginated, namespace-scoped and rejects malformed or repeated IDs/tokens", async (t) => {
+	let host = "";
+	let mode = "normal";
+	let retries = 0;
+	const queries: URLSearchParams[] = [];
+	const id1 = `passage_${"1".repeat(32)}`,
+		id2 = `passage_${"2".repeat(32)}`;
+	const server = createServer((req, res) => {
+		const url = new URL(req.url ?? "/", host);
+		assert.equal(req.method, "GET");
+		assert.equal(req.headers["x-pinecone-api-version"], "2025-10");
+		res.setHeader("content-type", "application/json");
+		if (url.pathname === "/indexes/books") {
+			res.end(
+				JSON.stringify({
+					name: "books",
+					host,
+					dimension: 768,
+					metric: "cosine",
+					vector_type: "dense",
+					spec: { serverless: { cloud: "aws", region: "us-east-1" } },
+					status: { ready: true },
+				}),
+			);
+			return;
+		}
+		assert.equal(url.pathname, "/vectors/list");
+		queries.push(url.searchParams);
+		assert.equal(url.searchParams.get("namespace"), "owned-library");
+		assert.equal(url.searchParams.get("limit"), "100");
+		assert.equal(url.searchParams.has("includeValues"), false);
+		if (mode === "retry" && retries++ === 0) {
+			res.statusCode = 503;
+			res.end("retry");
+			return;
+		}
+		const second = url.searchParams.has("paginationToken");
+		res.end(
+			JSON.stringify({
+				namespace: mode === "namespace" ? "foreign" : "owned-library",
+				vectors:
+					mode === "empty"
+						? []
+						: [{ id: mode === "malformed" ? "not-an-opaque-id" : second && mode !== "duplicate" ? id2 : id1 }],
+				...(mode === "empty" || (second && mode !== "token") ? {} : { pagination: { next: "opaque+/token=" } }),
+			}),
+		);
+	});
+	server.listen(0, "127.0.0.1");
+	await new Promise<void>((resolve) => server.once("listening", resolve));
+	t.after(() => {
+		server.closeAllConnections();
+		server.close();
+	});
+	host = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+	const options = {
+		host,
+		controlUrl: host,
+		indexName: "books",
+		namespace: "owned-library",
+		apiKey: "synthetic",
+		minimumQueryIntervalMs: 0,
+		retryDelayMs: 0,
+		retries: 1,
+	};
+	assert.deepEqual(await new Pinecone(options).listIds(embeddingIdentity), [id1, id2]);
+	assert.equal(queries[1]?.get("paginationToken"), "opaque+/token=");
+	mode = "retry";
+	assert.deepEqual(await new Pinecone(options).listIds(embeddingIdentity), [id1, id2]);
+	assert.ok(retries >= 2);
+	mode = "empty";
+	assert.deepEqual(await new Pinecone(options).listIds(embeddingIdentity), []);
+	for (const failure of ["namespace", "malformed", "duplicate", "token"]) {
+		mode = failure;
+		await assert.rejects(new Pinecone(options).listIds(embeddingIdentity), /namespace mismatch|Malformed|pagination/);
+	}
+});
+
 test("Pinecone checks exact read-only index before writes; scoped text/citations only, no paths, credentials or image bytes", async (t) => {
 	const calls: { path: string; method: string; body: Record<string, unknown>; key: string | undefined }[] = [];
 	let compatible = true;
@@ -161,7 +239,8 @@ test("Pinecone checks exact read-only index before writes; scoped text/citations
 		mismatchHost = mode === "host";
 		invalidMode = mode === "pod";
 		const before = calls.length;
-		await assert.rejects(client.upsert([item], embeddingIdentity), /serverless dense cosine/u);
+		// Writes share the bounded TTL; a fresh client must reject each incompatible index.
+		await assert.rejects(new Pinecone(options).upsert([item], embeddingIdentity), /serverless dense cosine/u);
 		assert.equal(calls.length, before + 2);
 	}
 	compatible = true;

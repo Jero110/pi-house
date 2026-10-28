@@ -76,7 +76,7 @@ export interface ObjectReceipt {
 	readonly bytes: number;
 }
 export class Objects {
-	private readonly options: ObjectOptions & { readonly privateProbeKey: string };
+	private options: ObjectOptions & { readonly privateProbeKey: string };
 	private readonly base: URL;
 	private readonly queue: BoundedQueue;
 	private readonly verification: VerificationCache;
@@ -103,9 +103,12 @@ export class Objects {
 			if (value.startsWith("sbp_"))
 				throw new AdapterError("configuration", "S3 credentials cannot be Supabase personal access tokens");
 		}
-		boundedInteger(options.maxRequests ?? 10000, 1, 10000, "S3 run requests");
-		boundedInteger(options.maxUploadBytes ?? 100000000, 1, 100000000, "S3 run upload bytes");
+		boundedInteger(options.maxRequests ?? 100000, 1, 100000, "S3 run requests");
+		boundedInteger(options.maxUploadBytes ?? 1073741824, 1, 1073741824, "S3 run upload bytes");
 		this.key(this.options.privateProbeKey);
+	}
+	setAccounting(accounting: import("./capacity.ts").Accounting | undefined): void {
+		this.options = { ...this.options, accounting };
 	}
 	libraryKey(name: string): string {
 		const key = `${this.options.prefix}${name}`;
@@ -156,7 +159,6 @@ export class Objects {
 		const url = this.key(this.options.privateProbeKey);
 		const response = await requestBytes(() => ({ url, init: { method: "GET" } }), 64 * 1024, this.options, {
 			acceptedStatuses: [400, 401, 403],
-			statusOnly: true,
 		});
 		if (response.status >= 200 && response.status < 300)
 			throw new AdapterError("configuration", "Bucket appears public: unsigned object GET succeeded");
@@ -171,7 +173,7 @@ export class Objects {
 	): Promise<Awaited<ReturnType<typeof requestBytes>>> {
 		const url = this.key(key);
 		return this.queue.run(async () => {
-			if (++this.requests > (this.options.maxRequests ?? 10000))
+			if (++this.requests > (this.options.maxRequests ?? 100000))
 				throw new AdapterError("resource_limit", "S3 run request budget exhausted");
 			if (!bootstrap) await this.verification.verify(() => this.verifyPrivate());
 			try {
@@ -212,7 +214,7 @@ export class Objects {
 		boundedInteger(bytes.byteLength, 1, limit, "object size");
 		if (!["image/png", "image/jpeg", "application/json"].includes(contentType))
 			throw new AdapterError("configuration", "Unsupported object content type");
-		if (this.uploaded + bytes.byteLength > (this.options.maxUploadBytes ?? 100000000))
+		if (this.uploaded + bytes.byteLength > (this.options.maxUploadBytes ?? 1073741824))
 			throw new AdapterError("resource_limit", "S3 upload run budget exhausted");
 		const copy = Buffer.from(bytes);
 		const digest = hash(copy);

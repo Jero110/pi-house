@@ -71,6 +71,11 @@ export interface Diagnostic {
 	readonly message: string;
 	readonly source: SourceIdentity | null;
 	readonly location: PdfLocation | null;
+	/** Repeated notices grouped by code/message. Location remains a first example. */
+	readonly occurrences?: number;
+	readonly pageCount?: number;
+	readonly pageRanges?: readonly (readonly [number, number])[];
+	readonly omittedPageCount?: number;
 }
 
 export interface Coverage {
@@ -155,6 +160,10 @@ export interface Passage extends SourceIdentity {
 }
 
 export interface Figure extends SourceIdentity {
+	readonly unavailable?: {
+		readonly status: "unsupported";
+		readonly reason: "no_render_operators";
+	};
 	readonly id: FigureId;
 	readonly label: string | null;
 	readonly caption: string | null;
@@ -304,6 +313,26 @@ function assertDiagnostic(value: Diagnostic, source: SourceVersion): void {
 	if (value.source) assertSourceIdentity(value.source, source);
 	if (value.location) assertPdfLocation(value.location, source.pageCount);
 	requireContract(value.message.trim().length > 0, "Empty diagnostic");
+	if (value.occurrences !== undefined)
+		requireContract(integer(value.occurrences, 1, Number.MAX_SAFE_INTEGER), "Invalid diagnostic count");
+	if (value.pageCount !== undefined || value.omittedPageCount !== undefined)
+		requireContract(value.pageRanges !== undefined, "Diagnostic page summary lacks ranges");
+	if (value.pageRanges !== undefined) {
+		requireContract(value.pageRanges.length <= 32, "Diagnostic range budget exceeded");
+		let previous = 0;
+		let shown = 0;
+		for (const [start, end] of value.pageRanges) {
+			requireContract(
+				integer(start, previous + 1, source.pageCount) && integer(end, start, source.pageCount),
+				"Invalid diagnostic range",
+			);
+			previous = end;
+			shown += end - start + 1;
+		}
+		requireContract(integer(value.pageCount ?? 0, shown, source.pageCount), "Invalid diagnostic page count");
+		requireContract(value.omittedPageCount === (value.pageCount ?? 0) - shown, "Invalid omitted diagnostic pages");
+		requireContract((value.occurrences ?? 0) >= (value.pageCount ?? 0), "Diagnostic count smaller than page count");
+	}
 }
 
 // Problem: readonly types alone do not stop mutation through caller-owned arrays.
@@ -459,6 +488,11 @@ export function definePassage(value: Passage, source: SourceVersion): Passage {
 export function defineFigure(value: Figure, source: SourceVersion): Figure {
 	assertSourceIdentity(value, source);
 	id(value.id, "figure");
+	if (value.unavailable)
+		requireContract(
+			value.unavailable.status === "unsupported" && value.unavailable.reason === "no_render_operators",
+			"Invalid unavailable figure reason",
+		);
 	assertPdfLocation(value.location, source.pageCount);
 	if (value.rendering.kind === "crop") {
 		assertBounds(value.rendering.bounds, value.location);
@@ -480,6 +514,8 @@ export function defineFigure(value: Figure, source: SourceVersion): Figure {
 }
 
 // Precedence: unavailable > incomplete_corpus > insufficient_evidence > ok.
+// Corpus assessment refers to hosted publication/index completeness, not extraction.
+// Extraction gaps remain explicit in coverage/diagnostics, even for ok/insufficient_evidence.
 // A backend outage with useful local hits is still unavailable, not an absence claim.
 // Independent assessment fields, coverage, hits and diagnostics survive precedence.
 export function searchStatus(value: SearchAssessment): SearchStatus {
@@ -501,12 +537,6 @@ export function defineSearchResult(value: Omit<SearchResult, "status">): SearchR
 		assertCoverage(entry.coverage);
 		requireContract(!sources.has(entry.source.versionId), "Duplicate coverage version");
 		sources.set(entry.source.versionId, entry.source);
-	}
-	if (value.corpus === "complete") {
-		requireContract(
-			value.coverage.every((entry) => entry.coverage.status === "complete"),
-			"Incomplete coverage reported as complete",
-		);
 	}
 	const ids = new Set<PassageId>();
 	for (const hit of value.hits) {

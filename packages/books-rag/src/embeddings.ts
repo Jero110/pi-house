@@ -52,7 +52,7 @@ export interface EmbeddingOptions extends HttpOptions {
 export class LocalEmbeddings {
 	readonly identity = embeddingIdentity;
 	private readonly base: URL;
-	private readonly options: EmbeddingOptions;
+	private options: EmbeddingOptions;
 	private readonly queue: BoundedQueue;
 	private readonly verification: VerificationCache;
 	private inputs = 0;
@@ -62,10 +62,13 @@ export class LocalEmbeddings {
 		if (options.model !== undefined && options.model !== embeddingIdentity.model)
 			throw new AdapterError("identity_mismatch", "Unsupported local embedding model");
 		assertEmbeddingIdentity(options.identity ?? embeddingIdentity);
-		boundedInteger(options.maxInputs ?? 20000, 1, 20000, "embedding run");
+		boundedInteger(options.maxInputs ?? 50000, 1, 50000, "embedding run");
 		this.options = { ...options };
 		this.queue = new BoundedQueue(options.queueWaitMs);
 		this.verification = new VerificationCache(options.verificationTtlMs);
+	}
+	setAccounting(accounting: import("./capacity.ts").Accounting | undefined): void {
+		this.options = { ...this.options, accounting };
 	}
 	private call(path: string, body?: unknown): Promise<unknown> {
 		return requestJson(
@@ -108,8 +111,15 @@ export class LocalEmbeddings {
 			info["nomic-bert.context_length"] !== 2048
 		)
 			throw new AdapterError("identity_mismatch", "Installed embedding architecture/dimension/context mismatch");
-		if (typeof show.parameters === "string" && /(?:num_ctx|num_predict)\s/iu.test(show.parameters))
-			throw new AdapterError("identity_mismatch", "Unsupported embedding model parameter override");
+		// The stock pinned tag declares num_ctx 8192. Every embed overrides it with
+		// 2048; no other model parameter is part of the verified configuration.
+		if (show.parameters !== undefined) {
+			if (
+				typeof show.parameters !== "string" ||
+				show.parameters.split(/\r?\n/u).some((line) => line.trim() !== "" && !/^num_ctx\s+[1-9]\d*$/u.test(line.trim()))
+			)
+				throw new AdapterError("identity_mismatch", "Unsupported embedding model parameter override");
+		}
 	}
 	async doctor(): Promise<EmbeddingIdentity> {
 		return this.queue.run(async () => {
@@ -122,7 +132,7 @@ export class LocalEmbeddings {
 		expected: unknown,
 	): Promise<readonly number[][]> {
 		boundedInteger(passages.length, 1, 8, "embedding batch");
-		return this.embed(passages.map(passageEmbeddingInput), expected, true);
+		return this.embed(passages.map(passageEmbeddingInput), expected);
 	}
 	async query(text: string, expected: unknown): Promise<number[]> {
 		if (!text.trim()) throw new AdapterError("resource_limit", "Empty embedding query");
@@ -131,7 +141,7 @@ export class LocalEmbeddings {
 		if (!vector) throw new AdapterError("invalid_response", "Missing query embedding");
 		return vector;
 	}
-	private async embed(inputs: readonly string[], expected: unknown, writeRun = false): Promise<readonly number[][]> {
+	private async embed(inputs: readonly string[], expected: unknown): Promise<readonly number[][]> {
 		assertEmbeddingIdentity(expected);
 		boundedInteger(inputs.length, 1, 8, "embedding batch");
 		for (const input of inputs)
@@ -141,13 +151,18 @@ export class LocalEmbeddings {
 					"Embedding input exceeds conservative context bound; truncation forbidden",
 				);
 		return this.queue.run(async () => {
-			if (this.inputs + inputs.length > (this.options.maxInputs ?? 20000))
+			if (this.inputs + inputs.length > (this.options.maxInputs ?? 50000))
 				throw new AdapterError("resource_limit", "Embedding run budget exhausted");
 			this.inputs += inputs.length;
-			await this.verification.verify(() => this.verify(), writeRun);
+			await this.verification.verify(() => this.verify());
 			try {
 				const result = record(
-					await this.call("/api/embed", { model: embeddingIdentity.model, input: inputs, truncate: false }),
+					await this.call("/api/embed", {
+						model: embeddingIdentity.model,
+						input: inputs,
+						truncate: false,
+						options: { num_ctx: 2048 },
+					}),
 				);
 				if (!Array.isArray(result.embeddings) || result.embeddings.length !== inputs.length)
 					throw new AdapterError("invalid_response", "Embedding batch size mismatch");

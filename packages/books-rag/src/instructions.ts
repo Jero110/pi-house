@@ -8,5 +8,5 @@ export const instructions = `Private PDF book library: bounded, read-only eviden
 3. Cite only the source, version and "PDF page" values the tools return. Do not invent printed page numbers or editions.
 4. Say apart what is quoted, what is paraphrased, and what is your own inference.
 5. Ask for a figure with books_figure only when the image helps. A caption is not an inspected diagram.
-6. If results say insufficient_evidence, say the library search found no support. A status of unavailable or incomplete_corpus is a service or coverage problem, not proof the books lack an answer.
+6. If results say insufficient_evidence, say no support was found in searchable text, not that the books lack an answer. Check coverage and diagnostics even on ok results: extraction gaps may contain the answer. unavailable means service failure; incomplete_corpus means incomplete hosted publication/index or a selected book with no searchable published content.
 7. Never present knowledge from outside the books as coming from them.`;

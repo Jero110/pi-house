@@ -152,7 +152,7 @@ test("metadata preserves verified title-page conflicts and explicit overrides; u
 	);
 });
 
-test("scanned/blank and mixed pages expose bounded coverage gaps without OCR", async (t) => {
+test("image-only pages are gaps; text beside raster figures retains quality diagnostics without gaps", async (t) => {
 	const options = local(
 		t,
 		pdfFixture({ pages: [{ image: true }, { image: true, text: [{ text: "Text beside a raster", y: 400 }] }] }),
@@ -162,11 +162,32 @@ test("scanned/blank and mixed pages expose bounded coverage gaps without OCR", a
 	assert.deepEqual(prepared.source.coverage.extractedPages, [2]);
 	assert.deepEqual(
 		prepared.source.coverage.gaps.map((g) => g.pageNumber),
-		[1, 2],
+		[1],
 	);
 	assert.ok(prepared.source.diagnostics.some((d) => d.code === "scanned_page" && d.location?.pageNumber === 1));
-	assert.ok(prepared.source.diagnostics.some((d) => d.code === "unsupported_asset" && d.location?.pageNumber === 2));
+	assert.ok(
+		prepared.source.diagnostics.some(
+			(d) => d.code === "unsupported_asset" && d.pageRanges?.some(([start, end]) => start <= 2 && end >= 2),
+		),
+	);
 	assert.deepEqual(options.store.listVersions(), []);
+});
+
+test("700 text/raster pages aggregate quality notes without gaps or budget failure", async () => {
+	const result = await extractPdf(
+		pdfFixture({
+			pages: Array.from({ length: 700 }, () => ({
+				image: true,
+				text: [{ text: "Synthetic text beside image", y: 400 }],
+			})),
+		}),
+	);
+	assert.equal(result.pages, 700);
+	assert.equal(result.gaps.length, 0);
+	const raster = result.diagnostics.find((d) => d.code === "unsupported_asset");
+	assert.equal(raster?.occurrences, 700);
+	assert.deepEqual(raster?.pageRanges, [[1, 700]]);
+	assert.ok(Buffer.byteLength(JSON.stringify(result.diagnostics)) < 4096);
 });
 
 test("unmatched or misplaced outlines remain uncertain, not authoritative section boundaries", async () => {
@@ -181,8 +202,29 @@ test("unmatched or misplaced outlines remain uncertain, not authoritative sectio
 	);
 	assert.equal(result.headings[0]?.evidence, "layout-candidate");
 	assert.ok(!result.headings.some((h) => h.title === "Invented heading"));
-	assert.equal(result.diagnostics.filter((d) => d.message.includes("not validated")).length, 2);
-	assert.equal(result.gaps.length, 1);
+	assert.equal(result.diagnostics.find((d) => d.message.includes("not validated"))?.occurrences, 2);
+	assert.equal(result.gaps.length, 0);
+	assert.ok(result.diagnostics.every((d) => d.location === null));
+});
+
+test("ignored external links are document diagnostics, not whole-document text gaps", async () => {
+	const bytes = pdfFixture({
+		pages: [{ text: [{ text: "Linked text", y: 400 }] }, { text: [{ text: "More text", y: 400 }] }],
+		navigation: true,
+	});
+	const result = await extractPdf(bytes);
+	assert.equal(result.gaps.length, 0);
+	assert.ok(result.diagnostics.some((d) => d.code === "unsupported_asset" && d.location === null));
+});
+
+test("literal asset names do not establish whole-document unsafety", async () => {
+	const result = await extractPdf(
+		pdfFixture({
+			pages: [{ text: [{ text: "/JS /EmbeddedFile /RichMedia /Launch /XFA", y: 400 }] }],
+		}),
+	);
+	assert.equal(result.gaps.length, 0);
+	assert.ok(result.diagnostics.some((d) => d.code === "unsupported_asset" && d.location === null));
 });
 
 test("active/external content and attachments are not executed, fetched or ingested", async (t) => {
@@ -213,13 +255,13 @@ test("active/external content and attachments are not executed, fetched or inges
 	assert.ok(!JSON.stringify(result).includes("MUST NOT RUN"));
 });
 
-test("oversized image assets produce explicit incomplete-coverage diagnostics", async () => {
+test("oversized image assets produce rendering diagnostics without discarding extracted text", async () => {
 	const result = await extractPdf(
 		pdfFixture({ pages: [{ oversizedImage: true, text: [{ text: "Remaining text", y: 400 }] }] }),
 	);
 	assert.ok(result.blocks.some((b) => b.originalText === "Remaining text"));
 	assert.ok(result.diagnostics.some((d) => d.code === "extraction_failed" || d.code === "unsupported_asset"));
-	assert.equal(result.gaps.length, 1);
+	assert.equal(result.gaps.length, 0);
 });
 
 test("malformed, encrypted and unsupported inputs fail explicitly with no parser output", async () => {
@@ -255,8 +297,8 @@ test("unsafe paths/symlinks, format mismatches and input/resource budgets fail c
 	await assert.rejects(extractPdf(structuralPdf(), { pages: 2001 }), code("resource_limit"));
 	await assert.rejects(extractPdf(pdfFixture({ pages: [{ geometry: [200000, 600] }] })), code("resource_limit"));
 	assert.equal((await extractPdf(pdfFixture({ pages: [{}] }), { diagnostics: 1 })).diagnostics.length, 1);
-	await assert.rejects(
-		extractPdf(pdfFixture({ pages: [{ image: true }] }), { diagnostics: 1 }),
-		code("resource_limit"),
-	);
+	const capped = await extractPdf(pdfFixture({ pages: [{ image: true }] }), { diagnostics: 1 });
+	assert.equal(capped.diagnostics.length, 1);
+	assert.match(capped.diagnostics[0]?.message ?? "", /Diagnostics truncated:.*code scanned_page/);
+	assert.deepEqual(capped.gaps, [{ pageNumber: 1, reason: "scanned_page" }]);
 });

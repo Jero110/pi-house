@@ -5,17 +5,26 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { publicationLimits } from "../src/capacity.ts";
 import { embeddingIdentity, LocalEmbeddings } from "../src/embeddings.ts";
-import { indexCorpus, loadCatalog, pruneSuperseded } from "../src/indexing.ts";
+import {
+	generationPassages,
+	indexCorpus,
+	loadCatalog,
+	loadPreviousCatalogs,
+	pruneSuperseded,
+} from "../src/indexing.ts";
 import { ingestPdf, publishIngest } from "../src/ingest.ts";
 import { sha256 } from "../src/locations.ts";
+import { booksTools } from "../src/mcp.ts";
 import { Objects } from "../src/objects.ts";
 import { Pinecone, type PineconeRecord } from "../src/pinecone.ts";
+import { fetchHostedFigure } from "../src/search.ts";
 import { CorpusStore } from "../src/store.ts";
 import { pdfFixture } from "./fixtures.ts";
 
 // All three protocols use one literal-loopback fake server; no credentials or APIs.
-async function fixture(t: { after: (fn: () => void) => void }) {
+async function fixture(t: { after: (fn: () => void) => void }, additionalFigures = 0, unavailable = false) {
 	const root = mkdtempSync(join(realpathSync(tmpdir()), "books-index-"));
 	t.after(() => rmSync(root, { recursive: true, force: true }));
 	const store = new CorpusStore({ directory: join(root, "store") });
@@ -32,6 +41,19 @@ async function fixture(t: { after: (fn: () => void) => void }) {
 					})),
 				},
 				{ geometry: [900, 900], text: [{ text: "Figure 1-1. Synthetic diagram", y: 750 }] },
+				...(unavailable
+					? [
+							{
+								geometry: [900, 900] as const,
+								text: [{ text: "Figure 9-9. Unavailable diagram", y: 750 }],
+								oversizedImage: true,
+							},
+						]
+					: []),
+				...Array.from({ length: additionalFigures }, (_, i) => ({
+					geometry: [900, 900] as const,
+					text: [{ text: `Figure 1-${i + 2}. Synthetic diagram`, y: 750 }],
+				})),
 			],
 		}),
 	);
@@ -47,10 +69,15 @@ async function fixture(t: { after: (fn: () => void) => void }) {
 	const storage = new Map<string, { bytes: Buffer; hash: string }>();
 	const calls: string[] = [];
 	let failBatch = 0;
+	let failShard = -1;
 	let upserts = 0;
 	let hidden = false;
+	let hideRounds = 0;
 	let publicBucket = false;
 	let conflict = false;
+	let raceAfterUpsert = false;
+	let describes = 0;
+	let modelProbes = 0;
 	let url = "";
 	const server = createServer(async (req, res) => {
 		const path = new URL(req.url ?? "/", url).pathname;
@@ -71,6 +98,11 @@ async function fixture(t: { after: (fn: () => void) => void }) {
 			}
 			calls.push(`${req.method} ${path}`);
 			if (req.method === "PUT") {
+				if (path.includes("/manifests/") && failShard >= 0 && failShard-- === 0) {
+					res.statusCode = 503;
+					res.end();
+					return;
+				}
 				storage.set(path, { bytes, hash: String(req.headers["x-amz-meta-sha256"]) });
 				res.end();
 				return;
@@ -95,7 +127,8 @@ async function fixture(t: { after: (fn: () => void) => void }) {
 		if (path === "/api/version") return reply({ version: embeddingIdentity.runtimeVersion });
 		if (path === "/api/tags")
 			return reply({ models: [{ name: embeddingIdentity.model, digest: embeddingIdentity.digest }] });
-		if (path === "/api/show")
+		if (path === "/api/show") {
+			modelProbes++;
 			return reply({
 				model_info: {
 					"general.architecture": "nomic-bert",
@@ -103,12 +136,14 @@ async function fixture(t: { after: (fn: () => void) => void }) {
 					"nomic-bert.context_length": 2048,
 				},
 			});
+		}
 		if (path === "/api/embed") {
 			const body = json();
 			assert.equal(body.truncate, false);
 			return reply({ embeddings: (body.input as string[]).map(() => Array.from({ length: 768 }, () => 1)) });
 		}
-		if (path === "/indexes/books")
+		if (path === "/indexes/books") {
+			describes++;
 			return reply({
 				name: "books",
 				host: url,
@@ -118,6 +153,7 @@ async function fixture(t: { after: (fn: () => void) => void }) {
 				spec: { serverless: { cloud: "aws", region: "us-east-1" } },
 				status: { ready: true },
 			});
+		}
 		if (path === "/vectors/upsert") {
 			calls.push("upsert");
 			upserts++;
@@ -129,8 +165,22 @@ async function fixture(t: { after: (fn: () => void) => void }) {
 			const body = json();
 			assert.equal(body.namespace, "synthetic");
 			const records = body.vectors as PineconeRecord[];
+			assert.ok(records.length <= 8);
+			if (raceAfterUpsert) conflict = true;
 			for (const record of records) vectors.set(record.id, record);
 			return reply({ upsertedCount: records.length });
+		}
+		if (path === "/vectors/list") {
+			calls.push("list");
+			const query = new URL(req.url ?? "", url).searchParams;
+			assert.equal(query.get("namespace"), "synthetic");
+			const start = Number(query.get("paginationToken") ?? 0);
+			const ids = hidden || hideRounds-- > 0 ? [] : [...vectors.keys()].sort();
+			return reply({
+				namespace: "synthetic",
+				vectors: ids.slice(start, start + 100).map((id) => ({ id })),
+				...(ids.length > start + 100 ? { pagination: { next: String(start + 100) } } : {}),
+			});
 		}
 		if (path === "/vectors/fetch") {
 			const query = new URL(req.url ?? "", url).searchParams;
@@ -195,7 +245,17 @@ async function fixture(t: { after: (fn: () => void) => void }) {
 		fail: (batch: number) => {
 			failBatch = batch;
 		},
+		failShard: (value: number) => {
+			failShard = value;
+		},
 		upserts: () => upserts,
+		probes: () => ({ describes, modelProbes }),
+		race: () => {
+			raceAfterUpsert = true;
+		},
+		hideFor: (rounds: number) => {
+			hideRounds = rounds;
+		},
 		hide: (value: boolean) => {
 			hidden = value;
 		},
@@ -208,6 +268,46 @@ async function fixture(t: { after: (fn: () => void) => void }) {
 	};
 }
 
+test("generation IDs are disjoint and visibility checks wait for all completed upserts", async (t) => {
+	const f = await fixture(t);
+	const passages = f.store.listPassages(f.source);
+	const a = generationPassages(passages, "a".repeat(32));
+	const b = generationPassages(passages, "b".repeat(32));
+	assert.ok(a.every((p) => !b.some((q) => q.id === p.id) && !passages.some((q) => q.id === p.id)));
+	assert.equal(a[0]?.neighbors.next, a[1]?.id);
+	f.hideFor(1); // first final snapshot is not visible; fresh runs never list an absent namespace
+	await indexCorpus(f);
+	assert.equal(f.calls.filter((c) => c === "list").length, 2);
+	assert.ok((await loadCatalog(f.objects)).catalog);
+});
+
+test("unsupported render retains text and good figure through atomic storage and hosted roundtrip", async (t) => {
+	const f = await fixture(t, 0, true);
+	const figures = f.store.listFigures(f.source);
+	assert.equal(figures.length, 2);
+	assert.equal(f.store.readFigureAssets(f.source).length, 1);
+	assert.ok(f.store.listPassages(f.source).length);
+	const missing = figures.find((figure) => figure.unavailable);
+	assert.ok(missing);
+	assert.deepEqual(missing.unavailable, { status: "unsupported", reason: "no_render_operators" });
+	const catalog = await indexCorpus(f);
+	assert.equal(catalog.versions[0]?.figures.length, 2);
+	const result = await fetchHostedFigure(f.objects, missing.id);
+	assert.equal(result.asset, null);
+	assert.equal(result.figure.caption, "Figure 9-9. Unavailable diagram");
+	assert.equal(result.figure.location.pageNumber, 3);
+	const tool = booksTools({ services: () => f }).find((tool) => tool.name === "books_figure");
+	assert.ok(tool);
+	const response = await tool.run({ figureId: missing.id });
+	assert.equal(response.content.length, 1);
+	assert.equal(response.content[0]?.type, "text");
+	assert.match(JSON.stringify(response), /unsupported/);
+	assert.match(JSON.stringify(response), /PDF page 3/);
+	const good = figures.find((figure) => !figure.unavailable);
+	assert.ok(good);
+	assert.ok((await fetchHostedFigure(f.objects, good.id)).asset);
+});
+
 test("index figures first, vectors in bounded batches, manifest last; resume re-verifies confirmed IDs", async (t) => {
 	const f = await fixture(t);
 	assert.ok(f.store.listPassages(f.source).length > 8);
@@ -219,9 +319,14 @@ test("index figures first, vectors in bounded batches, manifest last; resume re-
 		confirmed: string[];
 	};
 	assert.equal(receipt.confirmed.length, 8);
-	// Remove one confirmed remote item: resume must re-embed it, not trust receipt.
-	f.vectors.delete(receipt.confirmed[0] ?? "");
+	// A stale ID with the same metadata is not the completed expected upsert.
+	const removed = f.vectors.get(receipt.confirmed[0] ?? "");
+	assert.ok(removed);
+	f.vectors.delete(removed.id);
+	const staleId = `passage_${"f".repeat(32)}`;
+	f.vectors.set(staleId, { ...removed, id: staleId, metadata: { ...removed.metadata, generation: "0".repeat(32) } });
 	const catalog = await indexCorpus(f);
+	assert.ok(f.vectors.has(removed.id), "resume repaired the missing expected ID despite an unrelated stale ID");
 	assert.equal(catalog.versions.length, 1);
 	assert.equal((await loadCatalog(f.objects)).incomplete, false);
 	assert.ok(f.calls.findIndex((call) => call.includes("PUT") && call.includes("figure_")) < f.calls.indexOf("upsert"));
@@ -269,7 +374,8 @@ test("new source version commits without mixing generations; changed originals f
 	);
 	assert.deepEqual(skipped, [f.source.versionId]);
 	assert.equal((await loadCatalog(f.objects)).catalog?.commit, previous.commit);
-	assert.equal((await loadCatalog(f.objects)).incomplete, true);
+	// Offline preflight fails before creating a pending hosted claim.
+	assert.equal((await loadCatalog(f.objects)).incomplete, false);
 	writeFileSync(f.input, original);
 	// Publish a distinct source under the same book identity.
 	const nextPath = join(f.root, "replacement.pdf");
@@ -311,6 +417,56 @@ test("concurrent claim conflicts are detected rather than claiming S3 compare-an
 	assert.equal(f.upserts(), 0);
 });
 
+test("source-shard write failures leave the previous root unchanged and resume safely", async (t) => {
+	const f = await fixture(t);
+	const previous = await indexCorpus(f);
+	const key = "/s3/private-books/library/catalog.json";
+	const oldRoot = f.storage.get(key);
+	assert.ok(oldRoot);
+	const nextPath = join(f.root, "second-book.pdf");
+	writeFileSync(nextPath, pdfFixture({ pages: [{ text: [{ text: "Synthetic second book", y: 500 }] }] }));
+	const prepared = await ingestPdf({
+		store: f.store,
+		input: nextPath,
+		bookId: f.store.newBookId(),
+		indexConfigurationHash: sha256("second-book"),
+	});
+	await publishIngest(prepared, f.store);
+	f.failShard(2); // The first source's data and header succeed; the second source fails.
+	await assert.rejects(indexCorpus(f), /unavailable/u);
+	assert.deepEqual(f.storage.get(key), oldRoot);
+	assert.equal((await loadCatalog(f.objects)).catalog?.commit, previous.commit);
+	assert.equal((await loadCatalog(f.objects)).incomplete, true);
+	const before = f.upserts();
+	f.failShard(-1);
+	const current = await indexCorpus(f);
+	assert.equal(f.upserts(), before, "resume still fetch-verifies receipts before skipping vectors");
+	assert.notEqual(current.commit, previous.commit);
+	assert.equal((await loadCatalog(f.objects)).incomplete, false);
+	const writes = f.calls.filter((call) => call.startsWith("PUT"));
+	assert.ok(writes.at(-1)?.endsWith("catalog.json"), "root is COMMIT LAST");
+});
+
+test("writer explicitly reindexes a legacy root without re-ingesting or losing prune ownership", async (t) => {
+	const f = await fixture(t);
+	const previous = await indexCorpus(f);
+	await f.objects.put(
+		f.objects.libraryKey("catalog.json"),
+		Buffer.from(JSON.stringify({ ...previous, schema: 1 })),
+		"application/json",
+	);
+	await assert.rejects(loadCatalog(f.objects), /schema 1.*re-run index/u);
+	const before = f.upserts();
+	const current = await indexCorpus(f);
+	assert.equal(current.schema, 2);
+	assert.equal(f.upserts(), before);
+	assert.equal((await loadCatalog(f.objects)).incomplete, false);
+	const snapshotPath = join(f.store.directory, `previous-catalog-${previous.commit}.json`);
+	assert.ok(readFileSync(snapshotPath).length > 0);
+	writeFileSync(snapshotPath, JSON.stringify({ ...previous, schema: 1 }), { mode: 0o600 });
+	assert.deepEqual(loadPreviousCatalogs(f.store)[0]?.catalog, previous);
+});
+
 test("superseded cleanup deletes only explicit previous-owned IDs absent from current", async (t) => {
 	const f = await fixture(t);
 	const previous = await indexCorpus(f);
@@ -323,4 +479,70 @@ test("superseded cleanup deletes only explicit previous-owned IDs absent from cu
 		pruneSuperseded(previous, { ...current, libraryId: "a".repeat(32) }, f.pinecone),
 		/another library/u,
 	);
+});
+
+test("capacity preflight rejects before the first hosted write, including canary and figures", async (t) => {
+	const f = await fixture(t);
+	const summaries: string[] = [];
+	await assert.rejects(
+		indexCorpus({ ...f, capacity: { ...publicationLimits, uploadBytes: 1 }, onPlan: (s) => summaries.push(s) }),
+		/uploadBytes planned=.*remaining=1/u,
+	);
+	for (const key of ["pineconeResponseBytes", "s3ResponseBytes"] as const)
+		await assert.rejects(
+			indexCorpus({ ...f, capacity: { ...publicationLimits, [key]: 1 } }),
+			new RegExp(`${key} planned=.*remaining=1`),
+		);
+	assert.equal(f.storage.size, 0);
+	assert.equal(f.calls.length, 0);
+	assert.match(summaries[0] ?? "", /planned.*remaining.*caps/u);
+	assert.ok(!summaries.join().includes("Technical subsection"));
+});
+
+test("write-run probes are cached, physical usage survives interruption and resume", async (t) => {
+	const f = await fixture(t);
+	f.fail(2);
+	await assert.rejects(indexCorpus(f), /unavailable/u);
+	const path = join(f.store.directory, "index-capacity.json");
+	const before = JSON.parse(readFileSync(path, "utf8")).used;
+	assert.ok(before.requests > 0 && before.responseBytes > 0 && before.uploadBytes > 0);
+	assert.deepEqual(f.probes(), { describes: 1, modelProbes: 1 });
+	await indexCorpus(f);
+	const after = JSON.parse(readFileSync(path, "utf8")).used;
+	assert.ok(after.requests > before.requests);
+	assert.ok(after.responseBytes > before.responseBytes);
+	assert.ok(after.pineconeResponseBytes > before.pineconeResponseBytes);
+	assert.ok(after.s3ResponseBytes > before.s3ResponseBytes);
+	assert.ok(after.vectors >= before.vectors);
+	assert.deepEqual(f.probes(), { describes: 2, modelProbes: 2 });
+});
+
+test("claim changes inside a vector batch cannot commit a mixed root", async (t) => {
+	const f = await fixture(t);
+	f.race();
+	await assert.rejects(indexCorpus(f), /Concurrent writer conflict/u);
+	assert.ok(f.upserts() > 0);
+	assert.ok(![...f.storage.keys()].some((key) => key.endsWith("catalog.json")));
+});
+
+test("figure guards amortize calls but never allow more than sixteen writes unchecked", async (t) => {
+	const f = await fixture(t, 32);
+	const figures = f.store.listFigures(f.source).length;
+	assert.ok(figures > 16);
+	await indexCorpus(f);
+	let writesSinceGuard = 0;
+	for (const call of f.calls) {
+		if (call.startsWith("PUT") && call.includes("/figure_")) writesSinceGuard++;
+		if (call.startsWith("GET") && call.endsWith("/writer.json")) {
+			assert.ok(writesSinceGuard <= 16);
+			writesSinceGuard = 0;
+		}
+	}
+	const first = f.calls.findIndex((call) => call.startsWith("PUT") && call.includes("/figure_"));
+	const last = f.calls.findLastIndex((call) => call.startsWith("PUT") && call.includes("/figure_"));
+	const guardReads = f.calls
+		.slice(first, last + 1)
+		.filter((call) => call.startsWith("GET") && call.endsWith("/writer.json")).length;
+	assert.ok(guardReads <= 2 * Math.ceil(figures / 16));
+	assert.ok(guardReads < figures, "not one claim read per figure");
 });

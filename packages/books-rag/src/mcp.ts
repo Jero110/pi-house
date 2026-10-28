@@ -118,7 +118,14 @@ function pageSpans(spans: readonly SourceSpan[]) {
 	}
 	return merged;
 }
-const diagnostics = (list: readonly Diagnostic[]) => list.map((d) => ({ code: d.code, message: d.message }));
+const diagnostics = (list: readonly Diagnostic[]) =>
+	list.map((d) => ({
+		code: d.code,
+		message: d.message,
+		...(d.source ? { source: d.source } : {}),
+		...(d.occurrences === undefined ? {} : { occurrences: d.occurrences }),
+		...(d.pageRanges ? { pageRanges: d.pageRanges, pageCount: d.pageCount, omittedPageCount: d.omittedPageCount } : {}),
+	}));
 
 const object = (properties: Record<string, Record<string, unknown>>, required: string[] = []) => ({
 	type: "object" as const,
@@ -289,6 +296,7 @@ function searchTool(options: BooksMcpOptions): Tool {
 							totalPdfPages: c.coverage.totalPages,
 							status: c.coverage.status,
 							gapCount: c.coverage.gaps.length,
+							gapReasons: [...new Set(c.coverage.gaps.map((g) => g.reason))],
 							gapPdfPages: c.coverage.gaps.slice(0, 20).map((g) => g.pageNumber),
 						})),
 						omittedCoverage: result.coverage.length - coverage,
@@ -403,6 +411,19 @@ function figureTool(options: BooksMcpOptions): Tool {
 			try {
 				const args = validate(raw, rules, ["figureId"]);
 				const { figure, asset } = await fetchHostedFigure(options.services().objects, args.figureId as never);
+				if (!asset)
+					return withinBudget(
+						respond({
+							status: "unsupported",
+							reason: figure.unavailable?.reason,
+							source: { bookId: figure.bookId, versionId: figure.versionId, sourceHash: figure.sourceHash },
+							figureId: figure.id,
+							caption: figure.caption === null ? null : sliceLiteral(figure.caption, 2000),
+							location: `PDF page ${figure.location.pageNumber}`,
+							image: null,
+						}),
+						options,
+					);
 				if (
 					!["image/png", "image/jpeg"].includes(asset.mimeType) ||
 					asset.base64.length > figureLimits.base64Bytes ||

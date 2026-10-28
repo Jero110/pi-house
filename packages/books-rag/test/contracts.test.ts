@@ -142,6 +142,28 @@ test("optional source contracts preserve unknown metadata and detached immutable
 	assert.equal(result.originalPath, "/synthetic/private/book.pdf");
 });
 
+test("aggregated diagnostics validate occurrence counts and bounded physical-page ranges", () => {
+	const notice = {
+		code: "unsupported_asset" as const,
+		message: "Synthetic grouped note",
+		source: null,
+		location: null,
+		occurrences: 2,
+		pageCount: 2,
+		pageRanges: [[1, 2]] as const,
+		omittedPageCount: 0,
+	};
+	assert.equal(defineSource({ ...source(), diagnostics: [notice] }).diagnostics[0]?.occurrences, 2);
+	for (const invalid of [
+		{ ...notice, occurrences: 0 },
+		{ ...notice, occurrences: 1 },
+		{ ...notice, pageRanges: [[1, 3]] as const },
+		{ ...notice, omittedPageCount: 1 },
+		{ ...notice, pageRanges: undefined },
+	])
+		assert.throws(() => defineSource({ ...source(), diagnostics: [invalid] }), /diagnostic/i);
+});
+
 test("metadata conflicts retain both provenance sources until an explicit override", () => {
 	const input = source();
 	const authors: MetadataField<readonly string[]> = {
@@ -404,21 +426,20 @@ test("search rejects missing coverage, inconsistent identities, impossible locat
 	assert.throws(() => defineSearchResult({ ...input, hits: [hit(), hit()] }), /Duplicate/);
 	assert.throws(() => defineSearchResult({ ...input, hits: [{ ...hit(), excerpt: "x".repeat(801) }] }), /budget/);
 	assert.throws(() => defineSearchResult({ ...input, hits: Array.from({ length: 6 }, hit) }), /Too many/);
-	assert.throws(
-		() =>
-			defineSearchResult({
-				...input,
-				coverage: [
-					{
-						source: identity,
-						coverage: {
-							...source().coverage,
-							status: "incomplete",
-							gaps: [{ pageNumber: 2, reason: "uncertain_table" }],
-						},
+	assert.equal(
+		defineSearchResult({
+			...input,
+			coverage: [
+				{
+					source: identity,
+					coverage: {
+						...source().coverage,
+						status: "incomplete",
+						gaps: [{ pageNumber: 2, reason: "scanned_page" }],
 					},
-				],
-			}),
-		/Incomplete coverage/,
+				},
+			],
+		}).status,
+		"ok",
 	);
 });

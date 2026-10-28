@@ -14,7 +14,7 @@ import type { LocalEmbeddings } from "./embeddings.ts";
 import { embeddingIdentity } from "./embeddings.ts";
 import { validateFigureAsset } from "./figures.ts";
 import type { Catalog, HostedVersion } from "./indexing.ts";
-import { loadCatalog, resolveHostedPassage, validationSource } from "./indexing.ts";
+import { catalogReindexMessage, loadCatalog, resolveHostedPassage, validationSource } from "./indexing.ts";
 import type { Objects } from "./objects.ts";
 import type { Pinecone, PineconeMatch } from "./pinecone.ts";
 import { incompatibleSchemaMessage, recordSchema } from "./pinecone.ts";
@@ -87,9 +87,9 @@ export async function searchBooks(services: SearchServices, input: SearchInput):
 	let incomplete = false;
 	let stage: "catalog" | "embedding" | "pinecone" = "catalog";
 	try {
-		const state = await loadCatalog(services.objects);
+		const state = await loadCatalog(services.objects, { bookIds: input.bookIds });
 		versions = selected(state.catalog, input.bookIds);
-		incomplete = state.incomplete || versions.some((v) => v.source.coverage.status === "incomplete");
+		incomplete = state.incomplete || versions.some((v) => Object.keys(v.passages).length === 0);
 		if (state.incomplete)
 			diagnostics.push(
 				diagnostic(
@@ -97,10 +97,22 @@ export async function searchBooks(services: SearchServices, input: SearchInput):
 					"Hosted publication is incomplete; only committed compatible generations can supply evidence",
 				),
 			);
-		if (versions.some((v) => v.source.coverage.status === "incomplete"))
-			diagnostics.push(
-				diagnostic("extraction_failed", "Selected corpus has extraction gaps; coverage is not complete"),
-			);
+		for (const version of versions) {
+			const { gaps } = version.source.coverage;
+			if (gaps.length)
+				diagnostics.push({
+					...diagnostic(
+						"extraction_failed",
+						`${gaps.length} unextracted PDF page(s); reasons: ${[...new Set(gaps.map((g) => g.reason))].join(", ")}`,
+					),
+					source: sourceIdentity(version),
+				});
+			if (!Object.keys(version.passages).length)
+				diagnostics.push({
+					...diagnostic("index_incomplete", "Selected book has no searchable published content"),
+					source: sourceIdentity(version),
+				});
+		}
 		if (!state.catalog || !versions.length) return result();
 		stage = "embedding";
 		const vector = await services.embeddings.query(input.query, embeddingIdentity);
@@ -164,7 +176,7 @@ export async function searchBooks(services: SearchServices, input: SearchInput):
 		// Detect publication changes during multi-request searches, including a
 		// new pending writer. Never return evidence from a superseded snapshot.
 		stage = "catalog";
-		const after = await loadCatalog(services.objects);
+		const after = await loadCatalog(services.objects, { bookIds: [] });
 		if (after.hash !== state.hash) {
 			hits.length = 0;
 			incomplete = true;
@@ -175,9 +187,19 @@ export async function searchBooks(services: SearchServices, input: SearchInput):
 		if (after.incomplete) incomplete = true;
 		return result();
 	} catch (error) {
+		// A root-only recheck can itself race while loading. Do not retain hits
+		// gathered before that failed snapshot check, even if the error is caught.
+		if (stage === "catalog") hits.length = 0;
 		if (error instanceof AdapterError && error.code === "identity_mismatch" && stage === "catalog") {
 			incomplete = true;
-			diagnostics.push(diagnostic("identity_mismatch", "Hosted catalog/source consistency check failed"));
+			diagnostics.push(
+				diagnostic(
+					"identity_mismatch",
+					error.message === catalogReindexMessage
+						? catalogReindexMessage
+						: "Hosted catalog/source consistency check failed",
+				),
+			);
 			return result();
 		}
 		diagnostics.push(
@@ -193,6 +215,13 @@ export async function searchBooks(services: SearchServices, input: SearchInput):
 		return result("unavailable");
 	}
 	function result(backend: "available" | "unavailable" = "available"): SearchResult {
+		if (!hits.length && versions.some((v) => v.source.coverage.gaps.length))
+			diagnostics.push(
+				diagnostic(
+					"extraction_failed",
+					"Support was not found in searchable text; the answer could be on unextracted pages",
+				),
+			);
 		return defineSearchResult({
 			backend,
 			corpus: incomplete ? "incomplete" : "complete",
@@ -247,7 +276,7 @@ export async function readHostedPassage(
 	const text = sliceLiteral(passage.originalText.slice(offset), limit);
 	if (!text.length && offset < passage.originalText.length)
 		throw new AdapterError("resource_limit", "Read limit cannot hold the next Unicode scalar");
-	if ((await loadCatalog(services.objects)).hash !== catalogHash)
+	if ((await loadCatalog(services.objects, { bookIds: [] })).hash !== catalogHash)
 		throw new AdapterError("identity_mismatch", "Catalog changed during evidence read");
 	return {
 		source: sourceIdentity(version),
@@ -265,18 +294,23 @@ export async function fetchHostedFigure(
 	id: FigureId,
 ): Promise<{
 	readonly figure: HostedVersion["figures"][number]["figure"];
-	readonly asset: ReturnType<typeof validateFigureAsset>;
+	readonly asset: ReturnType<typeof validateFigureAsset> | null;
 }> {
 	const { version, catalogHash } = await currentVersion(objects, id, "figure");
 	const item = version.figures.find((f) => f.figure.id === id);
 	if (!item) throw new AdapterError("identity_mismatch", "Figure is not in the manifest");
+	if (item.unavailable) {
+		if ((await loadCatalog(objects, { bookIds: [] })).hash !== catalogHash)
+			throw new AdapterError("identity_mismatch", "Catalog changed during figure read");
+		return { figure: item.figure, asset: null };
+	}
 	const bytes = await objects.get(item.object.key, item.object.hash);
 	const asset = validateFigureAsset(
 		{ ...item.asset, base64: bytes.toString("base64") },
 		validationSource(version.source),
 		[item.figure],
 	);
-	if ((await loadCatalog(objects)).hash !== catalogHash)
+	if ((await loadCatalog(objects, { bookIds: [] })).hash !== catalogHash)
 		throw new AdapterError("identity_mismatch", "Catalog changed during figure read");
 	return { figure: item.figure, asset };
 }

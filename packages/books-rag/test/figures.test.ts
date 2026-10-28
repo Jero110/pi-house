@@ -153,18 +153,25 @@ test("rendering detects original mutation/missing data and unsupported assets", 
 		async ({ document, store }) => {
 			const figure = discoverFigures(document, store)[0];
 			assert.ok(figure);
-			await assert.rejects(renderFigure(document.source, figure), { code: "unsupported_asset" });
-			await assert.rejects(publishIngest(document, store));
-			assert.equal(store.listVersions().length, 0);
+			await assert.rejects(renderFigure(document.source, figure), {
+				code: "unsupported_asset",
+				message: /Figure could not be rendered safely:.*\(no_render_operators\)/,
+			});
+			await publishIngest(document, store);
+			assert.equal(store.listVersions().length, 1);
+			assert.equal(store.listFigures(document.source)[0]?.unavailable?.reason, "no_render_operators");
+			assert.equal(store.readFigureAssets(document.source).length, 0);
 		},
 		pdfFixture({ pages: [{ text: [{ text: "Figure 1-1. Unsafe image", y: 100 }], oversizedImage: true }] }),
 	);
 });
-test("atomic publication is idempotent; stored read/figure survive restart and deletion, never mutation", async () => {
+test("atomic publication is idempotent; stored read/figure survive restart and deletion, never mutation", async (t) => {
 	await fixture(async ({ document, store, input, directory }) => {
 		assert.equal(store.listVersions().length, 0);
 		assert.equal((await publishIngest(document, store)).imported, true);
+		const bulk = t.mock.method(store, "readFigureAssets");
 		assert.equal((await publishIngest(document, store)).imported, false);
+		assert.equal(bulk.mock.callCount(), 1, "re-ingestion validates persisted images once per book");
 		const fresh = new CorpusStore({ directory });
 		const passage = fresh.listPassages(document.source).find((p) => p.figures.length);
 		assert.ok(passage);
@@ -174,10 +181,15 @@ test("atomic publication is idempotent; stored read/figure survive restart and d
 		writeFileSync(input, "changed");
 		assert.throws(() => fresh.readPassage(document.source, passage.id), { code: "source_changed" });
 		assert.throws(() => fresh.readFigureAsset(document.source, id), { code: "source_changed" });
+		assert.throws(() => fresh.readFigureAssets(document.source), { code: "source_changed" });
 		rmSync(input);
 		const restarted = new CorpusStore({ directory });
 		assert.deepEqual(restarted.readPassage(document.source, passage.id), passage);
 		assert.deepEqual(restarted.readFigureAsset(document.source, id), before);
+		assert.deepEqual(
+			restarted.readFigureAssets(document.source).find((a) => a.figureId === id),
+			before,
+		);
 		assert.ok(passage.mappings.length);
 		assert.ok(passage.spans.length);
 		assert.ok(passage.headingPath.length);

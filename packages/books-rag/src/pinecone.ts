@@ -269,7 +269,7 @@ export interface PineconeMatch {
 	readonly metadata: PineconeMetadata;
 }
 export class Pinecone {
-	private readonly options: PineconeOptions;
+	private options: PineconeOptions;
 	private readonly host: URL;
 	private readonly control: URL;
 	private readonly queue: BoundedQueue;
@@ -279,6 +279,8 @@ export class Pinecone {
 	private bytes = 0;
 	private lastWrite = 0;
 	private lastQuery = 0;
+	private listPages = 0;
+	private controlProbes = 0;
 	constructor(options: PineconeOptions) {
 		this.options = { ...options };
 		this.queue = new BoundedQueue(options.queueWaitMs);
@@ -296,9 +298,9 @@ export class Pinecone {
 			/[\r\n\0]/u.test(options.apiKey)
 		)
 			throw new AdapterError("configuration", "Invalid Pinecone configuration");
-		boundedInteger(options.maxVectors ?? 20000, 1, 20000, "Pinecone run vectors");
-		boundedInteger(options.maxRequests ?? 10000, 1, 10000, "Pinecone run requests");
-		boundedInteger(options.maxWriteBytes ?? 100000000, 1, 100000000, "Pinecone run bytes");
+		boundedInteger(options.maxVectors ?? 50000, 1, 50000, "Pinecone run vectors");
+		boundedInteger(options.maxRequests ?? 100000, 1, 100000, "Pinecone run requests");
+		boundedInteger(options.maxWriteBytes ?? 1073741824, 1, 1073741824, "Pinecone run bytes");
 		boundedInteger(options.minimumWriteIntervalMs ?? 1000, 0, 60000, "write interval");
 		boundedInteger(options.minimumQueryIntervalMs ?? 500, 0, 60000, "query interval");
 		if (
@@ -308,6 +310,9 @@ export class Pinecone {
 				(options.retryDelayMs ?? 1000) < 1000)
 		)
 			throw new AdapterError("configuration", "Cloud rate bounds cannot be relaxed");
+	}
+	setAccounting(accounting: import("./capacity.ts").Accounting | undefined): void {
+		this.options = { ...this.options, accounting };
 	}
 	private call(base: URL, path: string, body?: unknown): Promise<unknown> {
 		return requestJson(
@@ -324,12 +329,19 @@ export class Pinecone {
 				},
 			}),
 			{ ...this.options, retryDelayMs: this.options.retryDelayMs ?? 1000 },
+			path.startsWith("/vectors/list") || path.startsWith("/indexes/")
+				? 16384
+				: path === "/vectors/upsert"
+					? 4096
+					: 1024 * 1024,
 		);
 	}
 	private verify(force = false): Promise<void> {
 		return this.verification.verify(() => this.probe(), force);
 	}
 	private async probe(): Promise<void> {
+		if (++this.controlProbes > 256)
+			throw new AdapterError("resource_limit", "Pinecone control-plane probe budget exhausted");
 		const index = record(await this.call(this.control, `/indexes/${this.options.indexName}`));
 		const spec = record(index.spec);
 		const status = record(index.status);
@@ -363,7 +375,7 @@ export class Pinecone {
 	}
 	private async exclusive<T>(work: () => Promise<T>): Promise<T> {
 		return this.queue.run(async () => {
-			if (++this.requests > (this.options.maxRequests ?? 10000))
+			if (++this.requests > (this.options.maxRequests ?? 100000))
 				throw new AdapterError("resource_limit", "Pinecone run request budget exhausted");
 			try {
 				return await work();
@@ -396,15 +408,15 @@ export class Pinecone {
 		const size = Buffer.byteLength(encoded);
 		if (
 			size > 1000000 ||
-			this.written + vectors.length > (this.options.maxVectors ?? 20000) ||
-			this.bytes + size > (this.options.maxWriteBytes ?? 100000000)
+			this.written + vectors.length > (this.options.maxVectors ?? 50000) ||
+			this.bytes + size > (this.options.maxWriteBytes ?? 1073741824)
 		)
 			throw new AdapterError("resource_limit", "Pinecone batch/run budget exhausted");
 		await this.exclusive(async () => {
-			await this.verify(true);
+			await this.verify();
 			if (
-				this.written + detached.length > (this.options.maxVectors ?? 20000) ||
-				this.bytes + size > (this.options.maxWriteBytes ?? 100000000)
+				this.written + detached.length > (this.options.maxVectors ?? 50000) ||
+				this.bytes + size > (this.options.maxWriteBytes ?? 1073741824)
 			)
 				throw new AdapterError("resource_limit", "Pinecone batch/run budget exhausted");
 			this.written += detached.length;
@@ -469,6 +481,47 @@ export class Pinecone {
 			});
 		});
 	}
+	/** Official 2025-10 serverless LIST: IDs only, no metadata or values.
+	 * Finite snapshots: at most 1000 pages/100000 IDs; 4000 pages/run.
+	 * Pagination tokens are opaque, bounded, and may never repeat. */
+	async listIds(expected: unknown): Promise<readonly string[]> {
+		assertEmbeddingIdentity(expected);
+		return this.exclusive(async () => {
+			await this.verify();
+			const ids = new Set<string>();
+			const tokens = new Set<string>();
+			let token: string | undefined;
+			for (let page = 0; page < 1000; page++) {
+				if (++this.listPages > 4000) throw new AdapterError("resource_limit", "Pinecone list page budget exhausted");
+				await this.throttle("query");
+				const query = new URLSearchParams({ namespace: this.options.namespace, limit: "100" });
+				if (token) query.set("paginationToken", token);
+				const result = record(await this.call(this.host, `/vectors/list?${query}`));
+				if (result.namespace !== this.options.namespace)
+					throw new AdapterError("identity_mismatch", "Pinecone list namespace mismatch");
+				if (!Array.isArray(result.vectors) || result.vectors.length > 100)
+					throw new AdapterError("invalid_response", "Invalid Pinecone list page");
+				for (const item of result.vectors) {
+					const value = record(item);
+					if (
+						typeof value.id !== "string" ||
+						!/^passage_[a-f0-9]{32}$/u.test(value.id) ||
+						Object.keys(value).some((k) => k !== "id") ||
+						ids.has(value.id)
+					)
+						throw new AdapterError("identity_mismatch", "Malformed or duplicate Pinecone list ID");
+					ids.add(value.id);
+				}
+				const next = result.pagination === undefined ? undefined : record(result.pagination).next;
+				if (next === undefined || next === "") return [...ids];
+				if (typeof next !== "string" || next.length > 4096 || tokens.has(next))
+					throw new AdapterError("invalid_response", "Invalid Pinecone list pagination");
+				tokens.add(next);
+				token = next;
+			}
+			throw new AdapterError("resource_limit", "Pinecone list snapshot page budget exhausted");
+		});
+	}
 	/** Exact-ID reads support hosted resolution and bounded visibility checks.
 	 * Missing IDs are explicit omissions (eventual consistency), never fabricated. */
 	async fetch(ids: readonly string[], expected: unknown): Promise<readonly PineconeMatch[]> {
@@ -503,15 +556,15 @@ export class Pinecone {
 		const body = { namespace: this.options.namespace, ids: [...ids] };
 		const size = Buffer.byteLength(JSON.stringify(body));
 		if (
-			this.written + ids.length > (this.options.maxVectors ?? 20000) ||
-			this.bytes + size > (this.options.maxWriteBytes ?? 100000000)
+			this.written + ids.length > (this.options.maxVectors ?? 50000) ||
+			this.bytes + size > (this.options.maxWriteBytes ?? 1073741824)
 		)
 			throw new AdapterError("resource_limit", "Pinecone delete run budget exhausted");
 		await this.exclusive(async () => {
 			await this.verify(true);
 			if (
-				this.written + body.ids.length > (this.options.maxVectors ?? 20000) ||
-				this.bytes + size > (this.options.maxWriteBytes ?? 100000000)
+				this.written + body.ids.length > (this.options.maxVectors ?? 50000) ||
+				this.bytes + size > (this.options.maxWriteBytes ?? 1073741824)
 			)
 				throw new AdapterError("resource_limit", "Pinecone delete run budget exhausted");
 			this.written += body.ids.length;

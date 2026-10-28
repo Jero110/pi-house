@@ -10,7 +10,10 @@ export interface FakeServices {
 	readonly vectors: Map<string, PineconeRecord>;
 	readonly storage: Map<string, { bytes: Buffer; hash: string }>;
 	/** Set a status to make every Pinecone upsert fail with it, then null to recover. */
-	readonly faults: { upsertStatus: number | null };
+	readonly faults: {
+		upsertStatus: number | null;
+		beforeObjectGet: ((path: string) => void) | null;
+	};
 	close(): Promise<void>;
 }
 
@@ -22,7 +25,7 @@ export async function fakeServices(options: { readonly publicProbe?: boolean } =
 	const vectors = new Map<string, PineconeRecord>();
 	const storage = new Map<string, { bytes: Buffer; hash: string }>();
 	const requests: string[] = [];
-	const faults: { upsertStatus: number | null } = { upsertStatus: null };
+	const faults: FakeServices["faults"] = { upsertStatus: null, beforeObjectGet: null };
 	let url = "";
 	const server: Server = createServer(async (req, res) => {
 		const parsed = new URL(req.url ?? "/", url);
@@ -51,6 +54,7 @@ export async function fakeServices(options: { readonly publicProbe?: boolean } =
 				res.end();
 				return;
 			}
+			if (req.method === "GET") faults.beforeObjectGet?.(path);
 			const item = storage.get(path);
 			if (!item) {
 				res.statusCode = 404;
@@ -98,6 +102,15 @@ export async function fakeServices(options: { readonly publicProbe?: boolean } =
 			const { ids, namespace } = body() as { ids: string[]; namespace: string };
 			if (namespace === "synthetic") for (const id of ids) vectors.delete(id);
 			return reply({});
+		}
+		if (path === "/vectors/list") {
+			const start = Number(parsed.searchParams.get("paginationToken") ?? 0);
+			const ids = [...vectors.keys()].sort();
+			return reply({
+				namespace: "synthetic",
+				vectors: ids.slice(start, start + 100).map((id) => ({ id })),
+				...(ids.length > start + 100 ? { pagination: { next: String(start + 100) } } : {}),
+			});
 		}
 		if (path === "/vectors/fetch")
 			return reply({

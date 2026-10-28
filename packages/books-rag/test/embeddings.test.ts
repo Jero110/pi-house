@@ -12,6 +12,7 @@ test("local embeddings verify pinned runtime, model digest and show metadata; pr
 	let dimension = 768;
 	let runtime = "0.40.11";
 	let malformed = false;
+	let parameters: unknown = "num_ctx 8192";
 	let blocked: (() => void) | undefined;
 	const server = createServer(async (req, res) => {
 		let raw = "";
@@ -24,6 +25,7 @@ test("local embeddings verify pinned runtime, model digest and show metadata; pr
 		else if (req.url === "/api/show")
 			res.end(
 				JSON.stringify({
+					parameters,
 					model_info: {
 						"general.architecture": "nomic-bert",
 						"nomic-bert.embedding_length": dimension,
@@ -62,11 +64,27 @@ test("local embeddings verify pinned runtime, model digest and show metadata; pr
 	assert.deepEqual(
 		calls.filter((c) => c.path === "/api/embed").map((c) => c.body),
 		[
-			{ model: embeddingIdentity.model, input: ["search_query: technical_identifier"], truncate: false },
-			{ model: embeddingIdentity.model, input: [passageEmbeddingInput(passage)], truncate: false },
+			{
+				model: embeddingIdentity.model,
+				input: ["search_query: technical_identifier"],
+				truncate: false,
+				options: { num_ctx: 2048 },
+			},
+			{
+				model: embeddingIdentity.model,
+				input: [passageEmbeddingInput(passage)],
+				truncate: false,
+				options: { num_ctx: 2048 },
+			},
 		],
 	);
 	assert.ok(calls.every((c) => ["/api/version", "/api/tags", "/api/show", "/api/embed"].includes(c.path)));
+	for (const bad of ["num_predict 10", "temperature 0", "num_ctx 8192\nunknown 1", "num_ctx nope", {}]) {
+		parameters = bad;
+		await assert.rejects(client.doctor(), /parameter override/u);
+	}
+	parameters = "num_ctx 8192";
+	await client.doctor();
 	const probes = calls.filter((c) => c.path === "/api/show").length;
 	await client.query("cached", embeddingIdentity);
 	await client.query("cached-again", embeddingIdentity);

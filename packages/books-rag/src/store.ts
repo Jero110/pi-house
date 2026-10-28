@@ -263,9 +263,11 @@ export class CorpusStore {
 		const figureAssets = input.figureAssets?.map((asset) => validateFigureAsset(asset, source, figures));
 		if (
 			figureAssets &&
-			(figureAssets.length !== figures.length || new Set(figureAssets.map((a) => a.figureId)).size !== figures.length)
+			(figureAssets.length !== figures.filter((f) => !f.unavailable).length ||
+				new Set(figureAssets.map((a) => a.figureId)).size !== figureAssets.length ||
+				figureAssets.some((a) => figures.find((f) => f.id === a.figureId)?.unavailable))
 		)
-			throw new CorpusError("identity_mismatch", "Exactly one stored image per figure required");
+			throw new CorpusError("identity_mismatch", "Exactly one stored image per available figure required");
 		const payload = canonical({
 			source,
 			indexConfigurationHash: input.indexConfigurationHash,
@@ -282,7 +284,9 @@ export class CorpusStore {
 					return { source, imported: false };
 				}
 				// IDs are globally unique inside a library, even when supplied by a caller.
-				for (const row of db.prepare("SELECT payload FROM versions").all()) {
+				// Stream one version at a time: payloads include rendered image data.
+				// Materializing the whole library here can exhaust the main heap.
+				for (const row of db.prepare("SELECT payload FROM versions").iterate()) {
 					const old = this.decode(text(row.payload));
 					if ([...old.passages, ...old.figures].some((record) => ids.has(record.id)))
 						throw new CorpusError("identity_mismatch", "Record ID reused across versions");
@@ -322,10 +326,12 @@ export class CorpusStore {
 	listVersions(bookId?: BookId): readonly SourceVersion[] {
 		if (bookId !== undefined) assertId(bookId, "book");
 		return this.read((db) =>
-			db
-				.prepare("SELECT payload FROM versions WHERE (? IS NULL OR book_id=?) ORDER BY id")
-				.all(bookId ?? null, bookId ?? null)
-				.map((row) => this.decode(text(row.payload)).source),
+			Array.from(
+				db
+					.prepare("SELECT payload FROM versions WHERE (? IS NULL OR book_id=?) ORDER BY id")
+					.iterate(bookId ?? null, bookId ?? null),
+				(row) => this.decode(text(row.payload)).source,
+			),
 		);
 	}
 
@@ -350,6 +356,13 @@ export class CorpusStore {
 			assertSourceIdentity(record.source, expected);
 			return record;
 		});
+	}
+
+	/** One decoded book only; callers must release it before loading the next. */
+	publicationSource(expected: SourceIdentity): CorpusImport {
+		const record = this.resolveVersion(expected);
+		this.verifyEvidenceSource(record);
+		return record;
 	}
 
 	listPassages(expected: SourceIdentity): readonly Passage[] {
@@ -377,6 +390,12 @@ export class CorpusStore {
 			if (!(error instanceof CorpusError && error.code === "source_missing" && record.figureAssets !== undefined))
 				throw error;
 		}
+	}
+
+	readFigureAssets(expected: SourceIdentity): readonly FigureAsset[] {
+		const record = this.resolveVersion(expected);
+		this.verifyEvidenceSource(record);
+		return record.figureAssets ?? [];
 	}
 
 	readFigureAsset(expected: SourceIdentity, id: FigureId): FigureAsset {

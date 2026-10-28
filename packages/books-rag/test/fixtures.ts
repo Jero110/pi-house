@@ -24,6 +24,7 @@ export interface PdfFixtureOptions {
 	readonly author?: string;
 	readonly outlines?: readonly FixtureOutline[];
 	readonly unsafe?: boolean;
+	readonly navigation?: boolean;
 	readonly externalUrl?: string;
 	readonly encrypted?: boolean;
 }
@@ -88,10 +89,19 @@ export function pdfFixture(options: PdfFixtureOptions): Uint8Array {
 			commands += page.noisyImage ? "q 1600 0 0 1600 0 0 cm /Im1 Do Q\n" : "q 50 0 0 50 20 60 cm /Im1 Do Q\n";
 		}
 		set(streamId, `<< /Length ${Buffer.byteLength(commands, "latin1")} >>\nstream\n${commands}\nendstream`);
+		let annotations = "";
+		if (options.navigation) {
+			const link = reserve();
+			set(
+				link,
+				"<< /Type /Annot /Subtype /Link /Rect [20 20 80 50] /A << /S /URI /URI (http://127.0.0.1:9/never-fetch) >> >>",
+			);
+			annotations = ` /Annots [${link} 0 R]`;
+		}
 		const [width, height] = page.geometry ?? [400, 600];
 		set(
 			pageId,
-			`<< /Type /Page /Parent ${pages} 0 R /MediaBox [0 0 ${width} ${height}] /Resources << /Font << /F1 ${helvetica} 0 R /F2 ${courier} 0 R >> ${assets} >> /Contents ${streamId} 0 R >>`,
+			`<< /Type /Page /Parent ${pages} 0 R /MediaBox [0 0 ${width} ${height}] /Resources << /Font << /F1 ${helvetica} 0 R /F2 ${courier} 0 R >> ${assets} >> /Contents ${streamId} 0 R${annotations} >>`,
 		);
 	}
 	set(pages, `<< /Type /Pages /Kids [${pageIds.map((id) => `${id} 0 R`).join(" ")}] /Count ${pageIds.length} >>`);
@@ -118,7 +128,8 @@ export function pdfFixture(options: PdfFixtureOptions): Uint8Array {
 		set(attachment, "<< /Type /EmbeddedFile /Length 0 >>\nstream\n\nendstream");
 		unsafe = `/OpenAction ${action} 0 R /Names << /EmbeddedFiles << /Names [(payload) << /Type /Filespec /EF << /F ${attachment} 0 R >> >>] >> >> /AA << /WC << /S /URI /URI ${literal(options.externalUrl ?? "http://127.0.0.1:9/never-fetch")} >> >>`;
 	}
-	set(catalog, `<< /Type /Catalog /Pages ${pages} 0 R ${outlines} ${unsafe} >>`);
+	const navigation = options.navigation ? ` /OpenAction [${pageIds[0]} 0 R /Fit]` : "";
+	set(catalog, `<< /Type /Catalog /Pages ${pages} 0 R ${outlines} ${unsafe}${navigation} >>`);
 	let encryption = "";
 	if (options.encrypted) {
 		const encryptionId = reserve();

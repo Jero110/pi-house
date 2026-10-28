@@ -176,6 +176,8 @@ export interface HttpOptions {
 	readonly retryDelayMs?: number;
 	readonly queueWaitMs?: number;
 	readonly verificationTtlMs?: number;
+	/** Physical attempt accounting, including retries and verification probes. */
+	readonly accounting?: import("./capacity.ts").Accounting;
 }
 
 /** One active operation, four FIFO waiters. Timeout removes the waiter rather
@@ -258,9 +260,18 @@ export async function requestBytes(
 		let retryAfter = 0;
 		try {
 			const { url, init } = make();
+			const settle = options.accounting?.(
+				typeof init.body === "string"
+					? Buffer.byteLength(init.body)
+					: init.body instanceof Uint8Array
+						? init.body.byteLength
+						: 0,
+				limit,
+			);
 			const response = await fetch(url, { ...init, signal: controller.signal, redirect: "error" });
 			if (responseOptions.statusOnly && (response.ok || responseOptions.acceptedStatuses?.includes(response.status))) {
 				await response.body?.cancel();
+				settle?.(0);
 				return { bytes: Buffer.alloc(0), headers: response.headers, status: response.status };
 			}
 			const chunks: Uint8Array[] = [];
@@ -274,6 +285,7 @@ export async function requestBytes(
 						size += next.value.byteLength;
 						if (size > limit) {
 							await reader.cancel();
+							settle?.(size);
 							throw new AdapterError("resource_limit", "Service response exceeds byte limit");
 						}
 						chunks.push(next.value);
@@ -283,6 +295,7 @@ export async function requestBytes(
 				}
 			}
 			const bytes = Buffer.concat(chunks);
+			settle?.(size);
 			if (response.ok || responseOptions.acceptedStatuses?.includes(response.status))
 				return { bytes, headers: response.headers, status: response.status };
 			const body = bytes.toString("utf8");
@@ -313,8 +326,9 @@ export async function requestBytes(
 export async function requestJson(
 	make: Parameters<typeof requestBytes>[0],
 	options: HttpOptions = {},
+	limit = 1024 * 1024,
 ): Promise<unknown> {
-	const result = await requestBytes(make, 1024 * 1024, options);
+	const result = await requestBytes(make, boundedInteger(limit, 1, 1024 * 1024, "JSON response limit"), options);
 	try {
 		return JSON.parse(result.bytes.toString("utf8")) as unknown;
 	} catch {

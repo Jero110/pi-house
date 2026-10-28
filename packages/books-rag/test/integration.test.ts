@@ -588,8 +588,8 @@ test("incomplete corpus: extraction gaps, a pending writer claim and an interrup
 	assert.equal(entries[0]?.extraction.status, "incomplete");
 	assert.deepEqual(entries[0]?.extraction.gapPdfPages, [2]);
 	const gap = await server.tool("books_search", { query: "Readable gap coverage sentence about lanterns." });
-	assert.equal(gap.json.status, "incomplete_corpus");
-	assert.equal(gap.json.corpus, "incomplete");
+	assert.equal(gap.json.status, "ok");
+	assert.equal(gap.json.corpus, "complete");
 	assert.ok(hits(gap.json).length >= 1, "readable pages still answer, with the gap named");
 	assert.equal((gap.json.coverage as { gapPdfPages: number[] }[])[0]?.gapPdfPages[0], 2);
 	assert.ok(diagnosticCodes(gap.json).includes("extraction_failed"));

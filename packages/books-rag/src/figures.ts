@@ -9,6 +9,29 @@ import type { PreparedIngest } from "./ingest.ts";
 import { CorpusError, sha256, verifiedSourceBytes } from "./locations.ts";
 import type { CorpusStore } from "./store.ts";
 
+const renderFailureMessages = {
+	decoder_diagnostic: "PDF decoder emitted a recovery/unsupported-content diagnostic",
+	geometry_mismatch: "Page geometry differs from the verified figure location",
+	no_render_operators: "PDF decoder supplied no rendering operators",
+	image_budget: "Encoded image exceeds the unchanged output budget after bounded reductions",
+	decoder_failure: "PDF/canvas decoder failed (unclassified; source details withheld)",
+} as const;
+type RenderFailureReason = keyof typeof renderFailureMessages;
+export class UnsupportedFigureRender extends CorpusError {
+	readonly reason: "no_render_operators";
+	constructor(reason: "no_render_operators") {
+		super("unsupported_asset", `Figure could not be rendered safely: ${renderFailureMessages[reason]} (${reason})`);
+		this.reason = reason;
+	}
+}
+class RenderFailure extends Error {
+	readonly reason: RenderFailureReason;
+	constructor(reason: RenderFailureReason) {
+		super(renderFailureMessages[reason]);
+		this.reason = reason;
+	}
+}
+
 export const figureLimits = Object.freeze({ longestSide: 1600, base64Bytes: 2 * 1024 * 1024, milliseconds: 30000 });
 export interface FigureAsset extends SourceIdentity {
 	readonly figureId: FigureId;
@@ -175,24 +198,36 @@ export async function renderFigure(source: SourceVersion, figure: Figure): Promi
 		worker.stderr?.on("data", () =>
 			finish(new CorpusError("unsupported_asset", "Figure decoder emitted a diagnostic")),
 		);
-		worker.on("message", (message: { asset?: FigureAsset; failed?: boolean }) =>
-			message.asset
-				? finish(null, message.asset)
-				: finish(new CorpusError("unsupported_asset", "Figure could not be rendered safely")),
-		);
-		worker.on("error", () => finish(new CorpusError("unsupported_asset", "Figure decoder failed")));
+		worker.on("message", (message: { asset?: FigureAsset; reason?: RenderFailureReason }) => {
+			if (message.asset) finish(null, message.asset);
+			else {
+				const reason =
+					message.reason && Object.hasOwn(renderFailureMessages, message.reason) ? message.reason : "decoder_failure";
+				finish(
+					reason === "no_render_operators"
+						? new UnsupportedFigureRender(reason)
+						: new CorpusError(
+								"unsupported_asset",
+								`Figure on PDF page ${figure.location.pageNumber} could not be rendered safely: ${renderFailureMessages[reason]} (${reason})`,
+							),
+				);
+			}
+		});
+		worker.on("error", () => finish(new CorpusError("resource_limit", "Figure worker failed or exhausted its heap")));
 		worker.on("exit", () => {
 			if (!settled) finish(new CorpusError("unsupported_asset", "Figure decoder exited without an image"));
 		});
 	});
 }
 async function render(input: RenderInput): Promise<FigureAsset> {
+	let decoderDiagnostic = false;
 	// PDF.js recovery warnings must not become a successful blank/partial image.
 	console.log =
 		console.warn =
 		console.error =
 			() => {
-				throw new Error("Decoder diagnostic");
+				decoderDiagnostic = true;
+				throw new RenderFailure("decoder_diagnostic");
 			};
 	const root = dirname(createRequire(import.meta.url).resolve("pdfjs-dist/package.json"));
 	const assets = (name: string) => join(root, name) + sep;
@@ -220,7 +255,7 @@ async function render(input: RenderInput): Promise<FigureAsset> {
 			base.height !== input.figure.location.pageHeight ||
 			![base.width, base.height].every((n) => Number.isFinite(n) && n > 0 && n <= 100000)
 		)
-			throw new Error("Geometry mismatch");
+			throw new RenderFailure("geometry_mismatch");
 		const [x0, y0, x1, y1] =
 			input.figure.rendering.kind === "crop" ? input.figure.rendering.bounds : [0, 0, base.width, base.height];
 		const width = x1 - x0;
@@ -232,7 +267,7 @@ async function render(input: RenderInput): Promise<FigureAsset> {
 			const canvas = createCanvas(w, h);
 			const viewport = page.getViewport({ scale });
 			const operators = await page.getOperatorList();
-			if (!operators.fnArray.length) throw new Error("No rendering operators");
+			if (!operators.fnArray.length) throw new RenderFailure("no_render_operators");
 			await page.render({
 				canvas: canvas as unknown as HTMLCanvasElement,
 				viewport,
@@ -260,7 +295,10 @@ async function render(input: RenderInput): Promise<FigureAsset> {
 			}
 			scale *= 0.7;
 		}
-		throw new Error("Image budget exceeded");
+		throw new RenderFailure("image_budget");
+	} catch (error) {
+		if (decoderDiagnostic) throw new RenderFailure("decoder_diagnostic");
+		throw error;
 	} finally {
 		await task.destroy();
 	}
@@ -268,7 +306,7 @@ async function render(input: RenderInput): Promise<FigureAsset> {
 if (!isMainThread && (workerData as Partial<RenderInput> | null)?.booksFigureRender === true) {
 	try {
 		parentPort?.postMessage({ asset: await render(workerData as RenderInput) });
-	} catch {
-		parentPort?.postMessage({ failed: true });
+	} catch (error) {
+		parentPort?.postMessage({ reason: error instanceof RenderFailure ? error.reason : "decoder_failure" });
 	}
 }

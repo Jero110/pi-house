@@ -5,6 +5,7 @@ import type {
 	BookId,
 	BookMetadata,
 	Diagnostic,
+	Figure,
 	Heading,
 	MetadataEvidence,
 	MetadataField,
@@ -15,7 +16,7 @@ import type {
 } from "./contracts.ts";
 import { assertPdfLocation, defineSource } from "./contracts.ts";
 import type { FigureAsset } from "./figures.ts";
-import { discoverFigures, renderFigure } from "./figures.ts";
+import { discoverFigures, renderFigure, UnsupportedFigureRender } from "./figures.ts";
 import { assertId, CorpusError, readLocalPdf, sha256 } from "./locations.ts";
 import type { PdfBlock, PdfExtraction, PdfLimits } from "./pdf.ts";
 import { extractPdf, freezeExtraction, pdfExtractor, pdfLimits } from "./pdf.ts";
@@ -75,7 +76,7 @@ export async function publishIngest(
 ): Promise<{ readonly source: SourceVersion; readonly imported: boolean }> {
 	const discovered = discoverFigures(document, store);
 	const passages = chunkPreparedIngest(document, store, discovered, options);
-	const figures = discovered.map((figure) => ({
+	const figures: Figure[] = discovered.map((figure) => ({
 		...figure,
 		linkingEvidence: passages.flatMap((p) => p.figures.filter((link) => link.figureId === figure.id)),
 	}));
@@ -85,10 +86,29 @@ export async function publishIngest(
 		.some((source) => source.versionId === document.source.versionId);
 	// Re-importing identical extraction reuses its immutable ingestion images;
 	// never re-render at query time or silently overwrite a stored generation.
-	for (const figure of figures)
-		figureAssets.push(
-			published ? store.readFigureAsset(document.source, figure.id) : await renderFigure(document.source, figure),
-		);
+	// Resolve/validate a published version once, not once per figure: each stored
+	// payload contains all images, so per-figure reads are quadratic in book size.
+	const persisted = published
+		? new Map(store.readFigureAssets(document.source).map((asset) => [asset.figureId, asset]))
+		: null;
+	for (const figure of figures) {
+		if (persisted) {
+			const asset = persisted.get(figure.id);
+			if (!asset) {
+				const stored = store.listFigures(document.source).find((f) => f.id === figure.id);
+				if (!stored?.unavailable)
+					throw new CorpusError("unsupported_asset", "No persisted image for this figure/version");
+				figures[figures.indexOf(figure)] = { ...figure, unavailable: stored.unavailable };
+			} else figureAssets.push(asset);
+		} else {
+			try {
+				figureAssets.push(await renderFigure(document.source, figure));
+			} catch (error) {
+				if (!(error instanceof UnsupportedFigureRender)) throw error;
+				figures[figures.indexOf(figure)] = { ...figure, unavailable: { status: "unsupported", reason: error.reason } };
+			}
+		}
+	}
 	return store.import({
 		source: document.source,
 		indexConfigurationHash: document.indexConfigurationHash,

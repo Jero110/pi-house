@@ -7,7 +7,14 @@ import { AdapterError, defaultRelevanceGate, loadConfig, relevanceGateFromEnv } 
 import type { Figure, MetadataField, Passage, SourceVersion } from "../src/contracts.ts";
 import { definePassage } from "../src/contracts.ts";
 import { embeddingIdentity } from "../src/embeddings.ts";
-import { type Catalog, canonical, digest, resolveHostedPassage, validateCatalog } from "../src/indexing.ts";
+import {
+	type Catalog,
+	canonical,
+	digest,
+	encodeCatalog,
+	resolveHostedPassage,
+	validateCatalog,
+} from "../src/indexing.ts";
 import { lexicalPolicy } from "../src/lexical.ts";
 import { sha256 } from "../src/locations.ts";
 import { Objects } from "../src/objects.ts";
@@ -105,7 +112,7 @@ async function fixture(t: { after: (fn: () => void) => void }) {
 	const bytes = createCanvas(2, 2).toBuffer("image/png");
 	const { originalPath: _path, ...hostedSource } = source;
 	let catalog: Catalog = validateCatalog({
-		schema: 1,
+		schema: 2,
 		libraryId: "7".repeat(32),
 		commit: "8".repeat(32),
 		embeddingIdentity,
@@ -155,13 +162,17 @@ async function fixture(t: { after: (fn: () => void) => void }) {
 			res.end();
 			return;
 		}
-		const data = req.url?.endsWith("catalog.json")
-			? Buffer.from(canonical(catalog))
-			: req.url?.endsWith("writer.json")
-				? Buffer.from(canonical({ writerId: "7".repeat(32), run: writer }))
-				: corruptFigure
-					? Buffer.from("corrupt")
-					: bytes;
+		const publication = encodeCatalog(catalog, { libraryKey: (name) => `library/${name}` });
+		const shard = publication.shards.find((s) => req.url?.endsWith(s.object.key));
+		const data = shard
+			? shard.bytes
+			: req.url?.endsWith("catalog.json")
+				? Buffer.from(canonical(publication.root))
+				: req.url?.endsWith("writer.json")
+					? Buffer.from(canonical({ writerId: "7".repeat(32), run: writer }))
+					: corruptFigure
+						? Buffer.from("corrupt")
+						: bytes;
 		res.setHeader("x-amz-meta-sha256", sha256(data).slice(7));
 		res.end(data);
 	});
@@ -270,6 +281,7 @@ test("empty local machine searches hosted evidence, deduplicates, caps literal e
 	assert.equal(continuation.nextOffset, null);
 	const image = await fetchHostedFigure(f.objects, f.figure.id);
 	assert.equal(image.figure.location.pageNumber, 2);
+	assert.ok(image.asset);
 	assert.deepEqual(Buffer.from(image.asset.base64, "base64"), f.bytes);
 	assert.equal(image.asset.framing.kind, "full-page-fallback");
 	const before = f.calls();
@@ -312,11 +324,12 @@ test("stale generation/hash/configuration/text and unknown IDs are dropped, neve
 });
 
 test("low relevance, incomplete extraction/publication, runtime/model and backend outages remain distinct", async (t) => {
-	const f = await fixture(t);
+	let f = await fixture(t);
 	f.candidates(f.matches().map((m) => ({ ...m, score: 0.4 })));
 	assert.equal((await searchBooks(f, { query: "embedding_vectors" })).status, "insufficient_evidence");
 	f.pending();
 	assert.equal((await searchBooks(f, { query: "embedding_vectors" })).status, "incomplete_corpus");
+	f = await fixture(t);
 	f.update({
 		...f.catalog(),
 		versions: f.catalog().versions.map((v) => ({
@@ -333,8 +346,15 @@ test("low relevance, incomplete extraction/publication, runtime/model and backen
 		})),
 	});
 	const incomplete = await searchBooks(f, { query: "embedding_vectors" });
-	assert.equal(incomplete.status, "incomplete_corpus");
+	assert.equal(incomplete.status, "ok");
 	assert.equal(incomplete.coverage[0]?.coverage.gaps[0]?.reason, "scanned_page");
+	assert.ok(incomplete.diagnostics.some((d) => d.source && d.message.includes("1 unextracted PDF page(s)")));
+	const candidates = f.matches();
+	f.candidates(candidates.map((m) => ({ ...m, score: 0.2 })));
+	const unrelated = await searchBooks(f, { query: "unrelated planetary geology vs embedding_vectors" });
+	assert.equal(unrelated.status, "insufficient_evidence");
+	assert.ok(unrelated.diagnostics.some((d) => d.message.includes("answer could be on unextracted pages")));
+	f.candidates(candidates);
 	f.runtimeDown("unavailable");
 	const runtime = await searchBooks(f, { query: "embedding_vectors" });
 	assert.equal(runtime.status, "unavailable");
@@ -349,6 +369,15 @@ test("low relevance, incomplete extraction/publication, runtime/model and backen
 	const s = await fixture(t);
 	s.objectsDown();
 	assert.equal((await searchBooks(s, { query: "embedding_vectors" })).status, "unavailable");
+});
+
+test("selected books without searchable published content make the corpus incomplete", async (t) => {
+	const f = await fixture(t);
+	f.update({ ...f.catalog(), versions: f.catalog().versions.map((v) => ({ ...v, passages: {} })) });
+	f.candidates([]);
+	const result = await searchBooks(f, { query: "embedding_vectors" });
+	assert.equal(result.status, "incomplete_corpus");
+	assert.ok(result.diagnostics.some((d) => d.message.includes("no searchable published content")));
 });
 
 test("publication changing during search discards the snapshot rather than returning superseded evidence", async (t) => {

@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { answerableCases, evaluationPdf, unrelatedCases } from "../test/evaluation-fixtures.ts";
 import { embeddingIdentity, LocalEmbeddings } from "./embeddings.ts";
-import { canonical, indexCorpus, loadCatalog } from "./indexing.ts";
+import { canonical, generationPassages, indexCorpus, loadCatalog } from "./indexing.ts";
 import { ingestPdf, publishIngest } from "./ingest.ts";
 import { sha256 } from "./locations.ts";
 import { Objects } from "./objects.ts";
@@ -88,7 +88,7 @@ export async function evaluateSynthetic() {
 					r.unrelatedAbstentions === unrelatedCases.length,
 			),
 			liveEvaluation:
-				"NOT RUN: Ollama not installed; compatible pinned local weights/tokenizer not verified; S3 credentials absent; allowed Pinecone index/private bucket/pricing/remaining allowances not verified",
+				"NOT RUN: synthetic evaluation does not check live Ollama/model/tokenizer, S3 credentials or allowed Pinecone/private bucket/pricing/remaining allowances; run separate operator checks",
 		};
 	} finally {
 		rmSync(root, { recursive: true, force: true });
@@ -157,6 +157,15 @@ async function evaluateConfiguration(root: string, pdf: Uint8Array, targetBound:
 			const records = body().vectors as PineconeRecord[];
 			for (const r of records) vectors.set(r.id, r);
 			return reply({ upsertedCount: records.length });
+		}
+		if (path === "/vectors/list") {
+			const start = Number(parsed.searchParams.get("paginationToken") ?? 0);
+			const ids = [...vectors.keys()].sort();
+			return reply({
+				namespace: "synthetic",
+				vectors: ids.slice(start, start + 100).map((id) => ({ id })),
+				...(ids.length > start + 100 ? { pagination: { next: String(start + 100) } } : {}),
+			});
 		}
 		if (path === "/vectors/fetch")
 			return reply({
@@ -249,7 +258,10 @@ async function evaluateConfiguration(root: string, pdf: Uint8Array, targetBound:
 			const seen = new Set<string>();
 			for (const hit of result.hits) {
 				const read = await readHostedPassage(services, hit.passageId);
-				const expected = store.listPassages(prepared.source).find((p) => p.id === hit.passageId);
+				const expected = generationPassages(
+					store.listPassages(prepared.source),
+					catalog.versions[0]?.generation ?? "",
+				).find((p) => p.id === hit.passageId);
 				provenanceChecks++;
 				if (
 					!expected ||
@@ -279,6 +291,7 @@ async function evaluateConfiguration(root: string, pdf: Uint8Array, targetBound:
 						else {
 							const image = await fetchHostedFigure(objects, link.figureId);
 							if (
+								!image.asset ||
 								image.figure.label !== fixture.figure ||
 								image.figure.location.pageNumber !== fixture.page + 1 ||
 								image.asset.assetHash !== sha256(Buffer.from(image.asset.base64, "base64"))

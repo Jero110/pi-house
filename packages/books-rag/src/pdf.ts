@@ -4,6 +4,7 @@ import { isMainThread, parentPort, Worker, workerData } from "node:worker_thread
 import { getDocument, OPS, Util } from "pdfjs-dist/legacy/build/pdf.mjs";
 import type { PDFDocumentProxy, TextItem } from "pdfjs-dist/types/src/display/api.d.ts";
 import type { Diagnostic, ErrorCode, PdfLocation, TextMapping } from "./contracts.ts";
+import { DiagnosticCollector } from "./diagnostics.ts";
 import { CorpusError, sha256 } from "./locations.ts";
 
 export const pdfLimits = Object.freeze({
@@ -12,7 +13,8 @@ export const pdfLimits = Object.freeze({
 	textBytesPerPage: 4 * 1024 * 1024,
 	itemsPerPage: 100000,
 	outlineEntries: 10000,
-	diagnostics: 100,
+	// Aggregate repeats; reserve a slot for explicit per-code truncation counts.
+	diagnostics: 500,
 	pageMilliseconds: 30000,
 	importMilliseconds: 30 * 60 * 1000,
 });
@@ -98,7 +100,7 @@ export async function extractPdf(bytes: Uint8Array, overrides: Partial<PdfLimits
 			// Node executes .ts directly. Do not replay test-runner/V8/CLI flags
 			// (including --input-type) into this dedicated parser worker.
 			execArgv: [],
-			resourceLimits: { maxOldGenerationSizeMb: 256, maxYoungGenerationSizeMb: 32, stackSizeMb: 8 },
+			resourceLimits: { maxOldGenerationSizeMb: 1024, maxYoungGenerationSizeMb: 32, stackSizeMb: 8 },
 			stdout: true,
 			stderr: true,
 		});
@@ -217,23 +219,21 @@ async function outlines(
 
 async function parsePdf(input: WorkerInput): Promise<PdfExtraction> {
 	const { bytes, limits } = input;
-	const diagnostics: Diagnostic[] = [];
+	const diagnostics = new DiagnosticCollector(limits.diagnostics);
 	let currentLocation: PdfLocation | null = null;
+	let decodingText = false;
 	const gaps = new Map<number, ErrorCode>();
-	const add = (d: Diagnostic) => {
-		if (diagnostics.length >= limits.diagnostics)
-			throw new CorpusError("resource_limit", "PDF diagnostic budget exceeded");
-		diagnostics.push(d);
-		if (d.location && !["uncertain_code", "uncertain_table"].includes(d.code)) gaps.set(d.location.pageNumber, d.code);
-	};
+	const add = (d: Diagnostic) => diagnostics.add(d);
 	// PDF.js logs parser recovery/image warnings instead of always rejecting. Capture
-	// them inside this disposable worker as bounded incomplete-coverage diagnostics;
+	// them inside this disposable worker as bounded quality diagnostics;
 	// never print a library message containing source content into a client session.
 	console.log =
 		console.warn =
 		console.error =
-			() =>
+			() => {
 				add(diagnostic("extraction_failed", "PDF decoder reported recovery or unsupported content", currentLocation));
+				if (decodingText && currentLocation) gaps.set(currentLocation.pageNumber, "extraction_failed");
+			};
 	const root = dirname(createRequire(import.meta.url).resolve("pdfjs-dist/package.json"));
 	const assets = (name: string) => join(root, name) + sep;
 	const task = getDocument({
@@ -253,16 +253,38 @@ async function parsePdf(input: WorkerInput): Promise<PdfExtraction> {
 	});
 	try {
 		const doc = await task.promise;
+		// Owner-password PDFs may open with an empty user password. Do not treat
+		// successful decoding as authorization to ingest encrypted content.
+		const metadata = await doc.getMetadata();
+		const info: unknown = metadata.info;
+		if (
+			(await doc.getPermissions()) !== null ||
+			(info !== null && typeof info === "object" && "EncryptFilterName" in info && info.EncryptFilterName !== null)
+		)
+			throw new CorpusError(
+				"encrypted_pdf",
+				"Encrypted/owner-password PDF is unsupported; no password handling attempted",
+			);
 		if (doc.numPages > limits.pages) throw new CorpusError("resource_limit", "PDF exceeds page budget");
-		// Conservative lexical policy: these bytes are never interpreted as executable
-		// actions, fetched URLs or trusted attachments. False positives remain visible.
+		// Raw bytes can contain literal names or obsolete incremental revisions.
+		// Only parsed current-document content can establish document-wide risk.
 		const raw = Buffer.from(bytes).toString("latin1");
-		const unsafe = /\/(?:JS|JavaScript|OpenAction|AA|Launch|URI|EmbeddedFiles|EmbeddedFile|RichMedia|XFA)\b/.test(raw);
+		const unsafe =
+			(await doc.hasJSActions()) ||
+			Object.keys((await doc.getAttachments()) ?? {}).length > 0 ||
+			(info !== null && typeof info === "object" && "IsXFAPresent" in info && info.IsXFAPresent === true);
 		if (unsafe)
 			add(
 				diagnostic(
 					"unsupported_asset",
 					"Potential active, external or embedded content ignored; source-page fallback required",
+				),
+			);
+		if (/\/(?:URI|OpenAction|AA|JS|JavaScript|Launch|EmbeddedFiles|EmbeddedFile|RichMedia|XFA)\b/.test(raw))
+			add(
+				diagnostic(
+					"unsupported_asset",
+					"Potential link/action/asset names ignored; no destinations followed or URLs fetched",
 				),
 			);
 		const hints = await outlines(doc, limits, add);
@@ -279,7 +301,9 @@ async function parsePdf(input: WorkerInput): Promise<PdfExtraction> {
 				if (![viewport.width, viewport.height].every((n) => Number.isFinite(n) && n > 0 && n <= 100000))
 					throw new CorpusError("resource_limit", "PDF page geometry exceeds budget");
 				currentLocation = location(pageNumber, viewport.width, viewport.height);
+				decodingText = true;
 				const content = await page.getTextContent({ disableNormalization: true });
+				decodingText = false;
 				if (content.items.length > limits.itemsPerPage)
 					throw new CorpusError("resource_limit", "PDF exceeds text item budget");
 				const items: PdfTextItem[] = [];
@@ -328,13 +352,12 @@ async function parsePdf(input: WorkerInput): Promise<PdfExtraction> {
 						location: { ...currentLocation, bounds: axisAligned && x1 > x && y1 > y ? [x, y, x1, y1] : null },
 					});
 				}
-				// Trigger bounded operator decoding too: skipped/unsupported images must
-				// not turn mixed-page extraction into silently complete coverage.
+				// Decode rendering separately: image failures do not imply lost text.
 				const operators = await page.getOperatorList();
 				// Problem: PDF.js 6.4 can resolve an empty operator list after a
 				// stopAtErrors asset failure (e.g. an oversized image), without warning.
 				// Text on that page proves the list cannot describe its rendering.
-				// Preserve the text, but never label that page fully extracted.
+				// Preserve the text and report uncertain rendering, not a text gap.
 				if (items.some((item) => item.text.trim()) && operators.fnArray.length === 0) {
 					add(
 						diagnostic(
@@ -357,12 +380,13 @@ async function parsePdf(input: WorkerInput): Promise<PdfExtraction> {
 					add(
 						diagnostic(
 							"unsupported_asset",
-							"Raster content is not OCR-extracted or trusted as text; mixed-page coverage may be incomplete; inspect source page",
+							"Raster figure content is not OCR-extracted; render the page to view it",
 							currentLocation,
 						),
 					);
 				}
 				if (!items.some((item) => item.text.trim())) {
+					gaps.set(pageNumber, "scanned_page");
 					add(
 						diagnostic(
 							"scanned_page",
@@ -480,21 +504,19 @@ async function parsePdf(input: WorkerInput): Promise<PdfExtraction> {
 				page.cleanup();
 			}
 		}
-		for (const [index, hint] of hints.entries()) {
+		for (const index of hints.keys()) {
 			if (!validated.has(index))
 				add(
 					diagnostic(
 						"extraction_failed",
 						"Outline heading not validated against content and destination position",
-						blocks.find((b) => b.location.pageNumber === hint.page)?.location ?? null,
+						null,
 					),
 				);
 		}
-		if (unsafe || diagnostics.some((d) => d.location === null)) {
+		if (unsafe) {
 			for (let page = 1; page <= doc.numPages; page++) if (!gaps.has(page)) gaps.set(page, "unsupported_asset");
 		}
-		const metadata = await doc.getMetadata();
-		const info: unknown = metadata.info;
 		const value = (key: string) =>
 			info !== null && typeof info === "object" && key in info && typeof Reflect.get(info, key) === "string"
 				? String(Reflect.get(info, key)).slice(0, 4096)
@@ -506,7 +528,7 @@ async function parsePdf(input: WorkerInput): Promise<PdfExtraction> {
 			metadata: { title: value("Title"), author: value("Author") },
 			extractedPages,
 			gaps: [...gaps].map(([pageNumber, reason]) => ({ pageNumber, reason })),
-			diagnostics,
+			diagnostics: diagnostics.finish(),
 		};
 	} finally {
 		await task.destroy();
@@ -543,9 +565,13 @@ export const pdfExtractor = Object.freeze({
 	configurationHash: sha256(
 		JSON.stringify({
 			limits: pdfLimits,
-			adapter: 1,
+			adapter: 4,
+			diagnostics: "code-message-count-page-ranges-32-cap-500-with-truncation",
+			coverage: "text-loss-only",
 			normalization: "per-scalar-NFKC",
-			activeContent: "ignored-diagnostic",
+			activeContent: "parsed-js-attachments-xfa-unsafe-raw-names-diagnostic-only",
+			encryption: "reject-including-owner-password",
+			workerHeapMb: 1024,
 		}),
 	),
 });

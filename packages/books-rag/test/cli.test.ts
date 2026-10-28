@@ -15,6 +15,7 @@ import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { test } from "node:test";
 import { runCli, usage } from "../src/cli.ts";
+import { sha256 } from "../src/locations.ts";
 import { runBooksMcp } from "../src/mcp.ts";
 import { CorpusStore } from "../src/store.ts";
 import { type FakeServices, fakeServices } from "./fake-services.ts";
@@ -229,6 +230,117 @@ test("doctor reports problems read-only; ingest then index make it ready; a read
 	assert.equal(search.status, "ok");
 	assert.equal(search.hits[0]?.locations[0]?.label, "PDF page 1");
 	assert.equal(existsSync(env.BOOKS_DATA_DIR as string), false, "the reader never creates a local store");
+});
+
+test("ask uses configured hosted retrieval, bounded excerpts and JSON without a local store", async (t) => {
+	const root = workspace(t);
+	const fake = await fakeServices();
+	t.after(() => fake.close());
+	const env = settings(fake, root);
+	const input = join(root, "ask.pdf");
+	const text = Array.from({ length: 10 }, (_, i) => `${lines.join(" ")} Record ${i}.`);
+	writeFileSync(
+		input,
+		pdfFixture({
+			title: "Synthetic ask book",
+			pages: [{ geometry: [1200, 1200], text: text.map((text, i) => ({ text, y: 1100 - i * 90 })) }],
+		}),
+	);
+	assert.equal((await run(["ingest", "--input", input], env, root)).code, 0);
+	assert.equal((await run(["index"], env, root)).code, 0);
+	const book = new CorpusStore({ directory: env.BOOKS_DATA_DIR as string }).listVersions()[0]?.bookId;
+	assert.ok(book);
+	rmSync(input);
+	rmSync(env.BOOKS_DATA_DIR as string, { recursive: true });
+	const mark = fake.requests.length;
+	const query = text.join("\n");
+	const found = await run(["ask", query, "--book", book], env, root);
+	assert.equal(found.code, 0, found.err + found.out);
+	assert.match(found.out, /^status: ok\n/u);
+	assert.match(found.out, /Synthetic ask book \| PDF page 1 \| passage_/u);
+	assert.match(found.out, /heading: /u);
+	assert.match(found.out, /score: /u);
+	assert.match(found.out, /excerpt \(untrusted reference\): /u);
+	const structured = await run(["ask", query, "--json", "--book", book], env, root);
+	assert.equal(structured.code, 0, structured.err);
+	const result = JSON.parse(structured.out);
+	assert.equal(result.status, "ok");
+	assert.equal(result.untrustedReferenceData, true);
+	assert.equal(result.hits[0].title, "Synthetic ask book");
+	assert.equal(result.hits[0].bookId, book);
+	assert.equal(result.hits[0].excerpt.length, 400);
+	assert.ok(result.hits[0].scores.dense > 0.78);
+	const unrelated = "Which planets have icy rings and moons?";
+	const absent = await run(["ask", unrelated], env, root);
+	assert.equal(absent.code, 0, absent.err);
+	assert.match(absent.out, /^status: insufficient_evidence\n/u);
+	assert.equal(
+		absent.out.split("\n").filter((l) => l === "No supporting evidence in the library for this question.").length,
+		1,
+	);
+	assert.match(absent.out, /diagnostics: none/u);
+	assert.equal(JSON.parse((await run(["ask", unrelated, "--json"], env, root)).out).status, "insufficient_evidence");
+	const loose = await run(
+		["ask", unrelated, "--json"],
+		{
+			...env,
+			BOOKS_RELEVANCE_FLOOR: "0.01",
+			BOOKS_RELEVANCE_MARGIN: "0.05",
+		},
+		root,
+	);
+	const configured = JSON.parse(loose.out);
+	assert.equal(configured.gate.version, "operator-cosine-v1");
+	assert.equal(configured.gate.minimumScore, 0.01);
+	assert.equal(configured.gate.maximumDrop, 0.05);
+	assert.equal(configured.status, "ok");
+	assert.equal(existsSync(env.BOOKS_DATA_DIR as string), false);
+	assert.deepEqual(
+		fake.requests.slice(mark).filter((r) => /^(PUT|DELETE|PATCH) /u.test(r) || /\/vectors\/(upsert|delete)/u.test(r)),
+		[],
+	);
+	noSecrets(found.out + structured.out + absent.out + loose.out);
+});
+
+test("ask distinguishes incomplete publication and unavailable services from no evidence", async (t) => {
+	const root = workspace(t);
+	const fake = await fakeServices();
+	t.after(() => fake.close());
+	const env = settings(fake, root);
+	const input = join(root, "good.pdf");
+	writeFileSync(input, samplePdf());
+	assert.equal((await run(["ingest", "--input", input], env, root)).code, 0);
+	assert.equal((await run(["index"], env, root)).code, 0);
+	const claimKey = [...fake.storage.keys()].find((k) => k.endsWith("writer.json"));
+	assert.ok(claimKey);
+	const bytes = Buffer.from(JSON.stringify({ schema: 1, writerId: "f".repeat(32), run: "f".repeat(32), base: null }));
+	fake.storage.set(claimKey, { bytes, hash: sha256(bytes).slice(7) });
+	for (const json of [false, true]) {
+		const partial = await run(["ask", lines.join("\n"), ...(json ? ["--json"] : [])], env, root);
+		assert.equal(partial.code, 1, partial.err);
+		assert.doesNotMatch(partial.out, /No supporting evidence/u);
+		assert.match(partial.out, /incomplete_corpus/u);
+		assert.match(partial.out, /index_incomplete/u);
+		if (json) assert.equal(JSON.parse(partial.out).status, "incomplete_corpus");
+	}
+	const down = { ...env, OLLAMA_URL: "http://127.0.0.1:1" };
+	for (const json of [false, true]) {
+		const unavailable = await run(["ask", lines.join("\n"), ...(json ? ["--json"] : [])], down, root);
+		assert.equal(unavailable.code, 1);
+		assert.match(unavailable.out, /unavailable/u);
+		assert.match(unavailable.out, /runtime_unavailable/u);
+		assert.doesNotMatch(unavailable.out, /No supporting evidence/u);
+		if (json) assert.equal(JSON.parse(unavailable.out).status, "unavailable");
+		noSecrets(unavailable.out + unavailable.err);
+	}
+	for (const argv of [
+		["ask"],
+		["ask", " "],
+		["ask", "x", "extra"],
+		["ask", "x", "--book", "bad"],
+		["ask", "x".repeat(1801)],
+	])
+		assert.equal((await run(argv, env, root)).code, 2);
 });
 
 test("doctor names bad .env lines without values, lists missing keys, and flags a public bucket", async (t) => {
