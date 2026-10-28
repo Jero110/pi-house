@@ -298,6 +298,10 @@ Finds and reads agent sessions, arranges cmux and drives its browser.
 | Workspaces | `list_workspaces`, `current_workspace`, `select_workspace`, `new_workspace`, `rename_workspace`, `close_workspace` (shows the contents first, asks before closing running agents), `tree`, `identify` |
 | Browser | `browser`: navigate, snapshot, click, type, wait, tabs, console, screenshots |
 
+## Books library (optional)
+
+An opt-in, read-only MCP server and CLI over a private PDF library: passage text in your Pinecone index, figures in your private S3 bucket, embeddings from a local Ollama model. It is never started by pihouse, ingests nothing on its own and adds nothing to session context. Setup for pihouse, Claude Code and Codex, costs, recovery and what is and is not verified: [Books RAG operator guide](docs/books-rag.md).
+
 ## Architecture
 
 ```mermaid

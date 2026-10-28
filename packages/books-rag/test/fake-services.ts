@@ -9,6 +9,8 @@ export interface FakeServices {
 	readonly requests: string[];
 	readonly vectors: Map<string, PineconeRecord>;
 	readonly storage: Map<string, { bytes: Buffer; hash: string }>;
+	/** Set a status to make every Pinecone upsert fail with it, then null to recover. */
+	readonly faults: { upsertStatus: number | null };
 	close(): Promise<void>;
 }
 
@@ -20,6 +22,7 @@ export async function fakeServices(options: { readonly publicProbe?: boolean } =
 	const vectors = new Map<string, PineconeRecord>();
 	const storage = new Map<string, { bytes: Buffer; hash: string }>();
 	const requests: string[] = [];
+	const faults: { upsertStatus: number | null } = { upsertStatus: null };
 	let url = "";
 	const server: Server = createServer(async (req, res) => {
 		const parsed = new URL(req.url ?? "/", url);
@@ -81,6 +84,11 @@ export async function fakeServices(options: { readonly publicProbe?: boolean } =
 				spec: { serverless: { cloud: "aws", region: "us-east-1" } },
 				status: { ready: true },
 			});
+		if (path === "/vectors/upsert" && faults.upsertStatus !== null) {
+			res.statusCode = faults.upsertStatus;
+			res.end();
+			return;
+		}
 		if (path === "/vectors/upsert") {
 			const records = body().vectors as PineconeRecord[];
 			for (const r of records) vectors.set(r.id, r);
@@ -127,6 +135,7 @@ export async function fakeServices(options: { readonly publicProbe?: boolean } =
 		requests,
 		vectors,
 		storage,
+		faults,
 		close: async () => {
 			server.closeAllConnections();
 			await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));

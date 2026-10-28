@@ -76,3 +76,21 @@ JSONL) into one shape: messages with role, text, model, token usage, time per an
   writes a report to `~/.pihouse/reports/`. The numbers are computed; the session's model then writes the summary and the
   recommendations from them.
 - `ask` gives the model the architecture, the skills catalog and what is installed here, then the question.
+
+## Books library
+
+```mermaid
+flowchart LR
+  O([Operator on one writer machine]) --> C[books-rag CLI: ingest, index]
+  C --> X[(Local working store: SQLite)]
+  C -->|embeddings, loopback only| E[Local Ollama, pinned model]
+  C -->|vectors + passage text| PC[(Pinecone: your index and namespace)]
+  C -->|figures + catalog| S3[(Private S3 bucket)]
+  A[Agent on any machine] -->|explicit search / read / figure| M[books MCP: read-only]
+  M -->|query embedding| E2[Local Ollama, same model]
+  M --> PC
+  M --> S3
+  M -->|bounded cited evidence| A
+```
+
+The books library is a separate opt-in workspace, `packages/books-rag`, not part of the hub or the pihouse extensions. Only the writer machine holds the working store and the original PDFs; originals are never uploaded. Readers need the env file, the same local model and the MCP entry, nothing else. Hosted records are verified against a generation-based catalog, so an incomplete publication reads as `incomplete_corpus`, not mixed results. Book text resides in two third-party services and returned evidence can reach the agent's provider. Nothing is ingested or injected at startup. See the [operator guide](books-rag.md) and [ADR-003](decisions/ADR-003-books-rag.md).

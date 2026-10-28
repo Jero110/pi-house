@@ -41,6 +41,16 @@ Before real access, the operator verifies pricing, account entitlement and remai
 
 The following T1 alternatives/consequences are historical where they conflict with this explicit amendment; hosted extracted text/figures are now approved, hosted originals/cloud embeddings remain forbidden.
 
+## Operational decisions (T10)
+
+- **PDF only.** EPUB stays deferred; other formats are rejected per file.
+- **Hosted text and figures.** Passage text and citations live in Pinecone metadata, figures and the catalog in a private S3-compatible bucket; originals are never hosted and are optional after ingestion. Readers need no local store.
+- **Single writer.** One machine runs `ingest` and `index`; the writer claim detects conflicts and is never stolen automatically.
+- **Record schema 2.** Compact lossless metadata; schema-1 records are refused and require `index` to republish.
+- **Production chunk bound 1800** conservative units (UTF-8 bytes plus 32 against the 2048 limit), chosen so the largest measured record stays under the 32 KB budget; it is not measured tokens.
+- **Clients connect manually.** Setup is documented as commands and config fragments in the [operator guide](../books-rag.md) with the env file path (`BOOKS_ENV_FILE`), not inline secrets. No setup command edits client or pi configuration.
+- **Verification scope.** An offline integration test covers the real CLI and MCP over loopback fakes. Real Ollama, Pinecone, Supabase and client runs are not done and are reported as pending.
+
 ## Alternatives considered
 
 The EPUB alternatives below preserve earlier research history only. They are deferred by the subsequent PDF-only authorization, not pending current-version adoption or further dependency research.
@@ -57,6 +67,6 @@ The EPUB alternatives below preserve earlier research history only. They are def
 This does **not** reverse ADR-001/ADR-002's rejection of hosted search for workflow memory. Workflow memory has local canonical documents and scoped learning/approval operations and remains local. Books are a separately approved, larger external-source corpus with a specifically authorized vector-only hosted candidate boundary. No workflow data or operational tables migrate to Pinecone.
 
 ## Consequences
-T1 PDF-only research stops PASS, awaiting executor verification; T2–T11 remain unstarted. No root/package versions, dependency manifests, production code, user settings or pi files changed. The approved map/spec/plan baseline is preserved separately from these research findings. The executor ledger is not owned or committed by this task.
+T1 PDF-only research passed (historical statement; the implementation exists since and T10 documents it). No root/package versions, dependency manifests, production code, user settings or pi files changed. The approved map/spec/plan baseline is preserved separately from these research findings. The executor ledger is not owned or committed by this task.
 
 The initial hard-two-package blocker rationale is withdrawn, and the remaining EPUB blocker is removed only by the user's explicit format-scope amendment. PDF feasibility on macOS arm64 is measured and conservative token budgeting is source-backed. EPUB remains deferred, not validated. Real-book extraction, installed local embeddings/tokenizer equivalence, Pinecone account eligibility/remaining quotas and client image behavior remain unmeasured. Missing optional live prerequisites remain pending, not invented success. All mandatory later synthetic evaluation and extraction/rendering safety gates still apply. The user explicitly reinforced full PDF-only T1–T11 delivery: offline ingest→chunks→fake-endpoint index→search→verified read→next-page figure plus unrelated abstention and failure/privacy/output-budget checks, and supplied-PDF pages 169–174 inspection when available. This is not an extraction-only feature or completion claim. EPUB implementation/testing remains deferred; live smoke checks require already available compatible prerequisites and verified allowed resources or are reported pending. No resource creation, payment, cloud corpus upload, model download or automatic T2 execution follows this ADR.
