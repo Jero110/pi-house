@@ -20,8 +20,17 @@ import { answersText, pickedSkillsText, showPicker, skillPickerQuestion } from "
 import { askContext, latestReport, reviewFileName, reviewInstructions } from "../src/extensions/workflow.ts";
 import { piCommand, runPihouse, withSkillsDir } from "../src/launcher.ts";
 import { LOGO_WIDTH, logoLines } from "../src/logo.ts";
-import { EXTENSIONS, PI_CLI, pihousePaths, SKILL_GROUP_DIRS, SKILLS_DIR, THEME } from "../src/paths.ts";
-import { BRIDGE_SOURCE, ensureAgentDir, ensureBridge, readConfig, setup, writePihouseProfile } from "../src/setup.ts";
+import { BOOKS_MCP, EXTENSIONS, PI_CLI, pihousePaths, SKILL_GROUP_DIRS, SKILLS_DIR, THEME } from "../src/paths.ts";
+import {
+	BRIDGE_SOURCE,
+	ensureAgentDir,
+	ensureBridge,
+	nodeRunsBooks,
+	readConfig,
+	setup,
+	teardown,
+	writePihouseProfile,
+} from "../src/setup.ts";
 import { catalogReadme, readCatalog, skillPath } from "../src/workflow/catalog.ts";
 import { renderReport } from "../src/workflow/report.ts";
 import { briefOf, buildRun, pickRoot } from "../src/workflow/run.ts";
@@ -167,8 +176,123 @@ test("setup: cmux adds the cmux MCP to pihouse and records the backend; tmux tak
 	assert.ok(lines.some((l) => /claude: not found on PATH, skipped/.test(l)));
 
 	setup({ paths, backend: "tmux", home, env, out: () => {} });
-	assert.deepEqual(JSON.parse(readFileSync(join(paths.agentDir, "mcp.json"), "utf8")).mcpServers, {});
+	assert.deepEqual(Object.keys(JSON.parse(readFileSync(join(paths.agentDir, "mcp.json"), "utf8")).mcpServers), [
+		"books",
+	]);
 	assert.deepEqual(readConfig(paths), { backend: "tmux" });
+});
+
+const mcpFile = (paths: { agentDir: string }) => join(paths.agentDir, "mcp.json");
+const servers = (paths: { agentDir: string }) => JSON.parse(readFileSync(mcpFile(paths), "utf8")).mcpServers;
+const seedMcp = (paths: { agentDir: string }, mcpServers: unknown) => {
+	mkdirSync(paths.agentDir, { recursive: true });
+	writeFileSync(mcpFile(paths), JSON.stringify({ other: 1, mcpServers }));
+};
+
+test("setup registers the books MCP by default: this checkout's server, only the env file path, cmux kept", (t) => {
+	const { home, env } = tempHome(t);
+	const paths = pihousePaths({ ...env, BOOKS_ENV_FILE: "/ops/books.env" }, home);
+	seedMcp(paths, { mine: { command: "x" } });
+	setup({
+		paths,
+		backend: "cmux",
+		home,
+		env: { ...env, BOOKS_ENV_FILE: "/ops/books.env" },
+		out: () => {},
+		nodeVersion: "26.11.1",
+	});
+	const s = servers(paths);
+	assert.deepEqual(Object.keys(s).sort(), ["books", "cmux", "mine"]);
+	assert.deepEqual(s.books.args, [BOOKS_MCP]);
+	assert.match(BOOKS_MCP, /packages\/books-rag\/src\/mcp\.ts$/);
+	assert.deepEqual(s.books.env, { BOOKS_ENV_FILE: "/ops/books.env" });
+	assert.equal(s.books.exposure, "direct");
+	assert.equal(JSON.parse(readFileSync(mcpFile(paths), "utf8")).other, 1);
+	assert.ok(!readFileSync(mcpFile(paths), "utf8").includes("PINE_CONE"));
+});
+
+test("setup books: explicit env file path, no env when none, and repeated setup changes nothing", (t) => {
+	const { home, env } = tempHome(t);
+	const paths = pihousePaths(env, home);
+	setup({ paths, backend: "tmux", home, env, out: () => {}, nodeVersion: "27.0.0" });
+	assert.equal(servers(paths).books.env, undefined);
+	setup({ paths, backend: "tmux", home, env, out: () => {}, nodeVersion: "27.0.0", booksEnvFile: "/ops/b.env" });
+	assert.deepEqual(servers(paths).books.env, { BOOKS_ENV_FILE: "/ops/b.env" });
+	const before = readFileSync(mcpFile(paths), "utf8");
+	const lines: string[] = [];
+	setup({
+		paths,
+		backend: "tmux",
+		home,
+		env,
+		out: (l) => lines.push(l),
+		nodeVersion: "27.0.0",
+		booksEnvFile: "/ops/b.env",
+	});
+	assert.equal(readFileSync(mcpFile(paths), "utf8"), before);
+	assert.ok(!lines.some((l) => /books MCP|books entry/.test(l)));
+});
+
+test("setup keeps an operator's own books entry, also when it was edited after pihouse wrote it", (t) => {
+	const { home, env } = tempHome(t);
+	const paths = pihousePaths(env, home);
+	const custom = { command: "/my/node", args: ["/my/mcp.ts"], env: { BOOKS_ENV_FILE: "/mine" } };
+	seedMcp(paths, { books: custom });
+	const lines: string[] = [];
+	setup({ paths, backend: "tmux", home, env, out: (l) => lines.push(l), nodeVersion: "26.11.1" });
+	assert.deepEqual(servers(paths).books, custom);
+	assert.ok(lines.some((l) => /kept your own books entry/.test(l)));
+	teardown({ paths, home, env, out: () => {} });
+	assert.deepEqual(servers(paths).books, custom);
+
+	const second = tempHome(t);
+	const p2 = pihousePaths(second.env, second.home);
+	setup({ paths: p2, backend: "tmux", home: second.home, env: second.env, out: () => {}, nodeVersion: "26.11.1" });
+	const edited = { ...servers(p2).books, env: { BOOKS_ENV_FILE: "/edited" } };
+	writeFileSync(mcpFile(p2), JSON.stringify({ mcpServers: { books: edited } }));
+	setup({ paths: p2, backend: "tmux", home: second.home, env: second.env, out: () => {}, nodeVersion: "26.11.1" });
+	teardown({ paths: p2, home: second.home, env: second.env, out: () => {} });
+	assert.deepEqual(servers(p2).books, edited);
+});
+
+test("uninstall removes only the entries pihouse wrote and keeps the others", (t) => {
+	const { home, env } = tempHome(t);
+	const paths = pihousePaths(env, home);
+	seedMcp(paths, { mine: { command: "x" } });
+	setup({ paths, backend: "cmux", home, env, out: () => {}, nodeVersion: "26.11.1" });
+	assert.ok(existsSync(join(paths.home, "install-books.json")));
+	teardown({ paths, home, env, out: () => {} });
+	assert.deepEqual(servers(paths), { mine: { command: "x" } });
+	assert.ok(!existsSync(join(paths.home, "install-books.json")));
+});
+
+test("--no-books and an unsupported Node leave mcp.json alone, with a warning for the Node", (t) => {
+	const { home, env } = tempHome(t);
+	const paths = pihousePaths(env, home);
+	setup({ paths, backend: "tmux", home, env, out: () => {}, noBooks: true, nodeVersion: "26.11.1" });
+	assert.equal(servers(paths).books, undefined);
+	const lines: string[] = [];
+	setup({ paths, backend: "tmux", home, env, out: (l) => lines.push(l), nodeVersion: "24.4.0" });
+	assert.equal(servers(paths).books, undefined);
+	assert.ok(lines.some((l) => /books MCP not registered: it needs Node >= 26\.11\.1 and this is 24\.4\.0/.test(l)));
+	// A pihouse-owned entry survives a later setup on an old Node, and uninstall still removes it.
+	setup({ paths, backend: "tmux", home, env, out: () => {}, nodeVersion: "26.11.1" });
+	setup({ paths, backend: "tmux", home, env, out: () => {}, nodeVersion: "24.4.0" });
+	assert.ok(servers(paths).books);
+	teardown({ paths, home, env, out: () => {} });
+	assert.equal(servers(paths).books, undefined);
+});
+
+test("nodeRunsBooks compares against 26.11.1", () => {
+	for (const [v, ok] of [
+		["24.0.0", false],
+		["26.11.0", false],
+		["26.10.9", false],
+		["26.11.1", true],
+		["26.12.0", true],
+		["27.0.0", true],
+	] as const)
+		assert.equal(nodeRunsBooks(v), ok, v);
 });
 
 test("as an agent (AGENT_LINK_AGENT set) pihouse runs pi with its config dir and extensions", async (t) => {

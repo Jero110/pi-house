@@ -1,8 +1,8 @@
 # Books RAG operator guide
 
-An optional, opt-in private library of PDF books for pihouse, Claude Code and Codex. One writer machine ingests
+A private library of PDF books for pihouse, Claude Code and Codex. One writer machine ingests
 and publishes; any of your machines then reads through a stdio MCP server. Nothing in this package runs at pihouse
-startup, ingests on its own, or injects library text into a session. Design record: [ADR-003](decisions/ADR-003-books-rag.md),
+startup (the MCP entry only lets a session call it when asked), ingests on its own, or injects library text into a session. Design record: [ADR-003](decisions/ADR-003-books-rag.md),
 research and sources: [books-rag-research.md](books-rag-research.md), measurements: [books-rag-evaluation.md](books-rag-evaluation.md).
 
 ## What is verified, and what is not
@@ -146,9 +146,9 @@ those with the committed hosted catalog and lists the passage IDs that are no lo
 `--yes`; with it, it deletes exactly those explicit IDs inside the configured namespace (never by filter or namespace) and
 removes the saved files. It refuses to run while a publication is pending. Hosted figure objects in the bucket are not pruned.
 
-## Connect a client (opt-in, manual)
+## Connect a client
 
-Nothing below is run for you. Replace `<CHECKOUT>` with the absolute path of this checkout and
+**pihouse** gets the server by default from `pih setup` (see below). Everything else on this page is manual: nothing is run for you. Replace `<CHECKOUT>` with the absolute path of this checkout and
 `<ENV>` with the absolute path of your env file. Pass only the **path** to the env file; the secrets stay in that
 `chmod 600` file instead of in client configuration. The command is always
 `node <CHECKOUT>/packages/books-rag/src/mcp.ts` (use the absolute path of a Node >= 26.11.1 binary if `node` on the
@@ -177,23 +177,23 @@ args = ["<CHECKOUT>/packages/books-rag/src/mcp.ts"]
 env = { BOOKS_ENV_FILE = "<ENV>" }
 ```
 
-**pihouse** (`~/.pihouse/agent/mcp.json`; add this entry to the existing `mcpServers` object, remove it to disconnect)
+**pihouse** (default). `pih setup` adds this entry to `~/.pihouse/agent/mcp.json` (`setup.ts`, `registerBooks`), running the
+installed checkout's `packages/books-rag/src/mcp.ts` with the Node on `PATH`:
 
 ```json
-{
-  "mcpServers": {
-    "books": {
-      "command": "node",
-      "args": ["<CHECKOUT>/packages/books-rag/src/mcp.ts"],
-      "env": { "BOOKS_ENV_FILE": "<ENV>" },
-      "exposure": "direct",
-      "description": "Search and read the private PDF library"
-    }
-  }
-}
+"books": { "command": "<node>", "args": ["<CHECKOUT>/packages/books-rag/src/mcp.ts"], "env": { "BOOKS_ENV_FILE": "<ENV>" }, "exposure": "direct", "description": "..." }
 ```
 
-`pih setup` and `pih uninstall` do not touch this entry. The server starts with an empty local store and, if
+- `env` is written only when `BOOKS_ENV_FILE` is set in the environment of `pih setup`, or you pass `pih setup --books-env-file <path>`.
+  Only the path is stored, never secrets. Without it the server starts and every tool answers with a `configuration` error until you set it.
+- Setup is idempotent and keeps other servers (cmux, yours). It writes only when `books` is absent or still exactly what pihouse
+  recorded in `~/.pihouse/install-books.json`; an entry you wrote or edited is kept, and reported as such.
+- `pih uninstall` removes the entry only under that same condition. `pih setup --no-books` skips registration.
+- On Node older than 26.11.1 setup warns and changes nothing (existing entries stay); the rest of pihouse needs only Node >= 24.
+- Registration starts nothing: no ingestion, no retrieval, no text in session context. You ask for it with `/skill:ask-books`
+  or by naming the `books_*` tools.
+
+The server starts with an empty local store and, if
 configuration is wrong, still starts and answers each tool call with an explicit `configuration` error. To confirm
 without a client, run `doctor`. The tools are `books_list`, `books_search`, `books_read` and `books_figure`.
 

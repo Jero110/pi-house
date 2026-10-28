@@ -298,9 +298,9 @@ Finds and reads agent sessions, arranges cmux and drives its browser.
 | Workspaces | `list_workspaces`, `current_workspace`, `select_workspace`, `new_workspace`, `rename_workspace`, `close_workspace` (shows the contents first, asks before closing running agents), `tree`, `identify` |
 | Browser | `browser`: navigate, snapshot, click, type, wait, tabs, console, screenshots |
 
-## Books library (optional)
+## Books library
 
-An opt-in, read-only MCP server and CLI over a private PDF library: passage text in your Pinecone index, figures in your private S3 bucket, embeddings from a local Ollama model. It is never started by pihouse, ingests nothing on its own and adds nothing to session context. Setup for pihouse, Claude Code and Codex, costs, recovery and what is and is not verified: [Books RAG operator guide](docs/books-rag.md).
+A read-only MCP server and CLI over a private PDF library: passage text in your Pinecone index, figures in your private S3 bucket, embeddings from a local Ollama model. A new `pih setup` registers the server with pihouse by default (needs Node >= 26.11.1, else setup warns and skips it; `--no-books` leaves it out; `--books-env-file <path>` or an inherited `BOOKS_ENV_FILE` points it at your env file). Claude Code and Codex are still configured by hand. pihouse never ingests, never searches on its own and adds no library text to session context; without an env file the tools answer with a configuration error. Setup for pihouse, Claude Code and Codex, costs, recovery and what is and is not verified: [Books RAG operator guide](docs/books-rag.md).
 
 ## Architecture
 
@@ -387,7 +387,7 @@ call real models. Security reports go through [SECURITY.md](SECURITY.md); everyo
 ## Uninstall
 
 ```bash
-pih uninstall             # removes the MCP registrations and the pihouse profile
+pih uninstall             # removes the MCP registrations (a books entry you edited stays) and the pihouse profile
 rm -rf ~/.pihouse ~/.local/bin/pih ~/.local/bin/pihouse ~/.local/bin/agent-link
 ```
 
