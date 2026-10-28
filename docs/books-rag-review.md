@@ -102,3 +102,28 @@ Fix: check `schema` first with an explicit `identity_mismatch` ("hosted record s
 - **Effective models (ledger):** T2-T8 `openai-codex/gpt-6.1-sol` (pihouse, quota limited); user-authorized switch to `claude-bridge/claude-sonnet-5-5` from T9 (T9, T9-fix, T10); this review `claude-bridge/claude-sonnet-5-5`.
 - **Test results:** see Validation; 737/737, check clean, synthetic evaluation passed.
 - **Next:** executor sends M1-M3 (and the cheap minors m3, m6 docs) to a builder, revalidates, then requests re-review. Optional operator checks stay labeled pending; they do not block, but nothing above should be reported as validated live.
+
+## Re-review (HEAD `56baf3c`; fixes `2db21ad`, `dd90e50`, `56baf3c`)
+
+**Status: PASS.** No critical or major finding remains. Reviewer validation: `npm run check` clean (254 files), `npm test` 745/745, `evaluate --synthetic` passed (recall@5 1.0, 10/10 abstentions, gate `synthetic-cosine-v1`), `git diff --check` clean, pinned-deps pass. No source or test file was modified by this review.
+
+| Finding | Status | Evidence |
+|---|---|---|
+| M1 changed original is a separate book | **Resolved** | Ingest A, overwrite the file, `ingest --input P --book <A>`: 2 versions, 1 current (before: 2 current, old unreadable). Without `--book` the CLI still creates a new book but prints a note with the exact `--book` command for the same recorded path; supersede is explicit only (no title matching). `index` now skips a `source_changed` version by name (`indexing.ts:~235`) and publishes the rest; it fails if every version is skipped. Integration test `integration.test.ts:459` covers skip, unknown `--book`, supersede, repeat. Doc corrected. |
+| M2 gate not recalibratable / undocumented | **Resolved** | `BOOKS_RELEVANCE_FLOOR`/`_MARGIN` validated as plain decimals (`config.ts`), any override reports `operator-cosine-v1`; every `books_search` result carries `gate.version/minimumScore/maximumDrop`; the guide has a "Live recalibration (pending operator step)" section. The default stays frozen. The live calibration itself is still **pending** and unmeasured. |
+| M3 schema-1 misreported | **Resolved** | Reviewer's fake-Pinecone repro no longer throws: `fetch`/`query` return the record (`hostedMetadata` read mode checks schema first). Search drops that candidate with an `identity_mismatch` diagnostic naming `index` as the remedy, marks the corpus incomplete and keeps valid schema-2 hits (`integration.test.ts:437`); `books_read` reports the same message. Writes stay strict. |
+| m1 chunk-bound dead end | **Resolved** | `ingest --chunk-bound` / `BOOKS_CHUNK_BOUND`, 100-1800, regex-validated; bound is part of version identity (`--chunk-bound 5000` exits 2, `400` succeeds). |
+| m2 prune unreachable | **Resolved** | `prune` is dry-run by default; `--yes` deletes only IDs in saved previous catalogs minus the committed catalog, via explicit-ID deletes in the configured namespace; refuses while the catalog is missing or a publication is pending; saved catalogs are mode-0600, validated, same-library checked. Figure objects in S3 are not pruned (documented). |
+| m3 model-rebuild doc | **Resolved** | Rewritten accurately (generation changes, version ID does not). |
+| m5 final budget guard | **Resolved** | `withinBudget` wraps list, search and figure metadata; read already had one. Oversize returns `resource_limit` rather than a large response. |
+| m6 env permissions / discover trust | **Resolved** | `doctor` warns when the env file is group/world readable (`cli.test.ts:269-273`); the guide documents the bucket trust boundary and `discover` scope. |
+| m4 search latency | Open, accepted | Now documented as a known limit; unchanged (about 10 s at 20 books). |
+
+**No new regression found** in privacy (no new hosted fields; prune and previous-catalog files are local only, 0600), budgets (guard added, none loosened; the gate override can only be set by the operator through the env file, not by a tool argument) or stale evidence (superseded and skipped versions are absent from the catalog, so readers cannot be served them).
+
+**New minor observations (non-blocking):**
+- `prune --yes` does not take the index lock or writer claim; it checks the catalog is complete first, so running it while another `index` starts is a small race under the single-writer assumption. Run it only when no `index` is active.
+- Skipping a changed-original book removes it from the catalog (documented), and `prune` would then offer its hosted IDs; the dry run exists for that reason. Restore the original or supersede it before pruning if the book should stay.
+- `prune` opens `CorpusStore` and so creates the local store directory if absent; harmless on the writer, avoid on reader machines.
+
+Operator prerequisites and the "not measured" list above are unchanged: no live Ollama, Pinecone, Supabase or client run exists, and the live relevance threshold is still uncalibrated.
