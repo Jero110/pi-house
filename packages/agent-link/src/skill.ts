@@ -5,7 +5,7 @@ export const SKILL_NAME = "agent-link";
 
 export const SKILL_MD = `---
 name: agent-link
-description: Launch other coding agents (claude, codex, opencode, pihouse, pi) in their own terminal panes and talk to them with the agent-link tools spawn, send, permit, reply, status, cancel, model and inbox; read what any agent did from its transcript. Use when a task splits into parts that can run in parallel, needs research or a second opinion, the user asks for another agent or model, or asks what another agent or pane did.
+description: Launch other coding agents (claude, codex, opencode, pihouse, pi) in their own terminal panes and talk to them with the agent-link tools spawn, send, permit, reply, status, cancel, model, replace and inbox; read what any agent did from its transcript. Use when a task splits into parts that can run in parallel, needs research or a second opinion, the user asks for another agent or model, or asks what another agent or pane did.
 ---
 
 # agent-link
@@ -39,7 +39,8 @@ Use that exact name with send and cancel; status lists the names around you.
 
 ## Changing a worker's model
 
-Only the agent above a worker can change its model, with model({ to, model }). The model is an exact \`<provider>/<id>\`
+An agent above a worker can change its model, with model({ to, model }), and an agent can switch its own model with
+model({ to: "<your name>", model }) (it applies at your next idle boundary; retry and interrupt are refused for yourself). The model is an exact \`<provider>/<id>\`
 that the user has configured (e.g. \`anthropic/claude-sonnet-5-5\`): never guess one, and pick one yourself only when the
 user or the plan named it.
 
@@ -52,8 +53,11 @@ user or the plan named it.
   on the new model with one continuation message; the original task is not sent again. The answer says whether the task
   continued and, if not, why. A turn that ended on its own before the cancel has nothing to continue.
 - retry and interrupt cannot be combined.
-- Only pi, pihouse and opencode workers switch. A Claude Code, Codex or paste worker refuses: cancel it and spawn a new one
-  with the model. An exited worker cannot be switched or retried either: spawn a new one.
+- Only pi, pihouse and opencode workers switch. A Claude Code, Codex or paste worker refuses: use
+  replace({ to, harness, model, notes }). It fences the old worker, closes it and confirms it exited, then starts a
+  replacement in the same folder with the original task, the old worker's last text as untrusted progress notes and the
+  repository state before and after; the old worker's children move to it and its late output is dropped. If the exit is
+  not confirmed, nothing is spawned. An exited worker cannot be switched or replaced: spawn a new one.
 - A switch does not bypass quota. Before you pick a model whose account may be out of quota, check pihouse's
   account_usage tool when you have it.
 

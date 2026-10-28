@@ -138,7 +138,7 @@ flowchart LR
   R -. optional context monitor: recommendation only .-> H
 ```
 
-The [architecture guide](docs/architecture.md) explains responsibility boundaries and limitations. These diagrams distinguish code decisions, model work, persistent state, and human authorization; they do not claim universal quota visibility or cross-harness fenced continuation.
+The [architecture guide](docs/architecture.md) explains responsibility boundaries and limitations. These diagrams distinguish code decisions, model work, persistent state, and human authorization; they do not claim universal quota visibility, and cross-harness continuation is the explicit, fenced `replace` tool, never an automatic switch.
 
 ## Skills
 

@@ -86,7 +86,7 @@ flowchart LR
 
 The MCP `model` tool permits self-targeting or ancestor-to-worker changes using exact configured model IDs. Busy self-switches wait for the next native idle boundary and cannot use `retry` or `interrupt`, avoiding cancellation or replay of their own request. Registered pull roots without adapter-side `setModel` refuse safely.
 
-The router does not imply universal quota visibility. Switching is limited to verified native same-harness support; it does not promise cross-harness fenced continuation. Optional context monitoring is opt-in and requires manual application; no automatic model switch occurs.
+The router does not imply universal quota visibility. In-place switching is limited to verified native support (pi, pihouse, opencode); other harnesses use the fenced `replace` tool described below, which the router does not trigger automatically. Optional context monitoring is opt-in and requires manual application; no automatic model switch occurs.
 
 ## Workflow implementation
 
@@ -96,6 +96,7 @@ The router does not imply universal quota visibility. Switching is limited to ve
 
 - **pihouse:** `packages/pihouse` runs pinned pi with extensions for identity/title, status, compact tools, workflow commands, account usage, and login integration. Its configuration is isolated under `~/.pihouse/agent`; plain pi is untouched.
 - **agent-link:** a local hub, MCP tools, harness adapters, pane backends and journal. A worker result is delivered to its parent; hub lifecycle and memory lifecycle are distinct.
+- **Fenced replacement (`replace`):** for a worker whose harness cannot switch its model (Claude Code, Codex, paste), an ancestor fences it, closes it and confirms the exit (record exited and, when its pid is known, the process gone; bounded wait), then starts one replacement in the same folder under the same parent. The replacement gets a continuation built by code: the original task, the old worker's last text as untrusted progress notes (bounded), optional notes, git HEAD/status fingerprints before and after, and lineage; never the transcript. The old worker's children move to the replacement; its late output is dropped with at most one stale notice. An unconfirmed exit spawns nothing, a turn that finished on its own is the outcome, and a concurrent `replace` or `model` interrupt is refused. One writer at a time; live harness permission races are covered only by fake adapters.
 - **cmux MCP:** optional tools for cmux sessions, panes, workspaces and browser. It can read transcripts from harness-owned files; it does not manage retention.
 - **agent-transcripts:** parsers normalize supported harness transcripts for reporting and selected capture.
 

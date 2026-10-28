@@ -14,7 +14,7 @@ Keep canonical knowledge in readable documents, authoritative jobs, metrics, dec
 
 Expose `/workflow report [--last]`, `save [reason]`, `digest`, `self-learning`, `ask <question>`, `proposals`, `approve <id>`, and `reject <id> [reason]`. Retired review/keeper invocations return actionable errors, not aliases. Approval pins the displayed proposal version and is not automatic application: changes are limited to allowlisted skill/memory targets and verified with a receipt. The writer lock coordinates pi-house writers but is not an operating-system compare-and-swap against arbitrary editors; exact-change deduplication is not universal semantic equivalence.
 
-Memory is consulted on demand through scoped retrieval. It is not injected at startup. Routing uses explicit authorized profiles and available signals; same-harness native switching is supported only where verified. Optional context monitoring requires opt-in and a manual apply action. No cross-harness fenced continuation is promised. Manual skill expansion and grouped shell rendering are unsupported by the pinned pi API.
+Memory is consulted on demand through scoped retrieval. It is not injected at startup. Routing uses explicit authorized profiles and available signals; same-harness native switching is supported only where verified. Optional context monitoring requires opt-in and a manual apply action. Cross-harness continuation is an explicit, fenced agent-link `replace` (confirmed exit before one replacement, code-built continuation, late output dropped), not an automatic routing action. Manual skill expansion and grouped shell rendering are unsupported by the pinned pi API.
 
 ## Alternatives considered
 
