@@ -1,15 +1,10 @@
 // pihouse's status bar, laid out like Claude Code's: the model and context on the left, `user@host  ~/folder  ⎇ branch  account` on the right,
 // then `◷ claude  5h: 23% (2h15m → 16:00)` for each account.
 //
-// When the line does not fit, it shortens in a fixed order — folder, branch, host, effort, then the account
-// login — and keeps the context and the model to the end: in a narrow pane, which model you are on and how much
-// context is left matters more than where you are.
-//
 // Problem: a usage meter for one provider is wrong the moment the user is logged in to two.
-// Example: a Claude login and a ChatGPT login are both active; each needs its own line, or a narrow terminal hides
-// one provider's windows. Claude's own quota is shared with Claude Code.
-// Solution: usage is kept per account (Claude, OpenAI), from its own endpoint or local fallback, and each provider
-// gets one compact line with its 5h and 7d windows.
+// Example: a Claude login and a ChatGPT login are both active; each gets its own compact row of reported windows.
+// Solution: keep the existing footer layout and refresh Claude's observations from Claude Code's usage control request,
+// with local status-line files and response headers as fallbacks.
 import { hostname, userInfo } from "node:os";
 import { basename } from "node:path";
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
@@ -112,21 +107,17 @@ export function statusLine(theme: Palette, s: StatusInput): string[] {
 	const add = (side: Segment["side"], order: number, drop: number, text: string) =>
 		segments.push({ order, drop, side, text });
 
-	// The drop ladder, higher leaves first when the line does not fit: the folder and the branch go before
-	// anything else (where you are is what a narrow pane can spare), then the machine and the effort, then the
-	// account login (the usage lines below still name every account and accent the active one); the context
-	// share and the model stay to the end, so the numbers you act on outlive the place.
-	if (s.model) add("left", 0, 1, theme.fg("accent", s.model));
+	if (s.model) add("left", 0, 2, theme.fg("accent", s.model));
 	if (s.effort) add("left", 1, 4, theme.fg("muted", `effort: ${s.effort}`));
-	if (s.contextPercent === null) add("left", 2, 2, theme.fg("dim", "ctx: --"));
+	if (s.contextPercent === null) add("left", 2, 3, theme.fg("dim", "ctx: --"));
 	else {
 		const p = Math.round(s.contextPercent);
-		add("left", 2, 2, theme.fg(p >= 90 ? "error" : p >= 70 ? "warning" : "muted", `ctx: ${p}%`));
+		add("left", 2, 3, theme.fg(p >= 90 ? "error" : p >= 70 ? "warning" : "muted", `ctx: ${p}%`));
 	}
 	add("right", 0, 5, theme.bold(theme.fg("text", `${s.user}@${s.host}`)));
-	add("right", 1, 7, theme.bold(theme.fg("text", shortCwd(s.cwd))));
-	if (s.branch) add("right", 2, 6, theme.fg("accent", `⎇ ${s.branch}`));
-	if (s.login) add("right", 3, 3, theme.fg("muted", s.login));
+	add("right", 1, 0, theme.bold(theme.fg("text", shortCwd(s.cwd))));
+	if (s.branch) add("right", 2, 1, theme.fg("accent", `⎇ ${s.branch}`));
+	if (s.login) add("right", 3, 6, theme.fg("muted", s.login));
 	const side = (which: Segment["side"]) =>
 		segments
 			.filter((x) => x.side === which)
@@ -145,46 +136,17 @@ export function statusLine(theme: Palette, s: StatusInput): string[] {
 	}
 	const lines = [truncateToWidth(compose(), s.width)];
 
-	const accounts = [...s.accounts];
-	for (const name of ["claude", "openai"]) {
-		if (!accounts.some((account) => account.name === name))
-			accounts.push({ name, active: false, windows: [], status: "unknown" });
-	}
-	const tracked: Account[] = ["claude", "openai"].map(
-		(name) =>
-			accounts.find((account) => account.name === name) ?? { name, active: false, windows: [], status: "unknown" },
-	);
-	const renderWindow = (account: Account, label: string, compact: boolean) => {
-		const window = account.windows.find((candidate) => candidate.label === label);
-		if (!window || (window.resetsAt !== undefined && window.resetsAt <= s.now) || account.status === "unknown")
-			return theme.fg("dim", `${label}: unknown`);
-		const reset = !compact && window.resetsAt ? ` (${formatLeft(window.resetsAt, s.now)})` : "";
-		const stale = account.status === "stale" ? " stale" : "";
-		return theme.fg(heat(window.percent), `${label}: ${window.percent}/${100 - window.percent}%${reset}${stale}`);
-	};
-	const renderName = (account: Account) => theme.fg(account.active ? "accent" : "text", account.name);
-	for (const account of tracked) {
-		const renderUsage = (compact: boolean) =>
-			`◷ ${renderName(account)} used/left ${renderWindow(account, "5h", compact)}, ${renderWindow(account, "7d", compact)}`;
-		const detailedUsage = renderUsage(false);
-		const usage = visibleWidth(detailedUsage) <= s.width ? detailedUsage : renderUsage(true);
-		lines.push(truncateToWidth(usage, s.width));
-	}
-	const otherAccounts = accounts.filter((account) => account.name !== "claude" && account.name !== "openai");
-	const nameWidth = Math.max(0, ...otherAccounts.map((account) => account.name.length));
-	for (const a of otherAccounts.filter((account) => account.windows.length || account.status)) {
-		const name = theme.fg(a.active ? "accent" : "text", `◷ ${a.name.padEnd(nameWidth)}`);
-		const windows = a.windows.map((window) => {
-			const reset = window.resetsAt ? `; ${formatLeft(window.resetsAt, s.now)}` : "";
-			return theme.fg(
-				heat(window.percent),
-				`${window.label}: ${window.percent}% used (${100 - window.percent}% left${reset})`,
-			);
+	const liveAccounts = s.accounts.filter((account) => account.windows.length);
+	const nameWidth = Math.max(0, ...liveAccounts.map((account) => account.name.length));
+	for (const account of liveAccounts) {
+		const name = theme.fg(account.active ? "accent" : "text", `◷ ${account.name.padEnd(nameWidth)}`);
+		const windows = account.windows.map((window) => {
+			const reset = window.resetsAt ? theme.fg("muted", ` (${formatLeft(window.resetsAt, s.now)})`) : "";
+			return `${theme.fg(heat(window.percent), `${window.label}: ${window.percent}%`)}${reset}`;
 		});
-		const status = a.status ? `  ${theme.fg("warning", a.status)}` : "";
-		lines.push(truncateToWidth(`${name}  ${windows.join("   ")}${status}`, s.width));
+		lines.push(truncateToWidth(`${name}  ${windows.join("   ")}`, s.width));
 	}
-	if (!s.accounts.some((account) => account.windows.length) && s.input + s.output > 0) {
+	if (!liveAccounts.length && s.input + s.output > 0) {
 		const cost = s.cost > 0 ? `  $${s.cost.toFixed(s.cost < 1 ? 3 : 2)}` : "";
 		lines.push(truncateToWidth(theme.fg("dim", `↑${compact(s.input)} ↓${compact(s.output)}${cost}`), s.width));
 	}
@@ -235,7 +197,6 @@ export default function statusbar(pi: ExtensionAPI): void {
 	/** Usage by account name, with the time it was learned, so a newer answer replaces an older one. */
 	const known = new Map<string, { windows: readonly UsageWindow[]; at: number }>();
 	const poll: PollState = new Map();
-	let openaiStatus: "stale" | "unknown" | undefined;
 	let redraw: (() => void) | undefined;
 	let lastClaude = 0;
 	let lastCodex = 0;
@@ -268,13 +229,8 @@ export default function statusbar(pi: ExtensionAPI): void {
 				if (token) {
 					openaiEmail = chatgptEmail(token);
 					const result = await pollChatGptUsage(poll, token, Date.now(), fetch, CODEX_USAGE_URL, 5000);
-					if (result.status === "observed") {
-						const observation = result.observation;
-						if (observation.windows?.length) {
-							learn("openai", observation.windows, observation.observedAt);
-							openaiStatus = undefined;
-						} else openaiStatus = "unknown";
-					} else openaiStatus = known.has("openai") ? "stale" : "unknown";
+					if (result.status === "observed" && result.observation.windows?.length)
+						learn("openai", result.observation.windows, result.observation.observedAt);
 				}
 			} catch {
 				// The bar is never worth an error: without windows it shows tokens and cost.
@@ -289,7 +245,6 @@ export default function statusbar(pi: ExtensionAPI): void {
 			const name = providerLabel(provider);
 			const windows = subscriptionWindowsFromHeaders(provider, event.headers, Date.now());
 			learn(name, windows);
-			if (name === "openai" && windows.length) openaiStatus = undefined;
 		}
 		redraw?.();
 	});
@@ -314,23 +269,8 @@ export default function statusbar(pi: ExtensionAPI): void {
 					const now = Date.now();
 					const provider = ctx.model && ctx.model.id !== "unknown" ? providerLabel(ctx.model.provider) : undefined;
 					const accounts: Account[] = [...known]
-						.map(([name, v]) => ({
-							name,
-							active: name === provider,
-							windows: v.windows,
-							status:
-								usageStatus(v.windows, v.at, now) === "stale"
-									? "stale"
-									: name === "openai"
-										? (openaiStatus ?? usageStatus(v.windows, v.at, now))
-										: usageStatus(v.windows, v.at, now),
-						}))
-						.concat(
-							!known.has("openai") && openaiStatus
-								? [{ name: "openai", active: provider === "openai", windows: [], status: openaiStatus }]
-								: [],
-						)
-						.filter((a) => a.windows.length || a.status)
+						.map(([name, v]) => ({ name, active: name === provider, windows: live(v.windows, now) }))
+						.filter((account) => account.windows.length)
 						.sort((a, b) => a.name.localeCompare(b.name));
 					const emails: Record<string, string | undefined> = { claude: claudeEmail(), openai: openaiEmail };
 					const lines = statusLine(theme, {
@@ -340,7 +280,7 @@ export default function statusbar(pi: ExtensionAPI): void {
 						branch: gitBranch(ctx.cwd),
 						login: provider ? (emails[provider] ?? provider) : undefined,
 						model: ctx.model && ctx.model.id !== "unknown" ? (ctx.model.name ?? ctx.model.id) : undefined,
-						effort: thinkingEffort(ctx.model, ctx.thinkingLevel),
+						effort: ctx.thinkingLevel,
 						contextPercent: ctx.getContextUsage()?.percent ?? null,
 						accounts,
 						now,
