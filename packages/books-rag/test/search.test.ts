@@ -3,7 +3,7 @@ import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { test } from "node:test";
 import { createCanvas } from "@napi-rs/canvas";
-import { AdapterError } from "../src/config.ts";
+import { AdapterError, defaultRelevanceGate, loadConfig, relevanceGateFromEnv } from "../src/config.ts";
 import type { Figure, MetadataField, Passage, SourceVersion } from "../src/contracts.ts";
 import { definePassage } from "../src/contracts.ts";
 import { embeddingIdentity } from "../src/embeddings.ts";
@@ -404,4 +404,98 @@ test("frozen relevance floor and margin evaluated on synthetic cosine pairs, not
 		exactId("unrelated discussion references embedding_vectors in a footnote"),
 	);
 	assert.equal(lexicalPolicy.enabled, false);
+});
+
+test("the relevance gate is configurable, strictly validated, versioned and reported in every result", async (t) => {
+	assert.deepEqual(relevanceGateFromEnv({}), defaultRelevanceGate);
+	assert.equal(defaultRelevanceGate.version, "synthetic-cosine-v1");
+	const custom = relevanceGateFromEnv({ BOOKS_RELEVANCE_FLOOR: "0.6", BOOKS_RELEVANCE_MARGIN: "0.1" });
+	assert.deepEqual(custom, { minimumScore: 0.6, maximumDrop: 0.1, version: "operator-cosine-v1" });
+	// One value alone keeps the other frozen default but is still an operator gate version.
+	assert.deepEqual(relevanceGateFromEnv({ BOOKS_RELEVANCE_FLOOR: "1" }), {
+		minimumScore: 1,
+		maximumDrop: 0.08,
+		version: "operator-cosine-v1",
+	});
+	for (const [key, bad] of [
+		["BOOKS_RELEVANCE_FLOOR", "0"],
+		["BOOKS_RELEVANCE_FLOOR", "-0.5"],
+		["BOOKS_RELEVANCE_FLOOR", "1.5"],
+		["BOOKS_RELEVANCE_FLOOR", "0,6"],
+		["BOOKS_RELEVANCE_FLOOR", "1e-1"],
+		["BOOKS_RELEVANCE_FLOOR", ""],
+		["BOOKS_RELEVANCE_FLOOR", "NaN"],
+		["BOOKS_RELEVANCE_MARGIN", "2"],
+		["BOOKS_RELEVANCE_MARGIN", "-0.01"],
+		["BOOKS_RELEVANCE_MARGIN", " 0.1"],
+	] as const)
+		assert.throws(
+			() => relevanceGateFromEnv({ [key]: bad }),
+			/BOOKS_RELEVANCE_(FLOOR|MARGIN) must be/u,
+			`${key}=${bad}`,
+		);
+	assert.equal(relevanceGateFromEnv({ BOOKS_RELEVANCE_MARGIN: "0" }).maximumDrop, 0);
+	const env = {
+		BOOKS_DATA_DIR: "/x",
+		PINE_CONE_API: "a",
+		PINECONE_INDEX_NAME: "b",
+		PINECONE_HOST: "c",
+		PINECONE_NAMESPACE: "d",
+		S3_ENDPOINT: "e",
+		S3_REGION: "f",
+		S3_BUCKET: "g",
+		S3_ACCESS_KEY_ID: "h",
+		S3_SECRET_ACCESS_KEY: "i",
+		S3_LIBRARY_PREFIX: "j/",
+		S3_BUCKET_PRIVATE_CONFIRMED: "true",
+	};
+	assert.deepEqual(loadConfig({ env }).relevanceGate, defaultRelevanceGate);
+	assert.equal(loadConfig({ env: { ...env, BOOKS_RELEVANCE_FLOOR: "0.5" } }).relevanceGate.minimumScore, 0.5);
+	assert.throws(() => loadConfig({ env: { ...env, BOOKS_RELEVANCE_FLOOR: "abc" } }), /BOOKS_RELEVANCE_FLOOR/u);
+
+	const f = await fixture(t);
+	const query = "How does embedding_vectors preserve source identifiers?";
+	const byDefault = await searchBooks(f, { query });
+	assert.equal(byDefault.status, "ok");
+	assert.deepEqual(byDefault.gate, {
+		version: "synthetic-cosine-v1",
+		minimumScore: 0.78,
+		maximumDrop: 0.08,
+	});
+	// Candidates score 0.9: a stricter operator floor abstains, and the result says which gate did it.
+	const strict = await searchBooks({ ...f, gate: relevanceGateFromEnv({ BOOKS_RELEVANCE_FLOOR: "0.95" }) }, { query });
+	assert.equal(strict.status, "insufficient_evidence");
+	assert.equal(strict.gate?.version, "operator-cosine-v1");
+	assert.equal(strict.gate?.minimumScore, 0.95);
+	const loose = await searchBooks({ ...f, gate: relevanceGateFromEnv({ BOOKS_RELEVANCE_FLOOR: "0.5" }) }, { query });
+	assert.equal(loose.status, "ok");
+});
+
+test("a schema 1 hosted record is dropped per candidate with a reindex remedy, never as a backend outage", async (t) => {
+	const f = await fixture(t);
+	const valid = f.matches();
+	const [stale] = valid;
+	assert.ok(stale);
+	const old = { ...stale, metadata: { ...stale.metadata, schema: 1 } };
+	f.candidates([old, ...valid.slice(1)]);
+	const result = await searchBooks(f, { query: "How does embedding_vectors preserve source identifiers?" });
+	assert.equal(result.backend, "available");
+	assert.equal(result.corpus, "incomplete");
+	assert.equal(result.hits.length, 5, "valid schema 2 candidates are still returned");
+	assert.equal(
+		result.hits.some((h) => h.passageId === stale.id),
+		false,
+	);
+	const codes = result.diagnostics.map((d) => d.code);
+	assert.equal(codes.includes("backend_unavailable"), false);
+	const note = result.diagnostics.find((d) => d.code === "identity_mismatch");
+	assert.match(note?.message ?? "", /schema 1 is incompatible.*re-run `index`/u);
+	// An unknown schema is the same explicit incompatibility.
+	f.candidates([{ ...stale, metadata: { ...stale.metadata, schema: 99 } }]);
+	const unknown = await searchBooks(f, { query: "How does embedding_vectors preserve source identifiers?" });
+	assert.equal(unknown.backend, "available");
+	assert.match(unknown.diagnostics[0]?.message ?? "", /schema 99.*`index`/u);
+	// A direct read of that record fails with the same remedy.
+	f.candidates([old]);
+	await assert.rejects(readHostedPassage(f, stale.id as never), /re-run `index`/u);
 });

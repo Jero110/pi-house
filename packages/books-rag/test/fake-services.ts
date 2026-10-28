@@ -94,6 +94,11 @@ export async function fakeServices(options: { readonly publicProbe?: boolean } =
 			for (const r of records) vectors.set(r.id, r);
 			return reply({ upsertedCount: records.length });
 		}
+		if (path === "/vectors/delete") {
+			const { ids, namespace } = body() as { ids: string[]; namespace: string };
+			if (namespace === "synthetic") for (const id of ids) vectors.delete(id);
+			return reply({});
+		}
 		if (path === "/vectors/fetch")
 			return reply({
 				namespace: "synthetic",

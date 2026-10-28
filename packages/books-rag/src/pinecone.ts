@@ -50,8 +50,16 @@ const metadataKeys = new Set([
 	"qualityCodes",
 	"structure",
 ]);
-function hostedMetadata(value: PineconeMetadata): void {
+/** Message shared by the search diagnostic and the read error so the remedy is always named. */
+export function incompatibleSchemaMessage(schema: unknown): string {
+	return `Hosted record schema ${typeof schema === "number" ? schema : "unknown"} is incompatible (this reader needs ${recordSchema}); the writer must re-run \`index\` to republish it`;
+}
+/** Writes are strict. Reads check the schema marker FIRST: a record of another schema is returned as-is so the
+ * caller can drop that one candidate with an explicit "run index" remedy (identity_mismatch), instead of the
+ * allowlist rejecting it as a configuration error that looks like a Pinecone outage. */
+function hostedMetadata(value: PineconeMetadata, mode: "write" | "read" = "write"): void {
 	validateMetadata(value);
+	if (mode === "read" && value.schema !== recordSchema) return;
 	if (
 		Object.keys(value).some((key) => !metadataKeys.has(key)) ||
 		value.schema !== recordSchema ||
@@ -161,7 +169,7 @@ export function expandPassageEvidence(
 		return JSON.parse(value) as unknown;
 	};
 	if (metadata.schema !== recordSchema)
-		throw new AdapterError("identity_mismatch", "Hosted record schema is incompatible with this reader");
+		throw new AdapterError("identity_mismatch", incompatibleSchemaMessage(metadata.schema));
 	const table = parse("locations") as [number, string | null, number, number, number[] | null][];
 	const loc = (at: unknown): PdfLocation => {
 		const row = table[at as number];
@@ -453,7 +461,7 @@ export class Pinecone {
 					throw new AdapterError("invalid_response", "Invalid Pinecone match");
 				assertPassageId(match.id);
 				const metadata = record(match.metadata) as PineconeMetadata;
-				hostedMetadata(metadata);
+				hostedMetadata(metadata, "read");
 				// Candidate identity is checked against the committed manifest by
 				// search, so one stale candidate is dropped with diagnostics rather
 				// than hiding valid evidence behind a whole-query failure.
@@ -483,7 +491,7 @@ export class Pinecone {
 				const vector = record(value);
 				if (vector.id !== id) throw new AdapterError("identity_mismatch", "Pinecone fetch ID mismatch");
 				const metadata = record(vector.metadata) as PineconeMetadata;
-				hostedMetadata(metadata);
+				hostedMetadata(metadata, "read");
 				return { id, score: 0, metadata };
 			});
 		});

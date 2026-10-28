@@ -189,7 +189,7 @@ function listTool(options: BooksMcpOptions): Tool {
 					shown = shown.slice(0, -1);
 					result = build();
 				}
-				return result;
+				return withinBudget(result, options);
 			} catch (error) {
 				return describeError(error);
 			}
@@ -221,6 +221,14 @@ const textOf = (result: ToolResult): string => {
 	const first = result.content[0];
 	return first?.type === "text" ? first.text : "";
 };
+
+/** Final guard for every tool: the shrink loops above reduce what they can, but a remaining field (heading
+ * paths, diagnostics, metadata) could still exceed the cap. Problem: the "16,000 characters" claim must not
+ * depend on fixture shapes. Solution: an explicit resource_limit error instead of an oversized response. */
+const withinBudget = (built: ToolResult, options: BooksMcpOptions): ToolResult =>
+	textOf(built).length > budgetOf(options)
+		? failure("resource_limit", "The response would exceed the size budget even after shrinking; nothing was returned")
+		: built;
 
 function searchTool(options: BooksMcpOptions): Tool {
 	const rules = {
@@ -285,6 +293,7 @@ function searchTool(options: BooksMcpOptions): Tool {
 						})),
 						omittedCoverage: result.coverage.length - coverage,
 						diagnostics: diagnostics(result.diagnostics),
+						...(result.gate ? { gate: result.gate } : {}),
 						next:
 							result.hits.length > 0
 								? "Excerpts are prefixes. Call books_read with a passageId before citing it."
@@ -307,7 +316,7 @@ function searchTool(options: BooksMcpOptions): Tool {
 					coverage--;
 					built = build();
 				}
-				return built;
+				return withinBudget(built, options);
 			} catch (error) {
 				return describeError(error);
 			}
@@ -422,6 +431,8 @@ function figureTool(options: BooksMcpOptions): Tool {
 					pipelineNotice: asset.notice,
 					diagnostics: diagnostics(figure.diagnostics),
 				});
+				const checked = withinBudget(meta, options);
+				if (checked !== meta) return checked;
 				const content: Content[] = [...meta.content];
 				if (delivered) content.push({ type: "image", data: asset.base64, mimeType: asset.mimeType });
 				return { content };
@@ -482,10 +493,10 @@ export function runBooksMcp(
 		instructions,
 		tools: booksTools({
 			services: () => {
-				services ??= servicesFromConfig(
-					loadConfig({ env, ...(env.BOOKS_ENV_FILE ? { envFile: env.BOOKS_ENV_FILE } : {}) }),
-					env,
-				);
+				if (!services) {
+					const config = loadConfig({ env, ...(env.BOOKS_ENV_FILE ? { envFile: env.BOOKS_ENV_FILE } : {}) });
+					services = { ...servicesFromConfig(config, env), gate: config.relevanceGate };
+				}
 				return services;
 			},
 			images: env.BOOKS_MCP_IMAGES !== "off",

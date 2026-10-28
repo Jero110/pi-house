@@ -262,7 +262,12 @@ test("new source version commits without mixing generations; changed originals f
 	const original = readFileSync(f.input);
 	const previous = await indexCorpus(f);
 	writeFileSync(f.input, Buffer.from("%PDF-1.7\nchanged original\n"));
-	await assert.rejects(indexCorpus(f), /Original hash differs/u);
+	const skipped: string[] = [];
+	await assert.rejects(
+		indexCorpus({ ...f, onSkip: (skip) => skipped.push(skip.versionId) }),
+		/Every current version was skipped/u,
+	);
+	assert.deepEqual(skipped, [f.source.versionId]);
 	assert.equal((await loadCatalog(f.objects)).catalog?.commit, previous.commit);
 	assert.equal((await loadCatalog(f.objects)).incomplete, true);
 	writeFileSync(f.input, original);

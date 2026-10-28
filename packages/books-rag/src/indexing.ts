@@ -1,5 +1,15 @@
 import { randomBytes } from "node:crypto";
-import { closeSync, existsSync, lstatSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import {
+	closeSync,
+	existsSync,
+	lstatSync,
+	openSync,
+	readdirSync,
+	readFileSync,
+	renameSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { AdapterError, boundedInteger } from "./config.ts";
 import type { Figure, Passage, PassageId, Sha256, SourceVersion } from "./contracts.ts";
@@ -7,10 +17,10 @@ import { assertSourceIdentity, defineFigure, definePassage, defineSource } from 
 import type { LocalEmbeddings } from "./embeddings.ts";
 import { assertEmbeddingIdentity, embeddingIdentity } from "./embeddings.ts";
 import type { FigureAsset } from "./figures.ts";
-import { safePath, sha256 } from "./locations.ts";
+import { CorpusError, safePath, sha256 } from "./locations.ts";
 import type { ObjectReceipt, Objects } from "./objects.ts";
 import type { Pinecone, PineconeMetadata } from "./pinecone.ts";
-import { expandPassageEvidence, passageRecord } from "./pinecone.ts";
+import { expandPassageEvidence, incompatibleSchemaMessage, passageRecord, recordSchema } from "./pinecone.ts";
 import type { CorpusStore } from "./store.ts";
 
 /** Stable hashes survive JSON property ordering across hosted providers. */
@@ -123,6 +133,8 @@ export async function loadCatalog(
 /** Hash every citation/text field against the committed manifest, not just IDs.
  * A provider's matching source label alone cannot make altered text evidence. */
 export function resolveHostedPassage(id: string, metadata: PineconeMetadata, version: HostedVersion): Passage {
+	if (metadata.schema !== recordSchema)
+		throw new AdapterError("identity_mismatch", incompatibleSchemaMessage(metadata.schema));
 	const expected = version.passages[id as PassageId];
 	if (
 		!expected ||
@@ -158,6 +170,13 @@ export interface IndexOptions {
 	/** Operator explicitly selects the single authorized writer (normally libraryId).
 	 * A different machine must not take over an existing claim automatically. */
 	readonly writerId: string;
+	/** Called for each current version that is left out of this publication, with the reason. */
+	readonly onSkip?: (skip: SkippedVersion) => void;
+}
+export interface SkippedVersion {
+	readonly bookId: string;
+	readonly versionId: string;
+	readonly reason: string;
 }
 function readReceipt(path: string): Receipt | null {
 	safePath(path, true);
@@ -213,7 +232,25 @@ export async function indexCorpus(options: IndexOptions): Promise<Catalog> {
 		boundedInteger(sources.length, 0, 20, "indexed books");
 		const versions: HostedVersion[] = [];
 		for (const source of sources) {
-			const passages = store.listPassages(source).map((p) => store.readPassage(source, p.id));
+			let passages: Passage[];
+			try {
+				passages = store.listPassages(source).map((p) => store.readPassage(source, p.id));
+				for (const figure of store.listFigures(source)) store.readFigureAsset(source, figure.id);
+			} catch (error) {
+				// Problem: one edited original used to abort the whole library. Example: a book saved over by
+				// its new edition makes the old version fail source_changed. Solution: skip exactly that version
+				// with a named reason and keep the rest; a changed original is never re-read as if unchanged.
+				if (error instanceof CorpusError && error.code === "source_changed") {
+					options.onSkip?.({
+						bookId: source.bookId,
+						versionId: source.versionId,
+						reason:
+							"the original file changed after ingestion; run `ingest --input <file> --book <bookId>` to record the new edition as a new version",
+					});
+					continue;
+				}
+				throw error;
+			}
 			const indexConfigurationHash = passages[0]?.indexConfigurationHash ?? source.extractor.configurationHash;
 			const generation = digest([store.libraryId, source.versionId, indexConfigurationHash, embeddingIdentity]).slice(
 				7,
@@ -300,6 +337,11 @@ export async function indexCorpus(options: IndexOptions): Promise<Catalog> {
 				completed: true,
 			});
 		}
+		if (sources.length > 0 && versions.length === 0)
+			throw new AdapterError(
+				"configuration",
+				"Every current version was skipped; nothing was published. Fix the skipped versions first",
+			);
 		const catalog = validateCatalog({
 			schema: 1,
 			libraryId: store.libraryId,
@@ -318,11 +360,47 @@ export async function indexCorpus(options: IndexOptions): Promise<Catalog> {
 		const state = await loadCatalog(objects);
 		if (state.hash !== committed.hash || state.incomplete)
 			throw new AdapterError("busy", "Concurrent publication conflict detected");
+		// Keep the catalog this commit replaced, so the explicit `prune` operation can name exactly the hosted
+		// IDs that stopped being current. The hosted catalog is overwritten in place and cannot tell us later.
+		if (initial.catalog && initial.catalog.commit !== catalog.commit)
+			savePrevious(join(store.directory, `previous-catalog-${initial.catalog.commit}.json`), initial.catalog);
 		return catalog;
 	} finally {
 		closeSync(fd);
 		rmSync(lock);
 	}
+}
+function savePrevious(path: string, catalog: Catalog): void {
+	safePath(path, true);
+	if (existsSync(path)) return;
+	writeFileSync(path, canonical(catalog), { mode: 0o600, flag: "wx" });
+}
+const previousCatalogName = /^previous-catalog-[a-f0-9]{32}\.json$/u;
+/** Catalogs saved by earlier `index` runs, oldest names first. Each is validated like a hosted catalog. */
+export function loadPreviousCatalogs(store: Pick<CorpusStore, "directory">): readonly {
+	readonly file: string;
+	readonly catalog: Catalog;
+}[] {
+	return readdirSync(store.directory)
+		.filter((name) => previousCatalogName.test(name))
+		.sort()
+		.map((name) => {
+			const file = join(store.directory, name);
+			safePath(file);
+			const stat = lstatSync(file);
+			if (!stat.isFile() || stat.nlink !== 1 || (stat.mode & 0o077) !== 0 || stat.size > 64 * 1024 * 1024)
+				throw new AdapterError("configuration", "Unsafe previous-catalog file");
+			return { file, catalog: validateCatalog(JSON.parse(readFileSync(file, "utf8")) as unknown) };
+		});
+}
+/** Passage IDs owned by `previous` and absent from `current`: the only IDs a prune may ever name. */
+export function supersededIds(previous: Catalog, current: Catalog): readonly string[] {
+	validateCatalog(previous);
+	validateCatalog(current);
+	if (previous.libraryId !== current.libraryId)
+		throw new AdapterError("identity_mismatch", "Cannot prune another library");
+	const retained = new Set(current.versions.flatMap((v) => Object.keys(v.passages)));
+	return previous.versions.flatMap((v) => Object.keys(v.passages)).filter((id) => !retained.has(id));
 }
 /** Explicit cleanup only, after publication. IDs must be owned by the previous
  * catalog and absent from current; never a generation/filter/namespace delete. */
@@ -330,12 +408,8 @@ export async function pruneSuperseded(
 	previous: Catalog,
 	current: Catalog,
 	pinecone: Pick<Pinecone, "delete">,
-): Promise<void> {
-	validateCatalog(previous);
-	validateCatalog(current);
-	if (previous.libraryId !== current.libraryId)
-		throw new AdapterError("identity_mismatch", "Cannot prune another library");
-	const retained = new Set(current.versions.flatMap((v) => Object.keys(v.passages)));
-	const stale = previous.versions.flatMap((v) => Object.keys(v.passages)).filter((id) => !retained.has(id));
+): Promise<number> {
+	const stale = supersededIds(previous, current);
 	for (let offset = 0; offset < stale.length; offset += 50) await pinecone.delete(stale.slice(offset, offset + 50));
+	return stale.length;
 }

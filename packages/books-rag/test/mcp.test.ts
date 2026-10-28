@@ -540,3 +540,26 @@ test("an absent catalog and missing configuration are explicit, and the server s
 	assert.equal(body(reply.result).code, "configuration");
 	assert.doesNotMatch(JSON.stringify(reply), /sk-secret-value/u);
 });
+
+test("every tool ends with a size guard: an unshrinkable response becomes a resource_limit error", async (t) => {
+	const { services } = await hosted(t, figurePdf(), 1800);
+	const wide = await connectOnce(booksTools({ services: () => services }), "books_search", { query: injection });
+	const figureId = (
+		JSON.parse((wide.content[0] as { text: string }).text).hits[0] as { figures: { figureId: string }[] }
+	).figures[0]?.figureId;
+	assert.ok(figureId);
+	for (const [name, args] of [
+		["books_search", { query: injection }],
+		["books_list", {}],
+		["books_figure", { figureId }],
+	] as const) {
+		const ok = await connectOnce(booksTools({ services: () => services }), name, args);
+		assert.notEqual(ok.isError, true, name);
+		const result = await connectOnce(booksTools({ services: () => services, responseBudget: 420 }), name, args);
+		assert.equal(result.isError, true, name);
+		const text = (result.content[0] as { text: string }).text;
+		assert.equal(JSON.parse(text).code, "resource_limit", name);
+		assert.ok(text.length <= 420, `${name} error fits the budget`);
+		assert.equal(result.content.length, 1, "no image follows an oversized figure response");
+	}
+});

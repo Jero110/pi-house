@@ -187,6 +187,8 @@ export interface SearchResult extends SearchAssessment {
 	readonly hits: readonly SearchHit[];
 	readonly coverage: readonly { readonly source: SourceIdentity; readonly coverage: Coverage }[];
 	readonly diagnostics: readonly Diagnostic[];
+	/** The relevance gate that produced this result, so an over-abstaining live install is attributable. */
+	readonly gate?: { readonly version: string; readonly minimumScore: number; readonly maximumDrop: number };
 }
 
 function requireContract(condition: boolean, message: string): asserts condition {

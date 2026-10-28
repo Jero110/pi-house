@@ -38,7 +38,40 @@ export function parseEnv(input: string): Record<string, string> {
 	}
 	return result;
 }
+/** Cosine relevance gate. Versioned so a live over-abstention is attributable to the exact numbers in use. */
+export interface RelevanceGate {
+	readonly minimumScore: number;
+	readonly maximumDrop: number;
+	readonly version: string;
+}
+/** Frozen defaults, calibrated on synthetic hashed vectors only (see search.ts). */
+export const defaultRelevanceGate: RelevanceGate = Object.freeze({
+	minimumScore: 0.78,
+	maximumDrop: 0.08,
+	version: "synthetic-cosine-v1",
+});
+/** BOOKS_RELEVANCE_FLOOR in (0, 1] and BOOKS_RELEVANCE_MARGIN in [0, 1]: plain decimals only, so a typo such as
+ * "0,6", "1e-1" or "" fails loudly instead of silently disabling the gate. Any override is a different gate
+ * version, because its numbers are the operator's, not the frozen synthetic ones. */
+export function relevanceGateFromEnv(env: Readonly<Record<string, string | undefined>>): RelevanceGate {
+	const read = (key: string, fallback: number, lowest: number, exclusiveLow: boolean): number => {
+		const raw = env[key];
+		if (raw === undefined) return fallback;
+		const value = /^(?:0|1|0\.\d{1,6}|1\.0{1,6})$/u.test(raw) ? Number(raw) : Number.NaN;
+		if (!Number.isFinite(value) || (exclusiveLow ? value <= lowest : value < lowest) || value > 1)
+			throw new AdapterError(
+				"configuration",
+				`${key} must be a plain decimal ${exclusiveLow ? `greater than ${lowest}` : `from ${lowest}`} up to 1`,
+			);
+		return value;
+	};
+	const minimumScore = read("BOOKS_RELEVANCE_FLOOR", defaultRelevanceGate.minimumScore, 0, true);
+	const maximumDrop = read("BOOKS_RELEVANCE_MARGIN", defaultRelevanceGate.maximumDrop, 0, false);
+	if (env.BOOKS_RELEVANCE_FLOOR === undefined && env.BOOKS_RELEVANCE_MARGIN === undefined) return defaultRelevanceGate;
+	return Object.freeze({ minimumScore, maximumDrop, version: "operator-cosine-v1" });
+}
 export interface BooksConfig {
+	readonly relevanceGate: RelevanceGate;
 	readonly dataDirectory: string;
 	readonly ollamaUrl: string;
 	readonly ollamaModel: string;
@@ -84,6 +117,7 @@ export function loadConfig(options: { readonly env?: NodeJS.ProcessEnv; readonly
 	if (env.S3_BUCKET_PRIVATE_CONFIRMED !== "true")
 		throw new AdapterError("configuration", "S3_BUCKET_PRIVATE_CONFIRMED must be true after operator verification");
 	return {
+		relevanceGate: relevanceGateFromEnv(env),
 		dataDirectory: required("BOOKS_DATA_DIR"),
 		ollamaUrl: env.OLLAMA_URL ?? "http://127.0.0.1:11434",
 		ollamaModel: env.OLLAMA_MODEL ?? "nomic-embed-text:v1.5",

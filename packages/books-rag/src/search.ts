@@ -1,4 +1,4 @@
-import { AdapterError, boundedInteger } from "./config.ts";
+import { AdapterError, boundedInteger, defaultRelevanceGate, type RelevanceGate } from "./config.ts";
 import type {
 	BookId,
 	Diagnostic,
@@ -17,25 +17,32 @@ import type { Catalog, HostedVersion } from "./indexing.ts";
 import { loadCatalog, resolveHostedPassage, validationSource } from "./indexing.ts";
 import type { Objects } from "./objects.ts";
 import type { Pinecone, PineconeMatch } from "./pinecone.ts";
+import { incompatibleSchemaMessage, recordSchema } from "./pinecone.ts";
 
 /** Frozen synthetic cosine gate v1, evaluated in search.test.ts, not a promise
  * about live Nomic retrieval. Absolute floor 0.78 rejects evaluated unrelated
  * scores; a 0.08 band excludes weaker neighbors behind the strongest evidence.
  * No per-question tuning and no confidence/probability interpretation. T8 must
  * publish broader evaluation and keep real-model calibration explicitly pending. */
-export const relevanceGate = Object.freeze({ minimumScore: 0.78, maximumDrop: 0.08, version: "synthetic-cosine-v1" });
-export function gatedCandidates(matches: readonly PineconeMatch[]): readonly PineconeMatch[] {
+export const relevanceGate: RelevanceGate = defaultRelevanceGate;
+/** The gate is configurable (BOOKS_RELEVANCE_FLOOR / BOOKS_RELEVANCE_MARGIN, validated in config.ts) and every
+ * search result reports the version and numbers it used. */
+export function gatedCandidates(
+	matches: readonly PineconeMatch[],
+	gate: RelevanceGate = relevanceGate,
+): readonly PineconeMatch[] {
 	const ordered = [...matches].sort((a, b) => b.score - a.score);
 	const best = ordered[0]?.score ?? -Infinity;
 	return ordered.filter(
-		(m) =>
-			Number.isFinite(m.score) && m.score >= relevanceGate.minimumScore && best - m.score <= relevanceGate.maximumDrop,
+		(m) => Number.isFinite(m.score) && m.score >= gate.minimumScore && best - m.score <= gate.maximumDrop,
 	);
 }
 export interface SearchServices {
 	readonly objects: Objects;
 	readonly pinecone: Pick<Pinecone, "query" | "fetch">;
 	readonly embeddings: Pick<LocalEmbeddings, "query">;
+	/** Defaults to the frozen synthetic gate. */
+	readonly gate?: RelevanceGate;
 }
 export interface SearchInput {
 	readonly query: string;
@@ -73,6 +80,7 @@ export async function searchBooks(services: SearchServices, input: SearchInput):
 		throw new AdapterError("resource_limit", "Invalid bounded search query");
 	if (input.bookIds && (input.bookIds.length > 20 || input.bookIds.some((id) => !/^book_[a-f0-9]{32}$/u.test(id))))
 		throw new AdapterError("configuration", "Invalid book filter");
+	const gate = services.gate ?? relevanceGate;
 	const diagnostics: Diagnostic[] = [];
 	const hits: SearchHit[] = [];
 	let versions: readonly HostedVersion[] = [];
@@ -108,6 +116,14 @@ export async function searchBooks(services: SearchServices, input: SearchInput):
 				topK: 20,
 			});
 			for (const match of candidates) {
+				if (match.metadata.schema !== recordSchema) {
+					// Per candidate, like any stale record: valid schema-2 candidates still count.
+					incomplete = true;
+					const message = incompatibleSchemaMessage(match.metadata.schema);
+					if (!diagnostics.some((d) => d.message === message))
+						diagnostics.push(diagnostic("identity_mismatch", message));
+					continue;
+				}
 				try {
 					const passage = resolveHostedPassage(match.id, match.metadata, version);
 					if (!seen.has(passage.id)) {
@@ -125,7 +141,12 @@ export async function searchBooks(services: SearchServices, input: SearchInput):
 				}
 			}
 		}
-		const accepted = new Set(gatedCandidates(verified.map((v) => v.match)).map((m) => m.id));
+		const accepted = new Set(
+			gatedCandidates(
+				verified.map((v) => v.match),
+				gate,
+			).map((m) => m.id),
+		);
 		for (const { match, passage } of verified.sort((a, b) => b.match.score - a.match.score)) {
 			if (!accepted.has(match.id) || hits.length >= limit) continue;
 			hits.push({
@@ -179,6 +200,7 @@ export async function searchBooks(services: SearchServices, input: SearchInput):
 			hits,
 			coverage: versions.map((v) => ({ source: sourceIdentity(v), coverage: v.source.coverage })),
 			diagnostics,
+			gate: { version: gate.version, minimumScore: gate.minimumScore, maximumDrop: gate.maximumDrop },
 		});
 	}
 }
