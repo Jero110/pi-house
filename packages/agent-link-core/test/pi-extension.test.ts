@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { existsSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type TestContext, test } from "node:test";
 import { createAgentLinkExtension, MESSAGE_TYPE } from "../src/pi-extension/index.ts";
@@ -36,10 +37,28 @@ test("without AGENT_LINK_PI_SOCKET the extension registers nothing", () => {
 test("registers the agent-link MCP server from AGENT_LINK_PI_MCP, with direct exposure", () => {
 	const pi = new FakePi();
 	const mcp = JSON.stringify({ command: "/usr/bin/xl", args: ["mcp", "--x"] });
-	createAgentLinkExtension({ AGENT_LINK_PI_SOCKET: tempSocketPath(), AGENT_LINK_PI_MCP: mcp })(pi.api);
+	const dir = mkdtempSync(join(tmpdir(), "al-pi-agent-"));
+	createAgentLinkExtension({
+		AGENT_LINK_PI_SOCKET: tempSocketPath(),
+		AGENT_LINK_PI_MCP: mcp,
+		PI_CODING_AGENT_DIR: dir,
+	})(pi.api);
 	assert.deepEqual(pi.mcp, [
 		{ name: "agent-link", config: { command: "/usr/bin/xl", args: ["mcp", "--x"], exposure: "direct" } },
 	]);
+});
+
+test("an agent-link entry in the user's mcp.json is not registered again, so pi shows no override warning", () => {
+	const dir = mkdtempSync(join(tmpdir(), "al-pi-agent-"));
+	writeFileSync(join(dir, "mcp.json"), JSON.stringify({ mcpServers: { "agent-link": { command: "/usr/bin/xl" } } }));
+	const pi = new FakePi();
+	const mcp = JSON.stringify({ command: "/usr/bin/xl", args: ["mcp"] });
+	createAgentLinkExtension({
+		AGENT_LINK_PI_SOCKET: tempSocketPath(),
+		AGENT_LINK_PI_MCP: mcp,
+		PI_CODING_AGENT_DIR: dir,
+	})(pi.api);
+	assert.equal(pi.mcp.length, 0);
 });
 
 test("the socket is 0600, says idle on connect, and is removed on session_shutdown", async (t) => {

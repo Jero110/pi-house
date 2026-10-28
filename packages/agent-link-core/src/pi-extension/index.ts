@@ -7,8 +7,10 @@
 // ~/.pi/agent/mcp.json for every session. Example: two agents with different identities would share one
 // entry. Solution: pi 1.3.0 lets an extension call pi.registerMcpServer(), which lasts for the session only;
 // the adapter passes the server as AGENT_LINK_PI_MCP and the MCP process inherits pi's env (AGENT_LINK_*).
-import { chmodSync, rmSync } from "node:fs";
+import { chmodSync, readFileSync, rmSync } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import type {
 	ExtensionAPI,
 	ExtensionContext,
@@ -88,7 +90,7 @@ export function createAgentLinkExtension(env: NodeJS.ProcessEnv = process.env) {
 		const socketPath = env[PI_SOCKET_ENV];
 		if (!socketPath) return;
 		const depth = depthOf(env);
-		registerMcp(pi, env[PI_MCP_ENV]);
+		registerMcp(pi, env[PI_MCP_ENV], env);
 
 		const clients = new Set<Socket>();
 		let server: Server | undefined;
@@ -335,8 +337,24 @@ export function createAgentLinkExtension(env: NodeJS.ProcessEnv = process.env) {
 	};
 }
 
-function registerMcp(pi: ExtensionAPI, json: string | undefined): void {
-	if (!json) return;
+/**
+ * Problem: `pih setup` already writes an "agent-link" entry to pi's mcp.json, and pi wins over the extension's with a
+ * warning "overridden by ... mcp.json" at every worker start. Example: both launch the same server and the identity
+ * comes from the AGENT_LINK_* env, so the second registration changes nothing but the noise.
+ * Solution: register the session server only when the user's mcp.json has no entry of that name.
+ */
+function configuredInMcpJson(env: NodeJS.ProcessEnv): boolean {
+	try {
+		const file = join(env.PI_CODING_AGENT_DIR || join(env.HOME || homedir(), ".pi", "agent"), "mcp.json");
+		const config: unknown = JSON.parse(readFileSync(file, "utf8"));
+		return isRecord(config) && isRecord(config.mcpServers) && "agent-link" in config.mcpServers;
+	} catch {
+		return false;
+	}
+}
+
+function registerMcp(pi: ExtensionAPI, json: string | undefined, env: NodeJS.ProcessEnv): void {
+	if (!json || configuredInMcpJson(env)) return;
 	let spec: unknown;
 	try {
 		spec = JSON.parse(json);
