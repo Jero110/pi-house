@@ -65,6 +65,43 @@ test("a Claude Code file seen a minute ago is available, with its windows and re
 	assert.equal(claude?.windows[0]?.resetsAt, new Date(NOW + 7_200_000).toISOString());
 });
 
+test("a Claude observation merges current 5h and 7d windows, drops expired windows and rejects malformed siblings", async () => {
+	const dir = claudeDir(undefined);
+	const old = join(dir, "old.json");
+	const fresh = join(dir, "fresh.json");
+	writeFileSync(old, JSON.stringify({ used_percentage: 100, resets_at: NOW / 1000 - 1 }));
+	utimesSync(old, (NOW - 10_000) / 1000, (NOW - 10_000) / 1000);
+	writeFileSync(
+		fresh,
+		JSON.stringify({
+			used_percentage: 100,
+			resets_at: NOW / 1000 + 600,
+			seven_day: { used_percentage: 49, resets_at: NOW / 1000 + 86_400 },
+		}),
+	);
+	utimesSync(fresh, (NOW - 1_000) / 1000, (NOW - 1_000) / 1000);
+	const [claude] = await gatherAccountUsage({ now: NOW, providers: ["anthropic"], claudeDir: dir, headers: {} });
+	assert.equal(claude?.status, "exhausted");
+	assert.deepEqual(
+		claude?.windows.map((w) => [w.label, w.percent]),
+		[
+			["5h", 100],
+			["7d", 49],
+		],
+	);
+	assert.match(formatAccountUsage(claude ? [claude] : [], NOW), /7d 49% \(51% remaining\)/);
+});
+
+test("a malformed newest Claude file cannot hide an older valid observation or become fresh", async () => {
+	const dir = claudeDir({ used_percentage: 75, resets_at: NOW / 1000 + 600 }, NOW - 60_000);
+	const broken = join(dir, "newer.json");
+	writeFileSync(broken, "{not json");
+	utimesSync(broken, (NOW - 1_000) / 1000, (NOW - 1_000) / 1000);
+	const [claude] = await gatherAccountUsage({ now: NOW, providers: ["claude-bridge"], claudeDir: dir, headers: {} });
+	assert.equal(claude?.status, "unknown");
+	assert.deepEqual(claude?.windows, []);
+});
+
 test("a window at 100% is exhausted", async () => {
 	const dir = claudeDir({ used_percentage: 100, resets_at: NOW / 1000 + 600 }, NOW - 1000);
 	const [claude] = await gatherAccountUsage({ now: NOW, providers: ["anthropic"], claudeDir: dir, headers: {} });
@@ -76,6 +113,10 @@ test("an old observation is stale, not available", async () => {
 	const [claude] = await gatherAccountUsage({ now: NOW, providers: ["anthropic"], claudeDir: dir, headers: {} });
 	assert.equal(claude?.status, "stale");
 	assert.equal(claude?.windows.length, 1);
+	const text = formatAccountUsage(claude ? [claude] : [], NOW);
+	assert.match(text, /claude: stale/);
+	assert.match(text, /5h 20% \(80% remaining\)/);
+	assert.doesNotMatch(text, /claude: available/);
 });
 
 test("a missing source is unknown with no windows, never 0% or available", async () => {

@@ -193,16 +193,23 @@ export function readClaudeCodeObservation(
 	dir: string,
 	now: number,
 ): { windows: UsageWindow[]; observedAt: number } | undefined {
-	let newest: { file: string; mtime: number } | undefined;
+	const candidates: Array<{ file: string; mtime: number }> = [];
 	try {
 		for (const name of readdirSync(dir)) {
 			if (!name.endsWith(".json")) continue;
 			const file = join(dir, name);
-			const mtime = statSync(file).mtimeMs;
-			if (!newest || mtime > newest.mtime) newest = { file, mtime };
+			const stat = statSync(file);
+			if (stat.isFile()) candidates.push({ file, mtime: stat.mtimeMs });
 		}
-		if (!newest) return undefined;
+	} catch {
+		return undefined;
+	}
+	candidates.sort((a, b) => b.mtime - a.mtime);
+	const newest = candidates[0];
+	if (!newest) return undefined;
+	try {
 		const data = JSON.parse(readFileSync(newest.file, "utf8")) as Record<string, unknown>;
+		if (typeof data !== "object" || data === null || Array.isArray(data)) return undefined;
 		const window = (label: string, source: unknown): UsageWindow[] => {
 			const o = (typeof source === "object" && source !== null ? source : {}) as Record<string, unknown>;
 			const used = num(o.used_percentage);
@@ -210,7 +217,8 @@ export function readClaudeCodeObservation(
 			if (used === undefined || (resetsAt !== undefined && resetsAt <= now)) return [];
 			return [{ label, percent: clampPercent(used), ...(resetsAt ? { resetsAt } : {}) }];
 		};
-		return { windows: [...window("5h", data), ...window("7d", data.seven_day)], observedAt: newest.mtime };
+		const windows = [...window("5h", data), ...window("7d", data.seven_day)];
+		return windows.length ? { windows, observedAt: newest.mtime } : undefined;
 	} catch {
 		return undefined;
 	}

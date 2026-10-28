@@ -254,7 +254,7 @@ export function formatAccountUsage(reports: readonly AccountReport[], now: numbe
 		lines.push(`${r.account}: ${r.status}${origin}${r.note ? ` - ${r.note}` : ""}`);
 		for (const w of r.windows) {
 			const reset = w.resetsAt ? `, resets in ${left(Date.parse(w.resetsAt) - now)}` : "";
-			lines.push(`  ${w.label} ${w.percent}%${reset}`);
+			lines.push(`  ${w.label} ${w.percent}% (${100 - w.percent}% remaining)${reset}`);
 		}
 	}
 	lines.push(
