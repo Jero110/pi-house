@@ -98,6 +98,12 @@ the registry by other owners; and Node refuses to type-strip `.ts` under `node_m
 (`ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING`), so publishing needs a scope rename and a build step, against the
 repository's no-build rule. Installation stays `install.sh` from GitHub.
 
+## Final integration (2026-10-28)
+
+Local `main` now holds this initiative and the books-rag feature (merge `a1597f8`): 822 tests pass, check and skills
+clean. The local `pih` runs from this checkout on `main`; `pih setup` registered the memory MCP alongside cmux,
+agent-link and books. Details and backups are in the progress ledger. `main` is not pushed.
+
 ## Activation and outstanding operational work
 
 **The currently running hub still uses old code.** At the last check it was running another project's executor and
