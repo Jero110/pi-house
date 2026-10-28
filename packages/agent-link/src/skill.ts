@@ -56,8 +56,9 @@ user or the plan named it.
 - Only pi, pihouse and opencode workers switch. A Claude Code, Codex or paste worker refuses: use
   replace({ to, harness, model, notes }). It fences the old worker, closes it and confirms it exited, then starts a
   replacement in the same folder with the original task, the old worker's last text as untrusted progress notes and the
-  repository state before and after; the old worker's children move to it and its late output is dropped. If the exit is
-  not confirmed, nothing is spawned. An exited worker cannot be switched or replaced: spawn a new one.
+  repository state before and after; the old worker's children move to it and its late output is dropped. If the old
+  worker had already finished, replace answers its result and spawns nothing; if the exit is not confirmed, nothing is
+  spawned. An exited worker cannot be switched or replaced: spawn a new one.
 - A switch does not bypass quota. Before you pick a model whose account may be out of quota, check pihouse's
   account_usage tool when you have it.
 
