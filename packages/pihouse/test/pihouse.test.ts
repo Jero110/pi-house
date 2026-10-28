@@ -310,6 +310,7 @@ test("the catalog and the skills on disk match, and skills/README.md is current"
 		"debugging-and-error-recovery (Addy)",
 		"code-simplification (Addy)",
 		"impeccable (Paul Bakaus)",
+		"ask-books (pihouse)",
 	]);
 	assert.ok(catalog.groups.filter((g) => g.manual).every((g) => g.id === "post-build" || g.id === "extras"));
 });

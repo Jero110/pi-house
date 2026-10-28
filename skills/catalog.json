@@ -78,6 +78,14 @@
 			"offerWhen": "the work depends on a framework, API or library behavior"
 		},
 		{
+			"name": "rag-based-development",
+			"group": "build",
+			"author": "pihouse",
+			"source": "this repository",
+			"license": "MIT",
+			"summary": "Grounds decisions in the user's private book library through the books MCP, citing PDF pages, and says plainly when the library has nothing."
+		},
+		{
 			"name": "security-and-hardening",
 			"group": "build",
 			"author": "Addy",
@@ -221,6 +229,14 @@
 			"source": "pbakaus/impeccable/.agents/skills/impeccable",
 			"license": "Apache-2.0",
 			"summary": "Improve frontend design and visual quality: critique, polish, typography, layout, motion."
+		},
+		{
+			"name": "ask-books",
+			"group": "extras",
+			"author": "pihouse",
+			"source": "this repository",
+			"license": "MIT",
+			"summary": "Answers a question only from the private book library with book and PDF page citations, or says there is nothing about it."
 		}
 	]
 }
