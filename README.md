@@ -79,70 +79,54 @@ All diagrams use the same legend: blue = code/policy, purple = LLM processing, g
 
 ```mermaid
 flowchart LR
-  classDef code fill:#e8f1ff,stroke:#2864a0
-  classDef llm fill:#f3e8ff,stroke:#7541a6
-  classDef store fill:#e8f5e9,stroke:#398447
-  classDef human fill:#fff2cc,stroke:#a47b00
-  U([Human]):::human --> P[pih / planner]:::code --> H[Per-home agent-link hub]:::code
-  H --> E[Executor pane]:::code --> W[Worker panes]:::llm
+  U([Human]) --> P[pih / planner] --> H[Per-home agent-link hub]
+  H --> E[Executor pane] --> W[Worker panes]
   W -->|result to parent| E
-  H --> J[(Journal: agent identity and lineage)]:::store
-  P -. explicit retrieval .-> M[Separate memory MCP]:::code
+  H --> J[(Journal: agent identity and lineage)]
+  P -. explicit retrieval .-> M[Separate memory MCP]
   W -. explicit retrieval .-> M
-  M --> D[(Canonical documents)]:::store
-  M --> O[(SQLite operational state)]:::store
-  M --> F[(Derived FTS5 index)]:::store
-  N[No automatic memory injection]:::code -.-> M
+  M --> D[(Canonical documents)]
+  M --> O[(SQLite operational state)]
+  M --> F[(Derived FTS5 index)]
+  N[No automatic memory injection] -.-> M
 ```
 
 ### Evidence to learning
 
 ```mermaid
 flowchart TB
-  classDef code fill:#e8f1ff,stroke:#2864a0
-  classDef llm fill:#f3e8ff,stroke:#7541a6
-  classDef store fill:#e8f5e9,stroke:#398447
-  classDef human fill:#fff2cc,stroke:#a47b00
-  H([Human manually starts digest / self-learning]):::human --> C[Code captures revision + metrics]:::code
-  C --> R[(Captured report and transcript copies)]:::store
-  R --> D{{Isolated digest agent}}:::llm --> V[Code validates identity and durable bytes]:::code
-  V -->|invalid, unstable, or live| Q[Retain and queue / defer]:::code
-  V -->|valid and quiescent| G[(Canonical digest + receipt)]:::store --> X[Remove owned captured copies only]:::code
-  G --> S[Candidate scan]:::code --> B{{Separate bounded batch review agent}}:::llm
-  B --> P[(Review and proposals)]:::store --> A([Human approves pinned change]):::human
-  A --> I[Allowlisted apply + validation]:::code --> K[(Approved knowledge + receipt)]:::store
+  H([Human manually starts digest / self-learning]) --> C[Code captures revision + metrics]
+  C --> R[(Captured report and transcript copies)]
+  R --> D{{Isolated digest agent}} --> V[Code validates identity and durable bytes]
+  V -->|invalid, unstable, or live| Q[Retain and queue / defer]
+  V -->|valid and quiescent| G[(Canonical digest + receipt)] --> X[Remove owned captured copies only]
+  G --> S[Candidate scan] --> B{{Separate bounded batch review agent}}
+  B --> P[(Review and proposals)] --> A([Human approves pinned change])
+  A --> I[Allowlisted apply + validation] --> K[(Approved knowledge + receipt)]
 ```
 
 ### On-demand memory
 
 ```mermaid
 flowchart LR
-  classDef code fill:#e8f1ff,stroke:#2864a0
-  classDef llm fill:#f3e8ff,stroke:#7541a6
-  classDef store fill:#e8f5e9,stroke:#398447
-  classDef human fill:#fff2cc,stroke:#a47b00
-  H([Human asks]):::human --> A[/workflow ask/]:::code --> M[Scoped memory MCP]:::code
-  E[Everyday agent]:::llm -. explicit search / get .-> M
-  M --> F[(Rebuildable FTS5)]:::store
-  M --> D[(Canonical digests, reviews, approved records)]:::store
-  M --> O[(Operational SQLite: metrics, decisions, receipts)]:::store
-  M --> C[Bounded sourced context]:::code --> E
-  N[No startup injection]:::code -.-> E
+  H([Human asks]) --> A[/workflow ask/] --> M[Scoped memory MCP]
+  E[Everyday agent] -. explicit search / get .-> M
+  M --> F[(Rebuildable FTS5)]
+  M --> D[(Canonical digests, reviews, approved records)]
+  M --> O[(Operational SQLite: metrics, decisions, receipts)]
+  M --> C[Bounded sourced context] --> E
+  N[No startup injection] -.-> E
 ```
 
 ### Quota-aware routing
 
 ```mermaid
 flowchart LR
-  classDef code fill:#e8f1ff,stroke:#2864a0
-  classDef llm fill:#f3e8ff,stroke:#7541a6
-  classDef store fill:#e8f5e9,stroke:#398447
-  classDef human fill:#fff2cc,stroke:#a47b00
-  H([Human / plan authority]):::human --> P[(Explicit authorized profiles)]:::store
-  Q[(Observable quota, auth, capability)]:::store --> R[Select compatible authorized option]:::code
+  H([Human / plan authority]) --> P[(Explicit authorized profiles)]
+  Q[(Observable quota, auth, capability)] --> R[Select compatible authorized option]
   P --> R
-  R -->|verified native support| S[Same-harness model switch]:::code --> W[One active writer]:::llm
-  R -->|unknown / unsupported| X[Pause with reason; no silent paid fallback]:::code
+  R -->|verified native support| S[Same-harness model switch] --> W[One active writer]
+  R -->|unknown / unsupported| X[Pause with reason; no silent paid fallback]
   R -. optional context monitor: recommendation only .-> H
 ```
 

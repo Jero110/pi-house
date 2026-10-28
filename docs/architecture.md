@@ -6,21 +6,17 @@ pi-house keeps orchestration, learning, and the underlying pi runtime separate. 
 
 ```mermaid
 flowchart LR
-  classDef code fill:#e8f1ff,stroke:#2864a0
-  classDef llm fill:#f3e8ff,stroke:#7541a6
-  classDef store fill:#e8f5e9,stroke:#398447
-  classDef human fill:#fff2cc,stroke:#a47b00
-  U([Human]):::human --> P[pih / planner]:::code --> H[One agent-link hub per home]:::code
-  H --> E[Executor in its pane]:::code --> W[Workers in their panes]:::code
+  U([Human]) --> P[pih / planner] --> H[One agent-link hub per home]
+  H --> E[Executor in its pane] --> W[Workers in their panes]
   W -->|result to parent| E
-  H --> J[(Journal: identities, lineage, state)]:::store
-  P -. explicit retrieval .-> M[Separate memory MCP]:::code
+  H --> J[(Journal: identities, lineage, state)]
+  P -. explicit retrieval .-> M[Separate memory MCP]
   W -. explicit retrieval .-> M
-  M --> L[Scoped memory library]:::code
-  L --> F[(SQLite FTS5: derived search index)]:::store
-  L --> O[(SQLite operational state: jobs, metrics, decisions, receipts)]:::store
-  L --> D[(Canonical readable documents)]:::store
-  N[No startup memory injection: schemas + short usage rule only]:::code -.-> M
+  M --> L[Scoped memory library]
+  L --> F[(SQLite FTS5: derived search index)]
+  L --> O[(SQLite operational state: jobs, metrics, decisions, receipts)]
+  L --> D[(Canonical readable documents)]
+  N[No startup memory injection: schemas + short usage rule only] -.-> M
 ```
 
 The hub journals participants and routes work; it does not own memory. Each worker runs through its harness-native interface and has its own pane. Memory retrieval is explicit, scoped, and separate from agent-link routing.
@@ -29,22 +25,18 @@ The hub journals participants and routes work; it does not own memory. Each work
 
 ```mermaid
 flowchart TB
-  classDef code fill:#e8f1ff,stroke:#2864a0
-  classDef llm fill:#f3e8ff,stroke:#7541a6
-  classDef store fill:#e8f5e9,stroke:#398447
-  classDef human fill:#fff2cc,stroke:#a47b00
-  H([Human: manually run digest or self-learning]):::human --> C[Code captures selected run revision]:::code
-  C --> R[(Captured report + transcript copies)]:::store
-  C --> Q[(SQLite jobs + structured metrics)]:::store
-  R --> D{{Isolated digest worker; one run revision}}:::llm
-  D --> V[Code validates identity, structure and persisted bytes]:::code
-  V -->|invalid / unstable| X[Retain evidence; retry or defer]:::code --> Q
-  V -->|valid and quiescent| G[(Canonical digest + commit receipt)]:::store
+  H([Human: manually run digest or self-learning]) --> C[Code captures selected run revision]
+  C --> R[(Captured report + transcript copies)]
+  C --> Q[(SQLite jobs + structured metrics)]
+  R --> D{{Isolated digest worker; one run revision}}
+  D --> V[Code validates identity, structure and persisted bytes]
+  V -->|invalid / unstable| X[Retain evidence; retry or defer] --> Q
+  V -->|valid and quiescent| G[(Canonical digest + commit receipt)]
   Q --> G
-  G --> Z[Code removes only owned captured conversational copies]:::code
-  Z --> S[Candidate scan]:::code --> B{{Separate bounded batch review worker}}:::llm
-  B --> P[(Review and proposals)]:::store --> A([Human approves pinned proposal]):::human
-  A --> I[Allowlisted apply + validation + receipt]:::code --> K[(Approved knowledge)]:::store
+  G --> Z[Code removes only owned captured conversational copies]
+  Z --> S[Candidate scan] --> B{{Separate bounded batch review worker}}
+  B --> P[(Review and proposals)] --> A([Human approves pinned proposal])
+  A --> I[Allowlisted apply + validation + receipt] --> K[(Approved knowledge)]
 ```
 
 A **report** is code-computed Markdown (partial while work is active); a **transcript** is source conversation; a **digest** is a lossy, validated summary of a stable revision. Digest and review are manually triggered and run in separate agents. Failure or uncertain liveness retains captured copies and queues work. Cleanup never claims to delete native harness sessions, project files, or migration backups. Candidate recommendations are not approved knowledge until a human authorizes the pinned change and validation records a receipt.
@@ -53,17 +45,13 @@ A **report** is code-computed Markdown (partial while work is active); a **trans
 
 ```mermaid
 flowchart LR
-  classDef code fill:#e8f1ff,stroke:#2864a0
-  classDef llm fill:#f3e8ff,stroke:#7541a6
-  classDef store fill:#e8f5e9,stroke:#398447
-  classDef human fill:#fff2cc,stroke:#a47b00
-  A[Everyday agent]:::llm -->|explicit search / get| M[Memory MCP + scope checks]:::code
-  M --> F[(SQLite FTS5: derived, rebuildable)]:::store --> M
-  M --> D[(Canonical digests, reviews, approved records)]:::store
-  M --> S[(SQLite operational metrics and decisions)]:::store
-  Q[Current architecture and skills]:::store --> M
+  A[Everyday agent] -->|explicit search / get| M[Memory MCP + scope checks]
+  M --> F[(SQLite FTS5: derived, rebuildable)] --> M
+  M --> D[(Canonical digests, reviews, approved records)]
+  M --> S[(SQLite operational metrics and decisions)]
+  Q[Current architecture and skills] --> M
   M -->|bounded sourced context| A
-  H([Human asks]):::human --> Ask[/workflow ask/]:::code --> M
+  H([Human asks]) --> Ask[/workflow ask/] --> M
 ```
 
 SQLite's operational tables are authoritative and are not disposable search data. Rebuilding FTS does not rebuild or erase job, metric, decision, or receipt state. Ordinary sessions see no automatic memory bootstrap; `/workflow ask` or explicit MCP retrieval selects bounded material on demand.
@@ -72,15 +60,11 @@ SQLite's operational tables are authoritative and are not disposable search data
 
 ```mermaid
 flowchart LR
-  classDef code fill:#e8f1ff,stroke:#2864a0
-  classDef llm fill:#f3e8ff,stroke:#7541a6
-  classDef store fill:#e8f5e9,stroke:#398447
-  classDef human fill:#fff2cc,stroke:#a47b00
-  H([Human / plan authority]):::human --> P[Explicit authorized profiles]:::store
-  U[Observed quota, auth and capability signals]:::store --> R[Router: compatible authorized choice]:::code
+  H([Human / plan authority]) --> P[Explicit authorized profiles]
+  U[Observed quota, auth and capability signals] --> R[Router: compatible authorized choice]
   P --> R
-  R -->|supported same-harness operation| S[Native model switch]:::code --> W[One active writer]:::llm
-  R -->|unsupported or unknown| X[Pause with reason; no silent paid fallback]:::code
+  R -->|supported same-harness operation| S[Native model switch] --> W[One active writer]
+  R -->|unsupported or unknown| X[Pause with reason; no silent paid fallback]
   R -. optional context monitor: recommendation only .-> H
 ```
 
