@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import {
+	chmodSync,
 	existsSync,
 	mkdirSync,
 	mkdtempSync,
@@ -260,4 +261,36 @@ test("doctor names bad .env lines without values, lists missing keys, and flags 
 	const empty = await run(["index"], settings(fake, root), root);
 	assert.equal(empty.code, 1);
 	assert.match(empty.err, /no ingested books/u);
+});
+
+test("doctor warns when the env file is readable by group or others, and not when it is private", async (t) => {
+	const root = workspace(t);
+	const file = join(root, "books.env");
+	writeFileSync(file, "BOOKS_DATA_DIR=/somewhere\n", { mode: 0o644 });
+	chmodSync(file, 0o644);
+	const open = await run(["doctor", "--env-file", file], {}, root);
+	assert.match(open.out, /\[WARN\] env file permissions: books\.env is readable by group or others; run chmod 600/u);
+	chmodSync(file, 0o600);
+	assert.doesNotMatch((await run(["doctor", "--env-file", file], {}, root)).out, /env file permissions/u);
+});
+
+test("ingest and prune reject malformed options before touching anything", async (t) => {
+	const root = workspace(t);
+	const pdf = join(root, "good.pdf");
+	writeFileSync(pdf, samplePdf());
+	const env = { BOOKS_DATA_DIR: join(root, "store") };
+	for (const argv of [
+		["ingest", "--input", pdf, "--book", "not-a-book"],
+		["ingest", "--input", pdf, "--chunk-bound", "50"],
+	]) {
+		const result = await run(argv, env, root);
+		assert.equal(result.code, 2, argv.join(" "));
+	}
+	assert.equal(existsSync(env.BOOKS_DATA_DIR), false, "nothing was created");
+	const prune = await run(["prune"], {}, root);
+	assert.equal(prune.code, 1);
+	assert.match(prune.err, /Configuration:/u);
+	assert.match(usage, /prune/u);
+	assert.match(usage, /--book <bookId>/u);
+	assert.match(usage, /--chunk-bound/u);
 });

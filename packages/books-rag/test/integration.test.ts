@@ -80,6 +80,17 @@ async function world(
 	};
 }
 
+async function run(w: World, argv: string[], extra: Record<string, string>) {
+	const out: string[] = [];
+	const err: string[] = [];
+	const code = await runCli(argv, {
+		stdout: (s) => out.push(s),
+		stderr: (s) => err.push(s),
+		env: { ...w.clientEnv, ...extra },
+		cwd: w.root,
+	});
+	return { code, out: out.join(""), err: err.join("") };
+}
 async function cli(w: World, argv: string[], cwd = w.root) {
 	const out: string[] = [];
 	const err: string[] = [];
@@ -438,49 +449,125 @@ test("a changed hosted record, a tampered figure and an old schema fail explicit
 	noSecrets(stale.text + refused.text + legacy.text + tampered.text);
 });
 
-test("a changed or missing original stops the writer explicitly; a missing one is fine", async (t) => {
+const editedPdf = () =>
+	pdfFixture({
+		pages: [{ geometry: [900, 900], text: [{ text: "A different edition rewrote this page entirely.", y: 800 }] }],
+	});
+const catalogHash = (w: World) => [...w.fake.storage.entries()].find(([key]) => key.endsWith("catalog.json"))?.[1].hash;
+const upsertCount = (w: World) => w.fake.requests.filter((r) => r.includes("/vectors/upsert")).length;
+
+test("a changed original is named and skipped; --book records it as a new version of the same book", async (t) => {
 	const w = await world(t);
 	const bytes = structuralBytes();
 	const { original } = await publish(w, "book.pdf", bytes);
 	const server = inProcess(w.clientEnv, t);
 	const before = await hitFor(server, sectionQuery, "A subsection starts halfway");
-	const catalogBefore = [...w.fake.storage.entries()].find(([key]) => key.endsWith("catalog.json"))?.[1].hash;
-	const upserts = w.fake.requests.filter((r) => r.includes("/vectors/upsert")).length;
+	const catalogBefore = catalogHash(w);
+	const upserts = upsertCount(w);
+	const bookId = new CorpusStore({ directory: w.store }).listVersions()[0]?.bookId ?? "";
 
-	// The file was replaced by a different edition after ingestion: its hash no longer matches the version.
-	const edited = pdfFixture({
-		pages: [{ geometry: [900, 900], text: [{ text: "A different edition rewrote this page entirely.", y: 800 }] }],
-	});
+	// The file was replaced by a new edition at the same path: the recorded version's hash no longer matches.
+	const edited = editedPdf();
 	writeFileSync(original, edited);
 	const changed = await cli(w, ["index"]);
 	assert.equal(changed.code, 1);
-	assert.match(changed.err, /index failed: Original hash differs from the recorded version/u);
-	assert.ok(changed.err.length < 500);
-	// Ingesting the new file makes a distinct book with its own hash; the old version is never rewritten.
-	const reingest = await cli(w, ["ingest", "--input", original]);
-	assert.equal(reingest.code, 0, reingest.out + reingest.err);
-	assert.equal(new CorpusStore({ directory: w.store }).listVersions().length, 2);
+	assert.match(changed.err, /Skipped version_[a-f0-9]{32} \(book book_[a-f0-9]{32}\): the original file changed/u);
+	assert.match(changed.err, /--book <bookId>/u);
+	assert.equal(upsertCount(w), upserts, "the refused index uploaded nothing");
+	assert.equal(catalogHash(w), catalogBefore);
+	assert.equal((await server.tool("books_read", { passageId: before.passageId })).json.status, "ok");
 
-	assert.equal(
-		w.fake.requests.filter((r) => r.includes("/vectors/upsert")).length,
-		upserts,
-		"the refused index uploaded nothing",
-	);
-	assert.equal([...w.fake.storage.entries()].find(([key]) => key.endsWith("catalog.json"))?.[1].hash, catalogBefore);
-	const still = await server.tool("books_read", { passageId: before.passageId });
-	assert.equal(still.json.status, "ok");
-	assert.equal((still.json.source as { sourceHash: string }).sourceHash, sha256(bytes));
+	// An unknown --book is refused rather than silently creating a book.
+	const unrelated = await cli(w, ["ingest", "--input", original, "--book", `book_${"0".repeat(32)}`]);
+	assert.equal(unrelated.code, 1);
+	assert.match(unrelated.err, /Unknown --book/u);
 
-	// Originals are optional after ingestion: with the file gone, indexing publishes the stored evidence and a
-	// reader then sees both books, each under its own recorded hash.
-	rmSync(original);
+	const superseded = await cli(w, ["ingest", "--input", original, "--book", bookId]);
+	assert.equal(superseded.code, 0, superseded.out + superseded.err);
+	const store = new CorpusStore({ directory: w.store });
+	assert.equal(store.listVersions(bookId as never).length, 2);
+	assert.equal(store.listVersions().length, 2);
+	assert.equal(store.currentVersion(bookId as never)?.sourceHash, sha256(edited));
+	const repeat = await cli(w, ["ingest", "--input", original, "--book", bookId]);
+	assert.match(repeat.out, /already ingested/u);
+
 	const published = await cli(w, ["index"]);
 	assert.equal(published.code, 0, published.out + published.err);
-	const hashes = ((await server.tool("books_list", {})).json.entries as { sourceHash: string }[]).map(
-		(e) => e.sourceHash,
+	assert.match(published.out, /Indexed 1 book\(s\)/u);
+	const entries = (await server.tool("books_list", {})).json.entries as { bookId: string; sourceHash: string }[];
+	assert.deepEqual(
+		entries.map((e) => [e.bookId, e.sourceHash]),
+		[[bookId, sha256(edited)]],
 	);
-	assert.deepEqual(hashes.sort(), [sha256(bytes), sha256(edited)].sort());
-	noSecrets(changed.err + published.out);
+	// The old edition is no longer current evidence.
+	assert.notEqual((await server.tool("books_read", { passageId: before.passageId })).json.status, "ok");
+	const fresh = hits((await server.tool("books_search", { query: sectionQuery })).json);
+	assert.equal(
+		fresh.some((h) => h.excerpt.includes("A subsection starts halfway")),
+		false,
+	);
+
+	// prune: dry run by default, then only the superseded IDs.
+	const dry = await cli(w, ["prune"]);
+	assert.equal(dry.code, 0, dry.err);
+	assert.match(dry.out, /[1-9]\d* superseded passage ID\(s\)/u);
+	assert.match(dry.out, /Dry run: nothing was deleted/u);
+	assert.equal(w.fake.vectors.has(before.passageId), true);
+	const live = w.fake.vectors.size;
+	const pruned = await cli(w, ["prune", "--yes"]);
+	assert.equal(pruned.code, 0, pruned.err);
+	assert.equal(w.fake.vectors.has(before.passageId), false);
+	assert.ok(w.fake.vectors.size > 0 && w.fake.vectors.size < live, "current records were kept");
+	assert.match((await cli(w, ["prune"])).out, /^0 superseded passage ID/u);
+	noSecrets(changed.err + published.out + dry.out + pruned.out);
+});
+
+test("without --book a changed file is a new book and the CLI names the explicit remedy", async (t) => {
+	const w = await world(t);
+	const { original } = await publish(w, "book.pdf");
+	const bookId = new CorpusStore({ directory: w.store }).listVersions()[0]?.bookId ?? "";
+	writeFileSync(original, editedPdf());
+	const result = await cli(w, ["ingest", "--input", original]);
+	assert.equal(result.code, 0, result.out + result.err);
+	assert.match(result.out, new RegExp(`note: .*NEW book.*--book ${bookId}`, "u"));
+	assert.equal(new Set(new CorpusStore({ directory: w.store }).listVersions().map((v) => v.bookId)).size, 2);
+});
+
+test("a missing original is fine; one changed original does not block the other books", async (t) => {
+	const w = await world(t);
+	const first = writeOriginal(w, "a.pdf", structuralBytes());
+	const second = writeOriginal(w, "b.pdf", editedPdf());
+	for (const path of [first, second]) assert.equal((await cli(w, ["ingest", "--input", path])).code, 0);
+	assert.match((await cli(w, ["index"])).out, /Indexed 2 book\(s\)/u);
+	rmSync(second);
+	writeFileSync(first, Buffer.concat([structuralBytes(), Buffer.from("\n% edited\n")]));
+	const partial = await cli(w, ["index"]);
+	assert.equal(partial.code, 0, partial.out + partial.err);
+	assert.match(partial.err, /Skipped version_[a-f0-9]{32}/u);
+	assert.match(partial.out, /Indexed 1 book\(s\)/u);
+	const server = inProcess(w.clientEnv, t);
+	const entries = (await server.tool("books_list", {})).json.entries as { sourceHash: string }[];
+	assert.equal(entries.length, 1);
+	assert.equal(entries[0]?.sourceHash, sha256(editedPdf()));
+	noSecrets(partial.err + partial.out);
+});
+
+test("--chunk-bound is validated and recorded in the version identity", async (t) => {
+	const w = await world(t);
+	const original = writeOriginal(w, "book.pdf", structuralBytes());
+	for (const bad of ["99", "1801", "abc", "1e3", ""]) {
+		const result = await cli(w, ["ingest", "--input", original, "--chunk-bound", bad]);
+		assert.equal(result.code, 2, bad);
+		assert.match(result.err, /Invalid chunk bound/u);
+	}
+	assert.equal((await cli(w, ["ingest", "--input", original])).code, 0);
+	assert.equal((await cli(w, ["ingest", "--input", original, "--chunk-bound", "300"])).code, 0);
+	const store = new CorpusStore({ directory: w.store });
+	const versions = store.listVersions();
+	assert.equal(versions.length, 2, "a different bound is a different version");
+	assert.equal(new Set(versions.map((v) => v.bookId)).size, 1, "of the same book");
+	const viaEnv = await run(w, ["ingest", "--input", original], { BOOKS_CHUNK_BOUND: "300" });
+	assert.match(viaEnv.out, /already ingested/u);
 });
 
 test("incomplete corpus: extraction gaps, a pending writer claim and an interrupted index are reported, not mixed", async (t) => {

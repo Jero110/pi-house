@@ -1,15 +1,16 @@
 #!/usr/bin/env node
 // books-rag CLI: ingest PDFs into the local store, publish them as the single writer, check the setup, and run
 // the synthetic evaluation. Reading the library is the MCP server's job (mcp.ts); this tool never starts it.
-import { existsSync, lstatSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, lstatSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { productionTargetBound } from "./chunks.ts";
 import { AdapterError, type BooksConfig, loadConfig, parseEnv } from "./config.ts";
+import type { Sha256 } from "./contracts.ts";
 import { evaluateSynthetic } from "./evaluate.ts";
-import { indexCorpus, loadCatalog } from "./indexing.ts";
+import { indexCorpus, loadCatalog, loadPreviousCatalogs, pruneSuperseded, supersededIds } from "./indexing.ts";
 import { ingestPdf, publishIngest } from "./ingest.ts";
-import { CorpusError, readLocalPdf, sha256 } from "./locations.ts";
+import { assertId, CorpusError, readLocalPdf, sha256 } from "./locations.ts";
 import { servicesFromConfig } from "./mcp.ts";
 import { pdfLimits } from "./pdf.ts";
 import { CorpusStore } from "./store.ts";
@@ -30,7 +31,16 @@ Commands:
                             Read-only: it writes nothing and prints no secrets.
   ingest --input <path>     Extract a PDF, or every *.pdf directly inside a directory (not recursive), into the
                             local store. Non-PDF files and symlinks are rejected per file; other files continue.
-  index                     Publish the local store to Pinecone and private S3 as the single writer.
+                            A file whose bytes are new becomes a NEW BOOK, unless you pass --book.
+    --book <bookId>         Record the (single) input file as a new version of this existing book; the previous
+                            version stops being current once the new one is indexed. The only supersede rule:
+                            titles and file names are never matched for you.
+    --chunk-bound <n>       Chunk size bound in units (100-1800, default 1800; env BOOKS_CHUNK_BOUND). Part of the
+                            version identity, so a different bound makes a new version of the same book.
+  index                     Publish the local store to Pinecone and private S3 as the single writer. A version whose
+                            original changed is skipped by name; the others are published.
+  prune                     List the hosted passage IDs that stopped being current (dry run). With --yes, delete
+                            exactly those IDs in the configured Pinecone namespace. Never filter or namespace deletes.
   evaluate --synthetic      Run the offline synthetic pipeline evaluation against loopback fakes only.
 
 Options:
@@ -58,9 +68,21 @@ const requiredKeys = [
 	"S3_BUCKET_PRIVATE_CONFIRMED",
 ];
 const secretKeys = ["PINE_CONE_API", "S3_ACCESS_KEY_ID", "S3_SECRET_ACCESS_KEY"];
-/** Production chunking, part of every version's identity so a later change makes a new version. */
-const chunkOptions = { targetBound: productionTargetBound };
-const ingestConfigurationHash = sha256(`books-rag-ingest-v1:${JSON.stringify(chunkOptions)}`);
+const minimumChunkBound = 100;
+/** Chunking is part of every version's identity so a later change makes a new version. Default: production. */
+function chunkingFor(raw: string | undefined): { options: { targetBound: number }; hash: Sha256 } {
+	let targetBound = productionTargetBound;
+	if (raw !== undefined) {
+		if (!/^\d{1,5}$/u.test(raw) || Number(raw) < minimumChunkBound || Number(raw) > productionTargetBound)
+			throw new AdapterError(
+				"configuration",
+				`Invalid chunk bound: expected an integer from ${minimumChunkBound} to ${productionTargetBound}`,
+			);
+		targetBound = Number(raw);
+	}
+	const options = { targetBound };
+	return { options, hash: sha256(`books-rag-ingest-v1:${JSON.stringify(options)}`) };
+}
 
 function describe(error: unknown): string {
 	if (error instanceof AdapterError || error instanceof CorpusError) return error.message;
@@ -101,6 +123,12 @@ async function doctor(io: CliIo, info: Environment): Promise<number> {
 			const parsed = parseEnv(readFileSync(info.file, "utf8"));
 			values = { ...parsed, ...info.values };
 			report("ok", "env file", `${basename(info.file)} syntax valid (${Object.keys(parsed).length} keys)`);
+			if ((statSync(info.file).mode & 0o077) !== 0)
+				report(
+					"warn",
+					"env file permissions",
+					`${basename(info.file)} is readable by group or others; run chmod 600 on it`,
+				);
 		} catch (error) {
 			report(
 				"fail",
@@ -208,12 +236,28 @@ function candidates(input: string): readonly Candidate[] {
 		);
 }
 
-async function ingest(io: CliIo, info: Environment, input: string | undefined): Promise<number> {
+async function ingest(
+	io: CliIo,
+	info: Environment,
+	input: string | undefined,
+	book: string | undefined,
+	chunkBound: string | undefined,
+): Promise<number> {
 	if (!input) {
 		io.stderr("ingest requires --input <pdf-or-directory>\n");
 		return 2;
 	}
 	const values = merged(info);
+	let chunking: ReturnType<typeof chunkingFor>;
+	try {
+		chunking = chunkingFor(chunkBound ?? values.BOOKS_CHUNK_BOUND);
+		if (book !== undefined) assertId(book, "book");
+	} catch (error) {
+		io.stderr(
+			`${book !== undefined && !/^book_[a-f0-9]{32}$/u.test(book) ? "Invalid --book: expected a book_<32 hex> ID" : describe(error)}\n`,
+		);
+		return 2;
+	}
 	const directory = values.BOOKS_DATA_DIR;
 	if (!directory?.trim()) {
 		io.stderr("Missing BOOKS_DATA_DIR (private local store directory outside the checkout)\n");
@@ -233,6 +277,16 @@ async function ingest(io: CliIo, info: Environment, input: string | undefined): 
 		io.stderr(`Cannot open the local store: ${describe(error)}\n`);
 		return 1;
 	}
+	if (book !== undefined) {
+		if (!store.listVersions(book as never).length) {
+			io.stderr("Unknown --book: no ingested version of that book exists in the local store (see the index output)\n");
+			return 1;
+		}
+		if (list.filter((item) => !item.problem).length > 1) {
+			io.stderr("--book supersedes one book with one file; pass a single --input file\n");
+			return 2;
+		}
+	}
 	const counts = { ingested: 0, alreadyPresent: 0, rejected: 0, failed: 0, skipped: 0 };
 	for (const item of list) {
 		const name = basename(item.path);
@@ -245,13 +299,28 @@ async function ingest(io: CliIo, info: Environment, input: string | undefined): 
 		try {
 			const hash = sha256(readLocalPdf(item.path, pdfLimits.inputBytes));
 			const existing = store.listVersions().find((v) => v.sourceHash === hash);
+			if (book !== undefined && existing && existing.bookId !== book) {
+				counts.failed++;
+				io.stdout(`${name}: failed: these exact bytes are already ingested as ${existing.bookId}, not ${book}\n`);
+				continue;
+			}
+			if (book === undefined && !existing) {
+				// Deterministic hint only: the same recorded path, never a title guess. Supersede stays explicit.
+				const sameFile = store
+					.listVersions()
+					.find((v) => v.originalPath === item.path && store.currentVersion(v.bookId)?.versionId === v.versionId);
+				if (sameFile)
+					io.stdout(
+						`${name}: note: this path was ingested as ${sameFile.bookId} with different content. This run creates a NEW book; to record it as a new version of that book, re-run with --book ${sameFile.bookId}\n`,
+					);
+			}
 			const prepared = await ingestPdf({
 				store,
 				input: item.path,
-				bookId: existing?.bookId ?? store.newBookId(),
-				indexConfigurationHash: ingestConfigurationHash,
+				bookId: (book as never) ?? existing?.bookId ?? store.newBookId(),
+				indexConfigurationHash: chunking.hash,
 			});
-			const { imported } = await publishIngest(prepared, store, chunkOptions);
+			const { imported } = await publishIngest(prepared, store, chunking.options);
 			const { coverage } = prepared.source;
 			counts[imported ? "ingested" : "alreadyPresent"]++;
 			io.stdout(
@@ -287,7 +356,14 @@ async function index(io: CliIo, info: Environment): Promise<number> {
 			return 1;
 		}
 		const { objects, pinecone, embeddings } = servicesFromConfig(config, values as NodeJS.ProcessEnv);
-		const catalog = await indexCorpus({ store, objects, pinecone, embeddings, writerId: store.libraryId });
+		const catalog = await indexCorpus({
+			store,
+			objects,
+			pinecone,
+			embeddings,
+			writerId: store.libraryId,
+			onSkip: (skip) => io.stderr(`Skipped ${skip.versionId} (book ${skip.bookId}): ${skip.reason}\n`),
+		});
 		const passages = catalog.versions.reduce((n, v) => n + Object.keys(v.passages).length, 0);
 		const figures = catalog.versions.reduce((n, v) => n + v.figures.length, 0);
 		io.stdout(
@@ -297,6 +373,47 @@ async function index(io: CliIo, info: Environment): Promise<number> {
 		return 0;
 	} catch (error) {
 		io.stderr(`index failed: ${describe(error)}\n`);
+		return 1;
+	}
+}
+
+async function prune(io: CliIo, info: Environment, apply: boolean): Promise<number> {
+	let config: BooksConfig;
+	const values = merged(info);
+	try {
+		config = loadConfig({ env: values });
+	} catch (error) {
+		io.stderr(`Configuration: ${describe(error)}. Run \`doctor\` for the full list.\n`);
+		return 1;
+	}
+	try {
+		const store = new CorpusStore({ directory: config.dataDirectory });
+		const { objects, pinecone } = servicesFromConfig(config, values as NodeJS.ProcessEnv);
+		const state = await loadCatalog(objects);
+		if (!state.catalog || state.incomplete) {
+			io.stderr(
+				"Refusing to prune: the hosted catalog is missing or a publication is pending. Finish `index` first.\n",
+			);
+			return 1;
+		}
+		const previous = loadPreviousCatalogs(store);
+		const ids = new Set<string>();
+		for (const { catalog } of previous) for (const id of supersededIds(catalog, state.catalog)) ids.add(id);
+		io.stdout(
+			`${ids.size} superseded passage ID(s) from ${previous.length} earlier catalog(s) are no longer current in the committed catalog.\n`,
+		);
+		if (!apply) {
+			io.stdout(
+				"Dry run: nothing was deleted. Re-run `prune --yes` to delete exactly these IDs in the configured namespace.\n",
+			);
+			return 0;
+		}
+		for (const { catalog } of previous) await pruneSuperseded(catalog, state.catalog, pinecone);
+		for (const { file } of previous) rmSync(file);
+		io.stdout(`Deleted ${ids.size} superseded passage ID(s). Hosted figure objects are not pruned by this command.\n`);
+		return 0;
+	} catch (error) {
+		io.stderr(`prune failed: ${describe(error)}\n`);
 		return 1;
 	}
 }
@@ -322,8 +439,9 @@ export async function runCli(argv: readonly string[], io: CliIo): Promise<number
 	const info = environment(io, values["env-file"]);
 	try {
 		if (command === "doctor") return await doctor(io, info);
-		if (command === "ingest") return await ingest(io, info, values.input);
+		if (command === "ingest") return await ingest(io, info, values.input, values.book, values["chunk-bound"]);
 		if (command === "index") return await index(io, info);
+		if (command === "prune") return await prune(io, info, values.yes === true);
 		if (command === "evaluate") {
 			if (!values.synthetic) {
 				io.stderr("evaluate requires --synthetic (the live evaluation is not part of this CLI)\n");
@@ -348,6 +466,9 @@ function parseCli(argv: readonly string[]) {
 		options: {
 			help: { type: "boolean", short: "h" },
 			input: { type: "string" },
+			book: { type: "string" },
+			"chunk-bound": { type: "string" },
+			yes: { type: "boolean" },
 			synthetic: { type: "boolean" },
 			"env-file": { type: "string" },
 		},
