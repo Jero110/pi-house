@@ -23,6 +23,7 @@ Guide the executor and its agents while they implement the plan. The planner off
 | [`test-driven-development`](build/test-driven-development/SKILL.md) | Addy | Write a failing test, make the smallest change that passes, verify. |
 | [`spec-driven-development`](build/spec-driven-development/SKILL.md) | Addy | Define expected behavior and acceptance criteria before implementing. |
 | [`source-driven-development`](build/source-driven-development/SKILL.md) | Addy | Research the code, docs and sources first and ground decisions in them. |
+| [`rag-based-development`](build/rag-based-development/SKILL.md) | pihouse | Grounds decisions in the user's private book library through the books MCP, citing PDF pages, and says plainly when the library has nothing. |
 | [`security-and-hardening`](build/security-and-hardening/SKILL.md) | Addy | Review threats, validation, permissions and safe data handling. |
 | [`performance-optimization`](build/performance-optimization/SKILL.md) | Addy | Measure and improve the performance problems that matter. |
 | [`doubt-driven-development`](build/doubt-driven-development/SKILL.md) | Addy | Put assumptions and decisions to an adversarial check with evidence. |
@@ -54,4 +55,5 @@ Useful skills the user invokes by hand when needed. They never run on their own.
 | [`debugging-and-error-recovery`](extras/debugging-and-error-recovery/SKILL.md) | Addy | Find the root cause of failures and improve recovery. |
 | [`code-simplification`](extras/code-simplification/SKILL.md) | Addy | Reduce complexity without changing behavior. |
 | [`impeccable`](extras/impeccable/SKILL.md) | Paul Bakaus | Improve frontend design and visual quality: critique, polish, typography, layout, motion. |
+| [`ask-books`](extras/ask-books/SKILL.md) | pihouse | Answers a question only from the private book library with book and PDF page citations, or says there is nothing about it. |
 

@@ -63,6 +63,12 @@ Canonical knowledge remains readable documents. SQLite is authoritative for oper
 
 Legacy migration is explicit, not an automatic startup action. It creates a verified `migration-backup/` before importing. Snapshot and restore guidance, API limitations, and retention boundaries are in [Workflow self-learning](docs/self-learning.md). The detailed contracts are in [module specifications](docs/specs/self-learning/common.md); historical rationale remains in [ADR-001](docs/decisions/ADR-001-workflow-memory.md), with current decisions in [ADR-002](docs/decisions/ADR-002-self-learning.md).
 
+## Books library
+
+A read-only MCP server and CLI over a private PDF library: passage text in your Pinecone index, figures in your private S3 bucket, embeddings from a local Ollama model. A new `pih setup` registers the server with pihouse by default (needs Node >= 26.11.1, else setup warns and skips it; `--no-books` leaves it out; `--books-env-file <path>` or an inherited `BOOKS_ENV_FILE` points it at your env file). Claude Code and Codex are still configured by hand. pihouse never ingests, never searches on its own and adds no library text to session context; without an env file the tools answer with a configuration error. Setup for pihouse, Claude Code and Codex, costs, recovery and what is and is not verified: [Books RAG operator guide](docs/books-rag.md).
+
+Ask the library from a terminal without a model: `node packages/books-rag/src/cli.ts ask "how should I decide microservice boundaries"` prints cited passages (book, PDF page, heading, score) or one line saying the library has no supporting evidence. In a pihouse session, `/skill:ask-books <question>` answers only from the library, and the `rag-based-development` build skill grounds plan tasks in it. Live measurements: [publication](docs/books-rag-live-publication.md) and [relevance calibration](docs/books-rag-live-calibration.md).
+
 ## Architecture
 
 All diagrams use the same legend: blue = code/policy, purple = LLM processing, green = stored data, yellow = human action.
@@ -171,7 +177,7 @@ See [AGENTS.md](AGENTS.md), [CONTRIBUTING.md](CONTRIBUTING.md), and [SECURITY.md
 ## Uninstall
 
 ```bash
-pih uninstall
+pih uninstall             # removes the MCP registrations (a books entry you edited stays) and the pihouse profile
 rm -rf ~/.pihouse ~/.local/bin/pih ~/.local/bin/pihouse ~/.local/bin/agent-link
 ```
 

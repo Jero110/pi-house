@@ -5,11 +5,11 @@
 // same models work. Nothing in either folder is ever deleted.
 import { spawnSync } from "node:child_process";
 import { copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { agentLinkServer, install, mcpCommand, type ServerSpec, uninstall, which } from "agent-link";
 import { agentLinkHome, type BackendName, hubPaths, PLACE_ENV, stableNode } from "agent-link-core";
-import { PI_CLI, PIHOUSE_CLI, type PihousePaths, SKILL_GROUP_DIRS, SKILLS_DIR } from "./paths.ts";
+import { BOOKS_MCP, PI_CLI, PIHOUSE_CLI, type PihousePaths, SKILL_GROUP_DIRS, SKILLS_DIR } from "./paths.ts";
 
 /** The mark pihouse puts in settings.json, so it never rewrites settings it did not write. */
 export const SETTINGS_VERSION = 2;
@@ -277,6 +277,93 @@ export function setPihouseMcp(paths: PihousePaths, name: string, entry: Obj | un
 	writeJson(file, root);
 }
 
+/** The Node the books MCP server needs (packages/books-rag engines); ordinary pihouse runs on Node >= 24. */
+export const BOOKS_MIN_NODE = "26.11.1";
+const BOOKS_DESCRIPTION = "Search and read the private PDF library (explicit tool calls only)";
+
+/** True when `version` (like "26.11.1") is at least BOOKS_MIN_NODE. */
+export function nodeRunsBooks(version: string): boolean {
+	const have = version.split(".").map((n) => Number.parseInt(n, 10) || 0);
+	const need = BOOKS_MIN_NODE.split(".").map((n) => Number.parseInt(n, 10));
+	for (let i = 0; i < need.length; i++) {
+		const a = have[i] ?? 0;
+		const b = need[i] ?? 0;
+		if (a !== b) return a > b;
+	}
+	return true;
+}
+
+/**
+ * The books MCP entry for pihouse: this node and this checkout's server. Only the PATH of the env file is ever written,
+ * never its contents; without one the server still starts and answers each tool with an explicit configuration error.
+ */
+export function booksMcpEntry(env: NodeJS.ProcessEnv, envFile: string | undefined): Obj {
+	return {
+		command: stableNode(env),
+		args: [BOOKS_MCP],
+		...(envFile ? { env: { BOOKS_ENV_FILE: resolve(envFile) } } : {}),
+		exposure: "direct",
+		description: BOOKS_DESCRIPTION,
+	};
+}
+
+/** Ownership record: the exact entry pihouse wrote. An entry that differs from it is the operator's and is never touched. */
+const booksRecord = (paths: PihousePaths) => join(paths.home, "install-books.json");
+
+function mcpServers(paths: PihousePaths): Obj {
+	const config = readJson(join(paths.agentDir, "mcp.json"));
+	return isObj(config) && isObj(config.mcpServers) ? config.mcpServers : {};
+}
+
+const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+
+/**
+ * Registers the books MCP server in pihouse's mcp.json by default.
+ * Problem: a books entry the operator wrote or edited would be overwritten by setup, and deleted by uninstall. Example:
+ * a custom books entry with another BOOKS_ENV_FILE. Solution: setup writes only when the entry is absent or still exactly
+ * what pihouse recorded in install-books.json, so reruns are idempotent and anything else is kept.
+ * Problem: books needs Node >= 26.11.1 but pihouse runs on >= 24. Solution: on an older Node setup warns and changes nothing.
+ */
+export function registerBooks(
+	paths: PihousePaths,
+	env: NodeJS.ProcessEnv,
+	out: (line: string) => void,
+	nodeVersion: string,
+	envFile?: string,
+): "added" | "unchanged" | "kept" | "unsupported" {
+	if (!nodeRunsBooks(nodeVersion)) {
+		out(
+			`pih: books MCP not registered: it needs Node >= ${BOOKS_MIN_NODE} and this is ${nodeVersion}. Upgrade Node and run \`pih setup\` again.`,
+		);
+		return "unsupported";
+	}
+	if (!existsSync(BOOKS_MCP)) {
+		out(`pih: books MCP not registered: ${BOOKS_MCP} is missing`);
+		return "unsupported";
+	}
+	const entry = booksMcpEntry(env, envFile ?? env.BOOKS_ENV_FILE);
+	const current = mcpServers(paths).books;
+	const recorded = readJson(booksRecord(paths));
+	if (current !== undefined && !same(current, recorded)) {
+		out("pih: kept your own books entry in mcp.json");
+		return "kept";
+	}
+	if (same(current, entry)) return "unchanged";
+	setPihouseMcp(paths, "books", entry);
+	mkdirSync(paths.home, { recursive: true });
+	writeJson(booksRecord(paths), entry);
+	out(
+		`pih: added the books MCP server to ${join(paths.agentDir, "mcp.json")}${entry.env ? "" : " (set BOOKS_ENV_FILE or run `pih setup --books-env-file <path>` so it can read the library)"}`,
+	);
+	return "added";
+}
+
+/** Removes the books entry only if pihouse wrote it and it is unchanged; always drops the ownership record. */
+export function unregisterBooks(paths: PihousePaths): void {
+	if (same(mcpServers(paths).books, readJson(booksRecord(paths)))) setPihouseMcp(paths, "books", undefined);
+	rmSync(booksRecord(paths), { force: true });
+}
+
 export interface SetupOptions {
 	paths: PihousePaths;
 	backend: BackendName;
@@ -291,6 +378,12 @@ export interface SetupOptions {
 	claudeBridge?: boolean;
 	/** Runs pi install for the Claude bridge (tests pass a fake). */
 	run?: Run;
+	/** Leaves the books MCP server out (`pih setup --no-books`). On by default. */
+	noBooks?: boolean;
+	/** Path of the books env file written into the entry as BOOKS_ENV_FILE; default: the BOOKS_ENV_FILE of the environment. */
+	booksEnvFile?: string;
+	/** Node version that gates the books server (tests pass a fake). */
+	nodeVersion?: string;
 }
 
 /**
@@ -320,6 +413,7 @@ export function setup(opts: SetupOptions): void {
 		uninstall({ home, env, server: cmuxServer(paths), out: () => {} });
 		setPihouseMcp(paths, "cmux", undefined);
 	}
+	if (!opts.noBooks) registerBooks(paths, env, out, opts.nodeVersion ?? process.versions.node, opts.booksEnvFile);
 	mkdirSync(paths.home, { recursive: true });
 	writeJson(paths.config, { backend } satisfies PihouseConfig);
 	out(`pih: backend ${backend} saved in ${paths.config}`);
@@ -333,6 +427,7 @@ export function teardown(opts: Omit<SetupOptions, "backend">): void {
 	uninstall({ home, env, server: agentLinkServer(home, env), out });
 	setPihouseMcp(paths, "cmux", undefined);
 	setPihouseMcp(paths, MEMORY_SERVER, undefined);
+	unregisterBooks(paths);
 	rmSync(join(hubPaths(agentLinkHome(env)).home, "profiles", "pihouse.json"), { force: true });
 	out(`pih: kept ${paths.home} (sessions, reports, settings); delete it by hand if you want them gone`);
 }

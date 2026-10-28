@@ -1,0 +1,9 @@
+# Final publication followups
+
+User-approved scope: sequential A (partial figure availability) then B (bounded ID visibility and provider egress), no helpers or hosted operations. Existing TypeScript/Node source in src and node:test tests in test; no new dependencies. Commands: `npm run check && npm test && node packages/books-rag/src/cli.ts evaluate --synthetic`.
+
+A: Preserve complete extracted evidence atomically when a specifically classified unsupported rendering operator/diagnostic prevents an individual image. Record an unavailable reason on that figure; hosted reads return unsupported with caption/source/page and no image. All unclassified decoder failures, changed hashes, permissions, malformed input, corruption and resource limits remain fatal. Re-ingest only the expressly named failed PDF with existing private configuration.
+
+B: Investigate official 2025-10 list IDs. Only completed upserts to generation-specific never-reused IDs may use bounded ID visibility; resume must not trust unrelated IDs. Root-last commit requires all expected IDs visible. Search/read continue verifying full record hashes. Keep ownership/configuration/generation pins. Preflight whole-run per-provider byte caps before writes; persist accounting across restart including physical retries and control traffic. Pinecone planned fresh egress <=600MB; runtime stop <=700,000,000B. Preserve vector precision/model/dimension/gate.
+
+Testing: synthetic good/unavailable figures and hosted roundtrip; fake HTTP list pagination/namespace/eventual visibility/malformed IDs/retries; root withheld until visible; durable budgets. Always validate before atomic commits; never commit PDF/text/images/secrets, make paid calls or perform hosted writes. Questions go to parent executor. Operator supplied Starter/no card snapshot 0.0015GB/2GB, RU0/1M, WU0/2M, egress0/1GB; Supabase Free confirmed; namespace books explicitly authorized. These are operator evidence, not new live probes.

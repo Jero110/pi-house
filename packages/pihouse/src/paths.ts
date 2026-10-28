@@ -15,6 +15,8 @@ export const SKILLS_DIR = join(REPO_ROOT, "skills");
 export const SKILL_GROUP_DIRS = ["pre-build", "build", "post-build", "extras"].map((g) => join(SKILLS_DIR, g));
 /** This package's CLI, which agent-link runs to open a pihouse worker. */
 export const PIHOUSE_CLI = fileURLToPath(new URL("./cli.ts", import.meta.url));
+/** The books MCP server of this checkout (packages/books-rag); setup registers it with pihouse by default. */
+export const BOOKS_MCP = join(REPO_ROOT, "packages", "books-rag", "src", "mcp.ts");
 /** pihouse's pi extensions, loaded with -e on every run. */
 export const EXTENSIONS = [
 	"brand.ts",

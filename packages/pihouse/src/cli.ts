@@ -10,9 +10,11 @@ export const KEEPER_RETIRED =
 	"pih keeper was retired. Use /workflow proposals, /workflow approve <id> and /workflow reject <id> [reason] in a pihouse session; /workflow report shows what a run did.";
 
 export const USAGE = `usage: pih [pi options] [message]       start pihouse (all pi options work)
-       pih setup --backend cmux|tmux [--claude-bridge]
-                                        register pihouse's MCP servers and profile (install.sh runs this);
-                                        --claude-bridge also adds the Claude models on your Claude Code login
+       pih setup --backend cmux|tmux [--claude-bridge] [--books-env-file <path>] [--no-books]
+                                        register pihouse's MCP servers (cmux, books) and profile (install.sh runs this);
+                                        --claude-bridge also adds the Claude models on your Claude Code login;
+                                        --books-env-file sets BOOKS_ENV_FILE for the books server (a path, never secrets);
+                                        --no-books leaves the books server out
        pih uninstall                   undo setup's registrations (keeps ~/.pihouse)
        pih route <profile> [--current <provider/model> --failure <kind>] [--task <id>] [--agent <name>]
                                         the exact model an authorized routing profile allows now: 0 selected,
@@ -40,7 +42,22 @@ export async function main(argv: readonly string[], env: NodeJS.ProcessEnv = pro
 			err("pih setup: --backend must be cmux or tmux");
 			return 2;
 		}
-		setup({ paths: pihousePaths(env, home), backend, home, env, out, claudeBridge: rest.includes("--claude-bridge") });
+		const e = rest.indexOf("--books-env-file");
+		const booksEnvFile = e >= 0 ? rest[e + 1] : undefined;
+		if (e >= 0 && !booksEnvFile) {
+			err("pih setup: --books-env-file needs a path");
+			return 2;
+		}
+		setup({
+			paths: pihousePaths(env, home),
+			backend,
+			home,
+			env,
+			out,
+			claudeBridge: rest.includes("--claude-bridge"),
+			noBooks: rest.includes("--no-books"),
+			booksEnvFile,
+		});
 		return 0;
 	}
 	// Problem: `pih keeper` would start a root that no longer exists, so it would look like it worked. Solution: refuse it
