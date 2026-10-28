@@ -13,8 +13,8 @@ research and sources: [books-rag-research.md](books-rag-research.md), measuremen
 | Offline end-to-end test (`test/integration.test.ts`) | Run. Synthetic PDF through the real CLI (`ingest`, `index`) into the fakes, then a real `node src/mcp.ts` child process and in-process servers on a fresh empty reader store with the original deleted: search, verified read, next-page figure, unrelated-query abstention, outages, tampering, incomplete publication, privacy and budgets. |
 | Synthetic evaluation (`evaluate --synthetic`) | Run. Pipeline correctness with a deterministic fake embedding. It is not embedding quality. |
 | Local PDF inspection (`dev/inspect-pdf.ts`, pages 169-174 of the supplied book) | Run in T8, read-only; see the evaluation report. It checks extraction diagnostics, not retrieval. |
-| Real Ollama model measurements | **Not run.** Ollama is absent on the development machine, so the pinned model, its tokenizer and real retrieval quality are unmeasured. |
-| Real Pinecone and Supabase S3 | **Not run.** No S3 credentials, and no index or pricing was verified. The SigV4 client and adapters are tested against AWS published vectors and loopback fakes only, not against live Supabase. |
+| Real Ollama adapter sanity check | **Run locally**, against `127.0.0.1` only: pinned identity compatible, three stored passages and three queries embedded with explicit context 2048. Scores and limits are recorded in [research.md](books-rag-research.md#publication-prerequisites-follow-up). This is not retrieval/gate calibration or tokenizer validation. |
+| Real Pinecone and Supabase S3 | **Not run.** No live index, upload, pricing or S3 compatibility validation was performed. The SigV4 client and adapters are tested against AWS published vectors and loopback fakes only. |
 | Client checks (pihouse, Claude Code, Codex launching this server) | **Not run.** Only the stdio protocol over real and fake pipes is tested. Client commands below were checked against each client's `--help` and docs, not executed against your configuration. |
 
 Do not read any row marked "not run" as validated.
@@ -44,7 +44,9 @@ Do not read any row marked "not run" as validated.
 
 1. **Node >= 26.11.1** (verified on macOS arm64 only). Install with `npm install --ignore-scripts`.
 2. **Ollama** with the pinned model, pulled by you: `ollama pull nomic-embed-text:v1.5`. The adapter checks the
-   runtime version and the model digest `0a109f42...` (full value in the research file) and uses `truncate:false`. The
+   runtime version and the model digest `0a109f42...` (full value in the research file) and sends `truncate:false` plus
+   `options.num_ctx=2048` on every embed request. The stock tag's `num_ctx 8192` declaration is overridden; other model
+   parameters (including `num_predict`) are rejected. Inputs still obey the conservative 2048 bound. The
    endpoint must be literal loopback. If a machine has no Ollama, it cannot search; no cloud embedding fallback exists.
 3. **Pinecone**: a serverless dense index, dimension 768, cosine metric, that **you** create. The adapter only describes
    it. `PINECONE_HOST` must be that index's host. Use a dedicated namespace.
@@ -107,6 +109,101 @@ override file values. The MCP server reads only `BOOKS_ENV_FILE`.
 | `BOOKS_MCP_IMAGES` | no | `off` returns figure metadata and caption without the image block. |
 | `BOOKS_PINECONE_CONTROL_URL` | no | Loopback-only test hook; Pinecone rejects any other value. Leave unset. |
 
+## Publication capacity (internal limits, not provider allowances)
+
+`index` now sizes the entire current library **before any hosted write**, including the canary and figures. It
+validates all record/catalog objects and retains compact manifests only across books; each decoded book's images are
+released before the next book. It prints redacted JSON with `planned`, `remaining`, and `caps` (counts/bytes only).
+Changed originals that leave no publishable books now fail before creating a pending hosted claim.
+
+Defaults are also the maximum accepted settings; positive integer environment overrides may lower them:
+
+| Environment variable | Default / maximum cumulative capacity |
+|---|---:|
+| `BOOKS_PUBLICATION_REQUESTS` | 100,000 physical attempts across S3, Pinecone and local Ollama |
+| `BOOKS_PUBLICATION_WRITE_BYTES` | 4,294,967,296 outbound body bytes (4 GiB), all services |
+| `BOOKS_PUBLICATION_RESPONSE_BYTES` | 8,589,934,592 inbound body bytes (8 GiB), all services |
+| `BOOKS_PUBLICATION_VECTORS` | 50,000 logical vectors submitted |
+| `BOOKS_PUBLICATION_INPUTS` | 50,000 local document inputs |
+| `BOOKS_PUBLICATION_UPLOAD_BYTES` | 1,073,741,824 S3 outbound body bytes (1 GiB), including retries/canary/catalog |
+| `BOOKS_PUBLICATION_PINECONE_BYTES` | 1,073,741,824 Pinecone outbound body bytes (1 GiB), including retries |
+| `BOOKS_PUBLICATION_PINECONE_RESPONSE_BYTES` | 700,000,000 Pinecone inbound bytes plus per-attempt envelope |
+| `BOOKS_PUBLICATION_S3_RESPONSE_BYTES` | 4,500,000,000 S3 inbound bytes plus per-attempt envelope |
+
+At most 20 books; the existing per-book 20,000-passage manifest bound remains. Each adapter also has finite
+per-process limits: S3/Pinecone 100,000 logical operations, 1 GiB uploads/writes; Pinecone 50,000 vectors; Ollama
+50,000 inputs. Publication accounting is stricter: physical probes and transport retries are charged too. No Infinity
+or disabled cap exists. Per-record metadata remains 32 KiB; Pinecone request remains 1,000,000 B and JSON response,
+root and shard remain 1 MiB; figure limits, model input/context 2048, MCP/image budgets and bucket privacy remain unchanged.
+
+`BOOKS_DATA_DIR/index-capacity.json` is a private atomic receipt protected by the existing local writer lock. Its
+counters **never reset automatically**, including after success or on a new process/corpus. Each physical request
+reserves one call, its outbound body, and its maximum response before dispatch. Completed responses settle to actual
+body bytes; independent Pinecone/S3 counters also retain 8,192 B conservative HTTP/TLS headroom per physical attempt. Interrupted/ambiguous responses retain the conservative
+reservation. An oversized response records received bytes before stopping. Partial source receipts retain confirmed
+vectors and uploaded figure IDs; resume still verifies hosted content, never trusting a receipt alone.
+Do not delete receipts or repeatedly run into a hard stop. If exhausted, inspect the printed remaining plan, reconcile
+actual provider usage, and deliberately authorize a new accounting window before manually archiving receipts with no
+active writer. Preserve old receipts as usage evidence; never infer replenished provider allowances from a local reset.
+A stale `.tmp` capacity receipt fails closed and requires the same no-active-writer inspection before recovery.
+
+Planning values are **estimates, not provider metering guarantees**: Pinecone planning must be <=600 MB before writes.
+It includes one resume and three final namespace LIST snapshots (1,000 pages/snapshot, 100 IDs/page, 4,000 pages/run),
+three transport attempts, 256 bounded control probes and bounded upsert responses. Resume image downloads,
+finite-number vector JSON, local embeddings and catalog/guard traffic are included in the other counters. Pinecone
+egress models all three physical attempts; general request/write estimates do not promise completion if every operation
+retries three times. They cannot predict external mutations or all future reader traffic. Actual attempts/bytes stop at
+remaining hard ceilings; another run does not replenish them. Provider counters add conservative envelope headroom,
+not measured HTTP/TLS/provider billing; traffic outside this process remains the operator's responsibility. The 8 GiB internal response ceiling is NOT authorization to consume 8 GiB
+of provider egress or to pay for it.
+
+Writer guards surround groups of **at most 16 figures** and each **at most eight-vector batch**; claim/base checks
+remain before root-last publication and post-commit pinned hydration. S3 offers no portable CAS here: checks detect
+observed conflicts, not all simultaneous writes and not distributed exclusion. Never run multiple writers. Pinecone
+and model probes run once at write-run start, then on expiry (maximum TTL 10 minutes) or integrity failure, not every
+eight records. One active operation/four waiters, cloud write/query intervals (1000/500 ms), three visibility attempts
+and at most three transport attempts remain. Visibility uses the official 2025-10 serverless LIST IDs API with explicit namespace and bounded pagination, never
+vector/metadata fetches or an unsupported `includeValues` parameter. IDs are generation-specific; only completed
+upserts with matching immutable receipts can be reused, and all expected IDs must be visible before root commit.
+Every eventual retrieval still validates metadata hashes and strict catalog pins. See [live preflight](books-rag-live-preflight.md)
+for the 20-book footprint, revised provider budgets and already supplied operator eligibility/namespace authorization.
+
+Schema-2 capacity receipts persist independent provider counters across restart. Schema-1 receipts lack that evidence
+and fail closed: reconcile usage and deliberately archive them with no active writer before opening a new accounting
+window. The 8,192 B envelope is conservative headroom, not measured provider/TLS billing or traffic outside this process.
+
+node src/cli.ts ask "what is semantic chunking" --env-file ~/.config/books-rag.env
+node src/cli.ts ask "How can an API evolve safely?" --book book_<32-hex-id> --json --env-file ~/.config/books-rag.env
+## Hosted catalog format and reindexing
+
+Hosted `catalog.json` uses **schema 2**, independently of Pinecone record schema 2. Its small root contains library/commit
+and embedding identity plus one entry per book: book/version/source hash, generation, index configuration, and a pinned
+source-manifest key, SHA-256 and byte count. No passage map, figure payload or original path lives in the root.
+
+Each immutable source manifest contains the full source metadata, coverage/diagnostics and completion identity, plus
+hash/key/size pins for its data parts. Parts contain passage-ID/record-hash maps and figure metadata/asset pins, each
+bound to the same library, source version, generation and configuration. Keys are content-addressed under
+`<prefix>manifests/<versionId>/<sha256>.json`. Data payloads are packed at <=512 KiB, at most 128 parts/source; every
+root, source manifest and part must still fit **1 MiB** including its envelope. A single oversized figure-metadata item
+or source header fails with `resource_limit`; nothing is truncated and caps are not raised.
+
+The writer preflights all catalog object sizes, uploads/verifies parts and source manifests, then writes the root
+**COMMIT LAST**, with the existing writer/base guards. Failed shard writes leave the previous root unchanged and the
+writer claim pending; resume re-verifies existing vector receipts. Unreferenced immutable objects are harmless and are
+not automatically deleted. Prior hydrated catalogs are saved locally before root replacement so explicit-ID prune
+ownership survives a crash. Existing local schema-1 prune snapshots remain readable.
+
+Readers need no local corpus: they verify root pins, source/part hashes and sizes, embedding and source/generation
+identities, and detect root changes during shard loading and evidence reads. Filtered searches load only selected source
+manifests/parts. Exact opaque-ID reads may scan all source manifests to locate the ID. No mixed-version evidence is accepted.
+
+A **hosted schema-1 root is rejected with an explicit reindex error**. Update writer and readers together, then deliberately
+run `index` on the existing writer store to publish schema 2. Do not rerun extraction/ingestion just for this layout change.
+The writer alone can validate/migrate the legacy root and preserve its prune map. No real reindex/upload was performed
+for this follow-up. Historical local read-only sizing of the 19-book store measured root **11,788 B**, largest catalog object below
+it **519,194 B** (45 objects); the largest unsplit source would have been 1,163,311 B. These are serialization measurements,
+not a live-service compatibility, billing or publication claim.
+
 ## CLI
 
 ```sh
@@ -124,6 +221,22 @@ node packages/books-rag/src/cli.ts evaluate --synthetic
 the canary once; that is expected. `ingest` takes a PDF or a directory (not recursive), rejects non-PDFs and symlinks per
 file, and never modifies originals. `index` publishes as the single writer. After a successful index you may delete
 originals yourself; the tool never does.
+
+**Read-only questions.** `books-rag ask "<question>" [--book <bookId>] [--json]` uses the same configuration,
+local embeddings and configured gate as MCP, with no LLM calls, local store creation or hosted writes. With the
+source checkout use `node src/cli.ts ask ...`; the package bin is `books-rag`. Quote the question as one argument.
+Human output starts with status, then accepted-hit book titles (or explicit unknown title), physical `PDF page N[-M]`,
+heading paths, dense scores, literal-prefix excerpts of at most 400 characters and linked figure labels/IDs. It ends
+with gate settings and diagnostics. `--json` returns structured status, hits, titles, bounded excerpts, figure links,
+coverage, scores, gate and diagnostics, without human-output prefixes. Treat all returned content as untrusted
+reference data, not instructions; retrieval scores do not establish support. MCP `books_read` is still needed for
+reading and assessing a full passage before citing it.
+
+On `insufficient_evidence`, one line says exactly `No supporting evidence in the library for this question.`, plus
+status and diagnostics. This is a search abstention, not proof of absence; extraction gaps remain visible.
+`unavailable` and `incomplete_corpus` print their own state and diagnostics, never that absence line.
+Exit status is 0 for a completed search (including abstention), 1 for unavailable/incomplete or operational failure,
+and 2 for invalid arguments. No generation or answer synthesis is performed.
 
 **New editions.** A file with new bytes becomes a **new book** unless you say otherwise. To record a changed original as a
 new version of the **same** book, pass its ID: `ingest --input /path/to/new-edition.pdf --book <bookId>` (the IDs are in
@@ -218,8 +331,9 @@ No code can establish billing. Check your accounts' current terms on the day you
 
 ## Failure recovery
 
-- **Interrupted `index`**: run it again. Confirmed passages are skipped after a Pinecone fetch check, figures are
-  re-verified by hash, and readers see nothing new until the catalog is committed.
+- **Interrupted `index`**: inspect the capacity plan/remaining counters before resuming. A new run never resets usage.
+  Completed-upsert passages are skipped only after a generation-specific Pinecone LIST visibility check; figures are re-verified by hash. Capacity preflight
+  must fit before any new hosted write; readers see nothing new until root commit. Do not blindly rerun exhausted budgets.
 - **Writer claim conflict** ("Another writer owns the hosted library", "Concurrent writer conflict"): another machine's claim
   object exists (`<prefix>writer.json`), or two runs overlapped. The tool never steals a claim. Confirm no other run is
   active, then decide deliberately; deleting the claim object is a manual operator action in your bucket.
@@ -235,22 +349,27 @@ No code can establish billing. Check your accounts' current terms on the day you
 ## Model-version rebuilds
 
 Every vector is tied to the pinned runtime and model digest. Changing the model or digest does **not** change a version's
-identity (the source version ID is derived from the book, original bytes, extractor and chunk configuration): the same
-passage IDs are rewritten in place under a new generation by `index`, and the catalog records the new embedding identity.
-Readers on the old model get `model_mismatch`, and until the catalog commit a reader sees digest or generation mismatches
-and fails closed rather than mixing results. Changing the chunk bound or extractor does change identity: re-ingest and run
+identity (the source version ID is derived from the book, original bytes, extractor and chunk configuration): hosted
+passage IDs derive from the local passage ID and generation, so a different generation never overwrites the old IDs.
+Neighbor links are transformed identically, and the catalog records the new embedding identity.
+Readers on the old model get `model_mismatch`. Until the new catalog commit, old generation records remain separately
+addressable; readers never mix generations and still fail closed on any observed digest/generation mismatch. Changing the chunk bound or extractor does change identity: re-ingest and run
 `index`. Superseded hosted records are removed only by `prune`, and never by namespace or filter deletion.
 
-## Live recalibration (pending operator step)
+## Live recalibration
 
-The relevance gate (`synthetic-cosine-v1`: floor 0.78, drop 0.08) was frozen on deterministic fake vectors. Nobody has measured
-it with the real `nomic-embed-text` model, whose cosine scores for genuinely relevant passages may sit well below 0.78. If so,
-a live install answers `insufficient_evidence` to everything. **Until you do this, do not rely on abstention.** Every
-`books_search` result carries `gate.version`, `gate.minimumScore` and `gate.maximumDrop`, so an over-abstaining install is
-attributable.
+The source default (`synthetic-cosine-v1`: floor 0.78, drop 0.08) remains frozen on deterministic fake vectors.
+[Live calibration](books-rag-live-calibration.md) measured 35 answerable and 15 unrelated real-model queries across 17 expected
+books on published root `634b999b4a8df734a1314ca4b2e43a1b`. The private operator env now uses **floor 0.68 / drop 0.05**,
+reported as `operator-cosine-v1` and labeled **provisional**. Training expected-book recall@5 was 23/24 and held-out
+11/11, with zero unrelated accepts (0/10 training, 0/5 held-out). This small, single-model set is not a guarantee of
+abstention or answer support. New installs retain the synthetic default until explicitly configured. Every search
+reports its gate version and numbers. The margin is a maximum drop behind the best candidate, not a minimum top-two
+separation, and cannot itself reject an unrelated top candidate. Recalibrate as follows:
 
-1. Pick a few labeled real questions before you look at any score: some the books answer (note the expected page) and some
-   they certainly do not.
+1. Freeze labeled real questions and an independent held-out split before looking at scores: some the books answer
+   (expected book and confirmed PDF range where available), and some they certainly do not. Use broad book/topic coverage
+   and record partial labels honestly. Keep a finite response-byte budget; one unfiltered search fans out across all books.
 2. Set a deliberately low floor (`BOOKS_RELEVANCE_FLOOR=0.01`, `BOOKS_RELEVANCE_MARGIN=1`) for the measurement only, so
    nothing is gated, and run each question through `books_search`. Record `scores.dense` of the best answering passage and of
    the best passage for each unanswerable question.
@@ -265,11 +384,37 @@ attributable.
 
 - **PDF only.** EPUB is deferred; other formats are rejected explicitly.
 - **Scanned pages** have no text layer and become named gap pages (coverage `incomplete`); there is no OCR.
+- **Text coverage** counts text that could be extracted and trusted, not visual completeness. A text page containing raster
+  figures is not a gap: page-level diagnostics say the raster content was not OCRed and must be viewed by rendering.
+  Unvalidated outline entries are document diagnostics; they are not used as structural boundaries and do not create gaps.
+  Ignored external links are document diagnostics, not globally unsafe text. Active/embedded unsafe documents remain gaps.
+  Text-decoder failures that may lose text remain gaps; rendering-only failures retain quality diagnostics.
+- Repeated extraction diagnostics are grouped by code/message with an occurrence count, unique page count, and up to
+  32 compact PDF-page ranges; `omittedPageCount` names any omitted range detail. The retained location is a first example.
+  At most 500 entries are stored, including a reserved `Diagnostics truncated: N more of code X` summary if necessary.
+  Saturation never fails ingestion or removes coverage gaps. Hosted passage metadata stays bounded to 32 KiB and JSON
+  objects to 1 MiB each; schema-2 catalog sharding keeps those caps, with explicit resource limits for oversized individual items/headers.
+- A render with `no_render_operators` records that individual figure as `unavailable: {status: "unsupported", reason}`;
+  text and other images are retained atomically. Indexing includes its caption/location without uploading an invented
+  asset; `books_figure` returns explicit `unsupported`, caption, source and PDF page with no image. All other render
+  failures remain fatal (not a blanket catch of malformed input, decoder diagnostics, resource limits, permissions,
+  changed hashes or corruption). Rendering failures include the PDF page and a sanitized reason (`decoder_diagnostic`, `no_render_operators`,
+  `geometry_mismatch`, `image_budget`, or `decoder_failure`). Raw library error text is not exposed. The image-size,
+  timeout, decoder-warning and nonempty-render checks remain unchanged; an unverified blank/partial figure is rejected.
+- **Search status** precedence is `unavailable` > `incomplete_corpus` > `insufficient_evidence` > `ok`.
+  `incomplete_corpus` means incomplete hosted publication/index or a selected book with no searchable published content.
+  Extraction gaps alone do not override usable evidence or an insufficient-evidence result. Every search reports selected
+  source coverage and gap-count/reason diagnostics. With no hits, gaps mean the answer could be on unextracted pages;
+  never claim the complete books lack an answer. Coverage `incomplete` remains honest even when search status is `ok`.
 - **Owner-password or encrypted PDFs** are rejected, not decrypted.
 - Code and tables are preserved as extracted, never repaired by guesswork; table relationships are not reconstructed.
   Figures link by explicit reference; uncertain cases return a labeled full page.
 - Page numbers are physical PDF pages, not printed pagination.
 - The 1800-unit chunk bound is a conservative proxy (UTF-8 bytes plus 32), not measured tokens.
+- Local version scans stream one stored book payload at a time; rendered assets are not materialized for the whole library.
+  Individual large books still need substantial memory. After a process crash, do not remove an active writer lock;
+  confirm all writers have stopped before preserving/renaming a stale lock for recovery. Keep crash temporary files until
+  the committed database is verified; they are never published content.
 - **Search latency grows with the number of books** (known limit, not changed): a search makes one Pinecone query per
   selected book, at least 500 ms apart, so about 10 s for 20 books, plus a few catalog reads. Pass `bookIds` to narrow it.
 

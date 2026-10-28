@@ -20,6 +20,67 @@ Privacy is now explicitly third-party: passage text/citations reside in Pinecone
 
 Offline evidence: fake 127.0.0.1 Ollama/Pinecone/S3 servers exercise TTL reuse/expiry, forced write probes, mismatch re-probes, bounded FIFO/overflow/wait-timeout behavior, anonymous-access refusal/public detection, protocol/bounds/errors and redaction; SigV4 is compared with the published AWS IAM ListUsers full signing vector and S3 GET canonical-request hash. No models, cloud resources or real credentials are used. References for operator re-verification (not a new live account check): https://supabase.com/docs/guides/storage/s3/authentication ; https://supabase.com/docs/guides/storage/s3/compatibility ; https://supabase.com/pricing ; https://supabase.com/docs/guides/platform/going-into-prod ; https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_sigv-create-signed-request.html ; https://docs.aws.amazon.com/AmazonS3/latest/API/sig-v4-header-based-auth.html .
 
+## Publication prerequisites follow-up
+
+This follow-up implements two independently testable prerequisites under the validated hosted-corpus plan: explicit
+per-request local embedding context, then bounded root/source/data-part catalog publication. Acceptance is fake-HTTP
+regression coverage, warning-free `npm run check && npm test && node src/cli.ts evaluate --synthetic`, a strictly local
+adapter sanity check and read-only serialization sizing. No cloud indexing/upload, full-library extraction/ingestion,
+model pull/create, provisioning, new dependencies or commercial-content fixtures are authorized or performed.
+
+### Local embedding compatibility (limited live evidence)
+
+The already-installed stock pinned tag reports `num_ctx 8192` in `/api/show` parameters but 2048 in `model_info` context.
+Rejecting that declaration prevented the otherwise compatible adapter from running. Every `/api/embed` now explicitly
+sends `options: { num_ctx: 2048 }` alongside `truncate:false`. Only numeric positive `num_ctx` model declarations are
+accepted (they are overridden); `num_predict`, unknown or malformed parameters fail closed. Architecture, context,
+dimension, full digest, runtime, input budget and task prefixes are unchanged. Fake HTTP tests check both documents and
+queries and reject unknown/generation parameters without requesting embeddings.
+
+Actual adapter check: `LocalEmbeddings.doctor`, `.documents` for three existing stored passages, and `.query` for three
+queries, all at **http://127.0.0.1:11434**, no other service calls. Compatible identity: Ollama **0.40.11**,
+**nomic-embed-text:v1.5**, digest **sha256:0a109f422b47e3a30ba2b10eca18548e944e8a23073ee3f3e947efcf3c45e59f**,
+768 dimensions, context 2048, `search_document: ` / `search_query: `, truncation false,
+`utf8-nfd-lower-max-plus-32-v1`. Only scores and compatible identity were printed, never stored passage text.
+
+Cosines (rows: queries 1–3; columns: stored passages 1–3):
+
+| | P1 | P2 | P3 |
+|---|---:|---:|---:|
+| Q1 | 0.610506 | 0.551444 | 0.581612 |
+| Q2 | 0.574492 | 0.515385 | 0.456873 |
+| Q3 | 0.526483 | 0.451961 | 0.418481 |
+
+These are an adapter sanity check, not labeled relevance/recall or an abstention calibration. The default synthetic gate
+remains unvalidated for real retrieval. No tokenizer equivalence claim follows from successful embeddings.
+
+### Catalog schema 2 (offline evidence only)
+
+A small root pins one immutable manifest per source; each source manifest pins bounded data parts. Parts carry passage
+hash maps and figure metadata/asset pins; headers carry source metadata/coverage/diagnostics and the generation/model
+identity. Every JSON object remains <=1 MiB; part payload target <=512 KiB, <=128 parts/source. Oversized individual items
+or headers explicitly fail with `resource_limit`. Parts and source manifests are uploaded/verified before the root commit,
+with unchanged writer claims/base guards, receipt fetch-verification and explicit-ID prune. Readers reject substituted
+versions/generations, tampering (even self-consistent S3 metadata), and changing root snapshots without needing a corpus.
+Filtered search loads only selected sources. Legacy root schema 1 explicitly requires `index` (not re-ingestion);
+writer-only migration retains full prune ownership, including old local snapshots. Details: operator guide's format section.
+
+Fake S3/Pinecone tests use 19 synthetic books: aggregate maps **4,446,039 B**, root **11,761 B**, maximum object below root **234,447 B**; they exercise empty-store
+hosted search/read, selected-shard loading, content tampering, pinned generation substitution, root races and >1 MiB
+single-source maps split into multiple bounded parts. Publication tests interrupt a source after earlier parts/manifests
+succeed: the old root remains unchanged, readers report pending publication, and resumed indexing reuses verified vectors.
+All object/record/output caps and service budgets remain unchanged.
+
+Read-only SQLite serialization of the existing **19-book** working store (no extraction, embeddings, uploads or index run):
+passage maps **4,323,286 B** (sum of canonical individual maps); largest unsplit source **1,163,311 B**. Final format:
+root **11,788 B**, maximum object below root **519,194 B**, **45** objects below root. This explains why source data needs
+further sharding rather than merely moving the old monolith into 19 objects. Keys/metadata/text were not printed or
+committed. Measurements used the configured prefix internally, so different prefix lengths slightly alter sizes.
+
+No real Pinecone/S3 request or publication was made. Account eligibility, live-service compatibility, visibility,
+real-retrieval calibration and client checks remain pending; historical "not run" statements below describe T1, not this
+narrow follow-up's local adapter check.
+
 ## Historical result: PASS for user-authorized PDF-only T1 research
 
 On 2026-10-27 the user explicitly permitted a PDF-only first version ("si queires slo para pdfs"). **EPUB ingestion, locators and assets are deferred**, not validated or silently supported. This supersedes the historical EPUB blocker only; privacy, provenance, bounded extraction/rendering, retrieval and all evaluation gates remain unchanged. Capability map, all four specifications and plan reflect that authorization. Stop before T2 for executor verification.

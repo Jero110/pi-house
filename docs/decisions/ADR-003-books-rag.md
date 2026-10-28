@@ -3,6 +3,35 @@
 ## Status
 Accepted for PDF-only scope, amended by the user's authorized hosted-corpus decision (2026-10-27). The T1 research history below is retained; the T6 amendment supersedes its vector-only/local-only/lazy-rendering boundary. Earlier EPUB feasibility blockers are historical, not current PDF-only blockers.
 
+## Real-data coverage amendment
+The authorized follow-up refines the partial-extraction rule: coverage gaps represent missing/untrusted **text**, not
+unread images or unvalidated outline hints. Mixed raster/text pages retain page quality diagnostics and render fallback;
+outline mismatches and ignored external links retain document diagnostics without marking all pages missing. The real
+188-page reproduction's null-location `unsupported_asset` came from ordinary `/URI` links in the lexical safety scan.
+Parsed JavaScript actions, current embedded attachments and XFA still gap all pages; ordinary navigation/OpenAction
+metadata alone does not. Raw asset names can occur as literal text or in obsolete incremental PDF revisions: retain
+an ignored-content diagnostic, but do not infer whole-document unsafety. The real DDIA file had raw embedded-file
+names but no parsed current attachments or JavaScript; those obsolete names must not make its 613 pages gaps. Text-decoder recovery or image-only pages remain gaps. Parsed permission metadata rejects
+owner-password encryption even when PDF.js can open with an empty user password. Book-scale real data also justified
+raising the disposable worker V8 heap from 256 MiB to 1024 MiB; this is neither an unlimited resource policy nor a
+native-memory sandbox guarantee. Per-page operator resources are cleaned in `finally`; full-document text items and
+per-scalar normalization mappings remain intentionally retained until extraction completes. Streaming those records
+instead of retaining the immutable extraction is a separate architectural change.
+
+The diagnostic follow-up supersedes the temporary 20,000-notice cap: group by `(code, message)`, retain occurrence
+count and compact physical-PDF-page ranges (at most 32 ranges, with exact omitted-page count), and cap output at 500
+entries including one reserved truncation summary with counts per omitted code. Diagnostic saturation never fails
+an import and never removes independently tracked coverage gaps. Grouped notices retain their first location only as
+an example, not their complete affected-page list. Existing 32 KiB passage-metadata and 1 MiB JSON-object limits remain
+unchanged and enforced; aggregation does not authorize larger hosted records/catalogs.
+
+Hosted publication/index completeness is independent of extraction coverage. Search precedence stays `unavailable` >
+`incomplete_corpus` > `insufficient_evidence` > `ok`, but `incomplete_corpus` now describes incomplete publication/index
+or selected books without searchable published content. Gaps are always exposed in coverage and source-scoped count/reason
+diagnostics; no-hit responses warn that the answer could be on unextracted pages. This avoids making every query unusable
+because a book has a cover image, without pretending partially extractable PDFs are complete. Extractor adapter identity
+is bumped so re-ingestion cannot reuse the old coverage interpretation. No OCR, default gate change or hosted call is added.
+
 ## Date
 2026-10-27
 
