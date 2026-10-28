@@ -22,6 +22,16 @@ export type Sdk = {
 	query(options: { prompt: AsyncIterable<never>; options: Record<string, unknown> }): UsageQuery;
 };
 
+/**
+ * Problem: with CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC set, Claude Code skips the usage request and answers
+ * `rate_limits: null`, so the bar showed "unknown". Example: the same idle query returns 5h 2% / 7d 57% without it.
+ * Solution: drop that variable (even when the user's shell sets it) from the SDK process environment.
+ */
+function withoutTrafficBlock(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+	const { CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: _blocked, ...rest } = env;
+	return rest;
+}
+
 export async function readClaudeSdkUsage(injected?: Sdk): Promise<unknown> {
 	const sdkPath = join(pihousePaths().agentDir, "npm", "node_modules", "@anthropic-ai", "claude-agent-sdk", "sdk.mjs");
 	// The bridge is optional, so its SDK is loaded only when installed. Do not read Claude Code's OAuth store.
@@ -44,7 +54,7 @@ export async function readClaudeSdkUsage(injected?: Sdk): Promise<unknown> {
 				abortController: controller,
 				settingSources: [],
 				tools: [],
-				env: { ...process.env, CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1" },
+				env: withoutTrafficBlock(process.env),
 			},
 		});
 		return await Promise.race([

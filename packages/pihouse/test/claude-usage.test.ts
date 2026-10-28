@@ -27,7 +27,7 @@ test("Claude's SDK control request sends no prompt, skips transcript scans and c
 			const iterator = prompt[Symbol.asyncIterator]();
 			assert.deepEqual(options.tools, []);
 			assert.deepEqual(options.settingSources, []);
-			assert.equal((options.env as Record<string, string>).CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC, "1");
+			assert.equal((options.env as Record<string, string>).CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC, undefined);
 			return {
 				async usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET({ skipBehaviors }) {
 					read++;
@@ -42,7 +42,12 @@ test("Claude's SDK control request sends no prompt, skips transcript scans and c
 			};
 		},
 	};
-	assert.deepEqual(await readClaudeSdkUsage(sdk), valid);
+	process.env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1";
+	try {
+		assert.deepEqual(await readClaudeSdkUsage(sdk), valid);
+	} finally {
+		delete process.env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC;
+	}
 	assert.equal(read, 1);
 	assert.equal(closed, 1);
 });
