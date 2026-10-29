@@ -15,9 +15,15 @@ export type DaemonOptions = Omit<StartHubOptions, "home"> & { home?: string };
 
 export async function runDaemon(opts: DaemonOptions): Promise<RunningHub> {
 	const home = opts.home ?? agentLinkHome();
-	const running = await startHub({ ...opts, home });
 	const { pid } = hubPaths(home);
+	// Problem: the pid file was written after the socket started answering, so a client that returned from ensureHub
+	// could find no pid file and stopHub would return false without stopping the daemon. Example: CI failed with
+	// ENOENT on hub.pid right after ensureHub. Solution: write the pid first, and remove it if the hub does not start.
 	writeFileSync(pid, `${process.pid}\n`, { mode: 0o600 });
+	const running = await startHub({ ...opts, home }).catch((err) => {
+		rmSync(pid, { force: true });
+		throw err;
+	});
 	const stop = async () => {
 		await running.close();
 		rmSync(pid, { force: true });
