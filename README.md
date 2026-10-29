@@ -46,15 +46,15 @@ pi-house gets rid of the agent that makes you sit in front of it pressing "yes, 
 1. **Planning** is deliberately exhaustive. You and the agent agree on exactly what will be built before anything is written (`/skill:planner`).
 2. **Execution** is clean and automatic (`/skill:executor`). You can step away: permissions are handled, and agents that are no longer needed are spawned and killed on their own through the agent-link MCP, which lets agents run other agents automatically.
 
-## Books RAG
+## Technical design RAG
 
-LLMs are still not great at system design, and there are incredible resources out there: books. pi-house ships a built-in RAG over your private PDF library so you can bring that knowledge into your design, and even do **RAG-driven development** that relies only on your sources, not on the model's memory. Use `/skill:ask-books <question>`, or let the `rag-based-development` skill ground your plan.
+LLMs are still not great at technical design, and there are incredible resources out there: books. pi-house ships a built-in technical design RAG over your private PDF library so you can bring that knowledge into your design, and even do **RAG-driven development** that relies only on your sources, not on the model's memory. Use `/skill:ask-books <question>`, or let the `rag-based-development` skill ground your plan.
 
 ## Also included
 
 - **Quota-aware model choice.** On a fresh start, pi-house can pick an authenticated Claude or OpenAI-Codex model that your subscription quota confirms has room. If quota is unknown it warns, and it never silently falls back to a paid model.
 - **Workflow commands.** `/workflow ask` answers questions about your own setup (tokens, MCPs, skills, architecture), `/workflow report` writes a code-computed report, and `/workflow proposals`, `approve` and `reject` manage self-learning changes.
-- **Skills as plain Markdown.** A skill is a small file that teaches an agent how to do one thing well, in the open and editable by you, with no hidden prompts. They are grouped by when they apply: pre-build (understand the idea and write the plan), build (guide the executor while it implements) and post-build (things you invoke yourself). The philosophy is *only the skills you use*: the planner recommends the ones that fit the work, you pick, and only those reach the plan and every executor task. Nothing is loaded "just in case", and the self-learning watcher flags skills that are always read but rarely useful.
+- **Skills: only the ones needed.** A skill is a plain Markdown file you can read and edit. The philosophy is to have very few, and to load one only when it is really used. Skills are grouped by phase (pre-build to understand the idea and plan, build to guide the executor, post-build for what you invoke yourself). During planning the planner recommends which skills should be used for the work, you choose, and only your choices reach the plan and every executor task. Nothing is loaded "just in case", and the self-learning watcher flags skills that are always read but rarely useful.
 - **Two MCP servers, and the problem they solve.**
   - **agent-link** solves agents that cannot talk to each other. Every harness (Claude Code, Codex, opencode, pi) gets the same tools to launch, message, answer permissions for, switch the model of and stop other agents, with no shared protocol needed. It journals who started whom, so a plan can run unattended and unused agents are cleaned up.
   - **cmux MCP** solves the multiplexer being a black box to the agents. It lets an agent find sessions, open and arrange panes and workspaces, and read what another agent did from its transcript, so each worker has its own visible pane you can watch or take over.
