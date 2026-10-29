@@ -146,6 +146,10 @@ flowchart LR
 
 See the [architecture guide](docs/architecture.md) for details.
 
+## Disclaimer
+
+Using Claude models through harnesses other than Anthropic's own (for example through the optional Claude bridge, `--claude-bridge`) sits in a gray area of the provider's terms and account policies, particularly for subscription-backed access. pi-house does not make that call for you. Review the current terms of every provider you connect, use your own judgment and credentials, and use it at your own discretion and risk.
+
 ## License
 
 MIT. Third-party skills retain their licenses; see [skills/LICENSES](skills/LICENSES/README.md).
