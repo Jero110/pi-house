@@ -176,7 +176,7 @@ test("claude launch: socket in a 0700 run dir, session id, name, guard hook with
 		assert.match(c.sessionId, /^[0-9a-f-]{36}$/);
 		assert.equal(argv[argv.indexOf("-n") + 1], "w1");
 		const settings = JSON.parse(argv[argv.indexOf("--settings") + 1] ?? "");
-		assert.equal(settings.hooks.PreToolUse[0].matcher, "Bash");
+		assert.equal(settings.hooks.PreToolUse[0].matcher, "Bash|Read");
 		assert.equal(settings.hooks.PreToolUse[0].hooks[0].command, `'${process.execPath}' '${CLAUDE_HOOK}' 1`);
 		const mcp = JSON.parse(argv[argv.indexOf("--mcp-config") + 1] ?? "");
 		assert.deepEqual(mcp.mcpServers["agent-link"], { command: "/bin/xl", args: ["mcp"], env: c.spec.env });
@@ -451,14 +451,27 @@ test("claude guard hook denies risky Bash for workers, asks at depth 0 and allow
 			input: JSON.stringify({ tool_name: "Bash", tool_input: { command } }),
 			encoding: "utf8",
 		}).stdout;
-	const denied = JSON.parse(run("git push origin main", "1"));
+	const denied = JSON.parse(run("rm -rf build", "1"));
 	assert.equal(denied.hookSpecificOutput.hookEventName, "PreToolUse");
 	assert.equal(denied.hookSpecificOutput.permissionDecision, "deny");
-	assert.match(denied.hookSpecificOutput.permissionDecisionReason, /git push/);
+	assert.match(denied.hookSpecificOutput.permissionDecisionReason, /rm -rf/);
 	assert.equal(JSON.parse(run("rm -rf build", "0")).hookSpecificOutput.permissionDecision, "ask");
 	assert.equal(run("npm test", "1"), "");
 	// No depth: the safe side, a worker.
-	assert.equal(JSON.parse(run("git push", "")).hookSpecificOutput.permissionDecision, "deny");
+	assert.equal(JSON.parse(run("rm -rf build", "")).hookSpecificOutput.permissionDecision, "deny");
+	// Work that a commit recovers: a worker is not stopped, nor asked.
+	assert.equal(run("git reset --hard", "1"), "");
+	// The project's .env: blocked for workers, asked at depth 0, templates pass; the Read tool is judged too.
+	assert.equal(JSON.parse(run("cat .env", "1")).hookSpecificOutput.permissionDecision, "deny");
+	assert.equal(JSON.parse(run("cat .env", "0")).hookSpecificOutput.permissionDecision, "ask");
+	assert.equal(run("cat .env.example", "1"), "");
+	const read = (file: string, depth: string) =>
+		spawnSync(process.execPath, [CLAUDE_HOOK, depth], {
+			input: JSON.stringify({ tool_name: "Read", tool_input: { file_path: file } }),
+			encoding: "utf8",
+		}).stdout;
+	assert.equal(JSON.parse(read("/p/.env.local", "1")).hookSpecificOutput.permissionDecision, "deny");
+	assert.equal(read("/p/src/app.ts", "1"), "");
 });
 
 /** Runs the real PermissionRequest hook as Claude would: the request on stdin, the decision on stdout. */

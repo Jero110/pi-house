@@ -297,14 +297,14 @@ test("approvals: the guard accepts the normal and declines a worker's risky comm
 		turnId: "turn-1",
 		itemId: "i2",
 		startedAtMs: 1,
-		command: "git push origin main",
+		command: "rm -rf build",
 	});
 	const badReply = await server.waitFor((m) => m.id === bad && "result" in m);
 	assert.deepEqual(badReply.result, { decision: "decline" });
 	const steer = await server.waitFor((m) => m.method === "turn/steer");
 	const sp = steer.params as { threadId: string; expectedTurnId: string; input: { text: string }[] };
 	assert.equal(sp.expectedTurnId, "turn-1");
-	assert.match(sp.input[0]?.text ?? "", /"git push" is blocked for workers.*git push origin main/);
+	assert.match(sp.input[0]?.text ?? "", /"rm -rf" is blocked for workers.*rm -rf build/);
 	assert.ok(d.logs.some((l) => l.kind === "codex_approval" && l.data?.verdict === "block"));
 	assert.equal(
 		updates.some((u) => u.kind === "state" && u.state === "asking"),
@@ -323,14 +323,14 @@ test("approvals: for the root, ask leaves the request to the TUI and reports ask
 		turnId: "turn-1",
 		itemId: "i1",
 		startedAtMs: 1,
-		command: "git push",
+		command: "git reset --hard",
 	});
 	server.notify("thread/status/changed", {
 		threadId: THREAD,
 		status: { type: "active", activeFlags: ["waitingOnApproval"] },
 	});
 	await tick();
-	assert.deepEqual(updates.at(-1), { kind: "state", state: "asking", detail: "git push" });
+	assert.deepEqual(updates.at(-1), { kind: "state", state: "asking", detail: "git reset --hard" });
 	assert.equal(
 		server.received.some((m) => m.id === id),
 		false,

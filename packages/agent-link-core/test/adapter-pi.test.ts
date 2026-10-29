@@ -137,14 +137,14 @@ test("a turn the user typed becomes a turn_end update; asking is not idle; cance
 	adapter.onUpdate((u) => updates.push(u));
 	await adapter.connect();
 	assert.equal(adapter.idle(), false);
-	ext.send({ type: "state", state: "asking", detail: "git push" });
+	ext.send({ type: "state", state: "asking", detail: "git reset --hard" });
 	await tick();
 	assert.equal(adapter.idle(), false);
 	ext.send({ type: "state", state: "idle" });
 	ext.send({ type: "turn_end", id: null, stopReason: "end_turn", text: "typed" });
 	await tick();
 	assert.deepEqual(updates.at(-1), { kind: "turn_end", stopReason: "end_turn", text: "typed" });
-	assert.deepEqual(updates.at(-3), { kind: "state", state: "asking", detail: "git push" });
+	assert.deepEqual(updates.at(-3), { kind: "state", state: "asking", detail: "git reset --hard" });
 	await adapter.cancel();
 	await tick();
 	assert.deepEqual(ext.received.at(-1), { type: "cancel" });

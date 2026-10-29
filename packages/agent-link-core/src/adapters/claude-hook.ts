@@ -1,21 +1,26 @@
-// Claude Code PreToolUse hook on Bash: `node claude-hook.ts <depth>` reads the hook JSON on stdin and applies
+// Claude Code PreToolUse hook on Bash and Read: `node claude-hook.ts <depth>` reads the hook JSON on stdin and applies
 // the agent-link guard. The adapter puts the agent's depth in the command, so the hook needs no env.
 //
-// Problem: a worker could run a catastrophic command (git push, rm -rf) with nobody watching.
-// Example: a worker told to "publish the branch" runs `git push`.
+// Problem: a worker could run a catastrophic command (git reset --hard, rm -rf) with nobody watching.
+// Example: a worker told to "publish the branch" runs `git reset --hard`.
 // Solution: workers (depth >= 1) get a deny with the guard's reason, which is what the model sees; the main
-// session (depth 0) gets "ask", so Claude shows its own permission prompt and the session goes `waiting`.
+// session (depth 0) gets "ask", so Claude shows its own permission prompt and the session goes `waiting`. A worker
+// is never asked: what a commit recovers (git reset --hard) simply passes for it.
+// The Read tool is judged too, so a worker cannot read the project's .env.
 // Anything else prints nothing and Claude's own permission settings rule.
-import { checkCommand } from "../guard.ts";
+import { checkCommand, checkRead, type GuardVerdict } from "../guard.ts";
 
 interface HookInput {
 	tool_name?: string;
-	tool_input?: { command?: unknown };
+	tool_input?: { command?: unknown; file_path?: unknown };
 }
 
 /** The hook's stdout for one call: empty to let Claude decide, else a PreToolUse decision. */
 export function hookOutput(input: HookInput, depth: number): string {
-	const verdict = checkCommand(String(input.tool_input?.command ?? ""), depth);
+	const verdict: GuardVerdict =
+		input.tool_name === "Read"
+			? checkRead(String(input.tool_input?.file_path ?? ""), depth)
+			: checkCommand(String(input.tool_input?.command ?? ""), depth);
 	if (verdict.action === "allow") return "";
 	return JSON.stringify({
 		hookSpecificOutput: {

@@ -136,10 +136,12 @@ export function claudeFrames(token: string, sessionId: string, text: string): st
 	return `${JSON.stringify(auth)}\n${JSON.stringify(user)}\n`;
 }
 
-/** Settings passed with --settings: the guard as a PreToolUse hook on Bash, with the agent's depth. */
+/** Settings passed with --settings: the guard as a PreToolUse hook on Bash and Read, with the agent's depth. */
 export function claudeSettings(node: string, hook: string, depth: number, permitSocket?: string): string {
 	const command = `'${node}' '${hook}' ${depth}`;
-	const hooks: Record<string, unknown> = { PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command }] }] };
+	const hooks: Record<string, unknown> = {
+		PreToolUse: [{ matcher: "Bash|Read", hooks: [{ type: "command", command }] }],
+	};
 	if (permitSocket) {
 		// The hook waits up to PERMIT_WAIT_MS (10 min) for the parent; Claude's timeout must be longer.
 		const permit = `'${node}' '${CLAUDE_PERMIT_HOOK}' '${permitSocket}'`;

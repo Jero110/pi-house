@@ -191,19 +191,19 @@ test("guard: the root is asked in the pane, reported as asking, and a no blocks 
 	const r = await pi.emit("tool_call", {
 		toolName: "bash",
 		toolCallId: "t2",
-		input: { command: "git push origin main" },
+		input: { command: "git reset --hard" },
 	});
-	assert.deepEqual(r, { block: true, reason: 'agent-link guard: the user declined "git push"' });
-	assert.match(pi.confirms[0] ?? "", /git push origin main/);
+	assert.deepEqual(r, { block: true, reason: 'agent-link guard: the user declined "git reset --hard"' });
+	assert.match(pi.confirms[0] ?? "", /git reset --hard/);
 	const asking = await client.waitFor((l) => l.type === "state" && l.state === "asking");
-	assert.equal(asking.detail, "git push origin main");
+	assert.equal(asking.detail, "git reset --hard");
 	const states = client.lines.filter((l) => l.type === "state").map((l) => l.state);
 	assert.deepEqual(states.slice(-2), ["asking", "busy"]);
 
 	pi.confirmAnswer = true;
-	const ok = await pi.emit("tool_call", { toolName: "bash", toolCallId: "t3", input: { command: "git push" } });
+	const ok = await pi.emit("tool_call", { toolName: "bash", toolCallId: "t3", input: { command: "git reset --hard" } });
 	assert.equal(ok, undefined);
-	await client.waitFor((l) => l.type === "tool_call" && l.title === "bash: git push");
+	await client.waitFor((l) => l.type === "tool_call" && l.title === "bash: git reset --hard");
 	client.close();
 	await pi.emit("session_shutdown");
 });

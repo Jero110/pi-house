@@ -255,7 +255,7 @@ test("opencode permission requests make the agent asking, the reply makes it bus
 	const { oc, adapter, updates } = await started();
 	oc.onPrompt.push(() => {
 		oc.status("busy");
-		oc.send("permission.asked", { id: "per1", sessionID: SID, permission: "bash", patterns: ["git push"] });
+		oc.send("permission.asked", { id: "per1", sessionID: SID, permission: "bash", patterns: ["git reset --hard"] });
 	});
 	const p = adapter.prompt({ id: "m1", from: "agent-link", text: "push" });
 	await until(() => updates.some((u) => u.kind === "state" && u.state === "asking"), "asking");
@@ -264,10 +264,10 @@ test("opencode permission requests make the agent asking, the reply makes it bus
 		{
 			kind: "state",
 			state: "asking",
-			detail: "bash: git push",
+			detail: "bash: git reset --hard",
 			ask: {
 				kind: "permission",
-				questions: [{ question: "bash: git push", options: ["Allow once", "Allow always", "Reject"] }],
+				questions: [{ question: "bash: git reset --hard", options: ["Allow once", "Allow always", "Reject"] }],
 			},
 		},
 	);
@@ -363,9 +363,9 @@ afterEach(() => {
 	else process.env.AGENT_LINK_DEPTH = saved;
 });
 
-async function bash(command: string, tool = "bash"): Promise<void> {
+async function bash(command: string, tool = "bash", args: Record<string, unknown> = {}): Promise<void> {
 	const hooks = await plugin.AgentLinkGuard();
-	await hooks["tool.execute.before"]({ tool }, { args: { command } });
+	await hooks["tool.execute.before"]({ tool }, { args: { command, ...args } });
 }
 
 test("the opencode plugin module exports only the plugin, since opencode runs every export", () => {
@@ -374,21 +374,26 @@ test("the opencode plugin module exports only the plugin, since opencode runs ev
 
 test("opencode workers get risky bash commands blocked with the guard's reason", async () => {
 	process.env.AGENT_LINK_DEPTH = "1";
-	await assert.rejects(bash("git push origin main"), {
-		message: 'agent-link guard: "git push" is blocked for workers',
+	await assert.rejects(bash("rm -rf build"), {
+		message: 'agent-link guard: "rm -rf" is blocked for workers',
 	});
 	await assert.rejects(bash("cd x && rm -rf build"), /rm -rf/);
+	await assert.rejects(bash("cat .env"), /\.env file/);
+	await assert.rejects(bash("", "read", { filePath: "/p/.env" }), /\.env file/);
+	await bash("git reset --hard");
+	await assert.rejects(bash("psql -c 'DROP TABLE users'"), /DROP/);
+	await bash("", "read", { filePath: "/p/src/app.ts" });
 	await bash("git status");
 	await bash("npm test");
 });
 
 test("opencode guard leaves other tools and non-workers untouched", async () => {
 	process.env.AGENT_LINK_DEPTH = "1";
-	await bash("git push", "read");
+	await bash("git reset --hard", "read");
 	delete process.env.AGENT_LINK_DEPTH;
-	await bash("git push origin main");
+	await bash("git reset --hard");
 	process.env.AGENT_LINK_DEPTH = "0";
-	await bash("git push origin main");
+	await bash("git reset --hard");
 });
 
 test("permit answers an opencode permission through its API, never the pane; a busy status does not end the wait", async () => {

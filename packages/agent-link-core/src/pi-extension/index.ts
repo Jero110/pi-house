@@ -17,7 +17,7 @@ import type {
 	ToolCallEvent,
 	ToolCallEventResult,
 } from "@earendil-works/pi-coding-agent";
-import { checkCommand } from "../guard.ts";
+import { checkCommand, checkRead } from "../guard.ts";
 import type { StopReason } from "../types.ts";
 import {
 	type FromExtension,
@@ -316,9 +316,16 @@ export function createAgentLinkExtension(env: NodeJS.ProcessEnv = process.env) {
 
 		pi.on("tool_call", async (event, c): Promise<ToolCallEventResult | undefined> => {
 			ctx = c;
-			if (event.toolName === "bash" && typeof event.input.command === "string") {
-				const command = event.input.command;
-				const verdict = checkCommand(command, depth);
+			const readPath = event.toolName === "read" ? (event.input as { path?: unknown }).path : undefined;
+			const guarded =
+				event.toolName === "bash" && typeof event.input.command === "string"
+					? event.input.command
+					: typeof readPath === "string"
+						? readPath
+						: undefined;
+			if (guarded !== undefined) {
+				const command = guarded;
+				const verdict = readPath === undefined ? checkCommand(command, depth) : checkRead(command, depth);
 				if (verdict.action === "block") return { block: true, reason: verdict.reason };
 				if (verdict.action === "ask") {
 					if (!c.hasUI)
