@@ -50,6 +50,14 @@ pi-house gets rid of the agent that makes you sit in front of it pressing "yes, 
 
 LLMs are still not great at system design, and there are incredible resources out there: books. pi-house ships a built-in RAG over your private PDF library so you can bring that knowledge into your design, and even do **RAG-driven development** that relies only on your sources, not on the model's memory. Use `/skill:ask-books <question>`, or let the `rag-based-development` skill ground your plan.
 
+## Also included
+
+- **Quota-aware model choice.** On a fresh start, pi-house can pick an authenticated Claude or OpenAI-Codex model that your subscription quota confirms has room. If quota is unknown it warns, and it never silently falls back to a paid model.
+- **Workflow commands.** `/workflow ask` answers questions about your own setup (tokens, MCPs, skills, architecture), `/workflow report` writes a code-computed report, and `/workflow proposals`, `approve` and `reject` manage self-learning changes.
+- **Skills as plain Markdown.** Grouped as pre-build, build, post-build and extras. The planner recommends the ones that fit and carries them into the plan and every executor task.
+- **Two MCP servers.** agent-link launches and messages workers on any harness and journals their lineage. The cmux MCP finds sessions and arranges panes.
+- **On-demand memory.** Agents search retained knowledge only when they need it. Nothing is injected into context automatically.
+
 ## Make your own tools
 
 These are some of the tools and ideas of the team, but the point is bigger: stop depending on a single harness or model, and start building and using your own tools.
