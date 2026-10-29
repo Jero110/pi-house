@@ -76,14 +76,37 @@ The installer asks whether to use cmux or tmux and installs `pih`, agent-link an
 curl -fsSL https://raw.githubusercontent.com/Jero110/pi-house/main/install.sh | bash -s -- --backend cmux
 ```
 
-Then:
+Claude users: the Claude bridge is not installed by default. You do not need to do anything at install time: when you pick **Claude sub** in `/login` (see Usage below), pi-house installs the bridge at that moment and reloads by itself. It needs Claude Code on your PATH. Installing it up front is optional: add `--claude-bridge` (`bash -s -- --backend cmux --claude-bridge`). Read the [Disclaimer](#disclaimer) first.
+
+## Usage
+
+Try the whole pipeline from scratch:
 
 ```bash
 cd your-project
 pih
 ```
 
-Start with `/skill:planner <idea>`.
+1. **Log in** with `/login`.
+   - Claude subscription: choose **Claude sub**.
+   - OpenAI subscription: choose the **Codex (legacy)** login.
+   - Any other provider: use its API key.
+2. **Pick a model** with `/model`.
+3. **Plan.** Run `/skill:planner`, write your prompt, and answer its questions. It recommends skills, you select the ones you want, and you agree on the plan with it.
+4. **Execute.** The planner hands the plan to the executor, which runs the tasks in their own panes on its own. Follow the flow.
+5. **Learn (optional).** Start with `/workflow report`, then use the rest:
+
+| Command | What it does |
+|---|---|
+| `/workflow report [--last]` | Writes a code-computed Markdown report and returns its path. No model call. |
+| `/workflow save [reason]` | Keeps an otherwise unselected conversation for learning. |
+| `/workflow digest` | Generates the missing digests in separate agents. |
+| `/workflow self-learning` | Prepares digests, then scans and reviews a batch in separate agents. Applies nothing. |
+| `/workflow ask <question>` | Answers from your retained evidence, metrics, architecture and skills. |
+| `/workflow proposals` | Lists proposed changes with their evidence and status. |
+| `/workflow approve <id>` | Approves a proposal and applies it after validation. |
+| `/workflow reject <id> [reason]` | Rejects a proposal and records why. |
+| `/skill:<name>` | Runs a skill by hand, e.g. `/skill:ask-books <question>`. |
 
 ## How it is built
 
