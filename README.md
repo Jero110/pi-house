@@ -19,6 +19,11 @@
   <img alt="License MIT" src="https://img.shields.io/badge/license-MIT-blue?style=flat-square">
 </p>
 
+<p align="center">
+  <a href="assets/pihouse-demo.mp4"><img alt="pi-house demo: planning, execution and self-learning" src="assets/pihouse-demo-cover.png" width="720"></a><br>
+  <sub><a href="assets/pihouse-demo.mp4">Watch the demo (2:33)</a>: planning, cross-harness execution and self-learning. The run shown is simulated.</sub>
+</p>
+
 ## Why pi-house
 
 AI moves every day: new models, new harness releases, new plugins. You end up switching between models and harnesses all the time, and that is a pain. pi-house is built so you stop paying that cost.
