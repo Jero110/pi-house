@@ -20,8 +20,8 @@
 </p>
 
 <p align="center">
-  <a href="assets/pihouse-demo.mp4"><img alt="pi-house demo: planning, execution and self-learning" src="assets/pihouse-demo-cover.png" width="720"></a><br>
-  <sub><a href="assets/pihouse-demo.mp4">Watch the demo (2:33)</a>: planning, cross-harness execution and self-learning. The run shown is simulated.</sub>
+  <a href="https://cdn.jsdelivr.net/gh/Jero110/pi-house@main/assets/pihouse-demo.mp4"><img alt="pi-house demo: planning, execution and self-learning" src="assets/pihouse-demo-cover.png" width="720"></a><br>
+  <sub><a href="https://cdn.jsdelivr.net/gh/Jero110/pi-house@main/assets/pihouse-demo.mp4">Watch the demo (2:33)</a>: planning, cross-harness execution and self-learning. The run shown is simulated.</sub>
 </p>
 
 ## Why pi-house
