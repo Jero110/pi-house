@@ -1,14 +1,13 @@
-// /workflow report, save, ask and the proposals: pihouse looking at its own workflow.
+// /workflow log, ask and the proposals: pihouse looking at its own workflow.
 //
-// report: rebuilds the last run from disk (agent-link journal + transcripts) and writes a code-only report of what ran,
-//   with which skills, tokens and time by role, harness, agent and message. No model turn.
-// save: flags the current session's run and captures it into the workflow memory now. Planner and executor sessions
-//   are flagged and captured by default (see workflow/capture.ts).
+// log: flags the current session's run and captures it into the workflow memory now. Planner and executor sessions
+//   are flagged by name and captured by default, after each answer and again when the session closes (see
+//   workflow/capture.ts). `save` and `report` are retired.
 // ask: gives the model the architecture, the skills catalog and what is installed here, then the question.
 // proposals, approve, reject: the proposal store (see proposalCommand). No model turn.
-// `/workflow review` (model-written recommendations) was removed; the report is what remains, and it is computed.
+// `/workflow review` (model-written recommendations) was removed; the per-conversation report.md is code-computed.
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -49,8 +48,6 @@ import {
 	type ScopedTarget,
 	shortVersion,
 } from "../workflow/proposals.ts";
-import { renderReport } from "../workflow/report.ts";
-import { buildRun, pickRoot, type WorkflowRun } from "../workflow/run.ts";
 import { fetchSource, type SourceResult } from "../workflow/sources.ts";
 import { openOperationalStore } from "../workflow/storage.ts";
 import { vaultPaths, vaultRel } from "../workflow/vault-paths.ts";
@@ -64,8 +61,7 @@ export const MESSAGE_TYPE = "pihouse-workflow";
  * removed from the other. Solution: one table; the handler's dispatch below handles the same words.
  */
 export const WORKFLOW_COMMANDS = [
-	{ usage: "report [--last]", completions: ["report", "report --last"] },
-	{ usage: "save [reason]", completions: ["save "] },
+	{ usage: "log [reason]", completions: ["log "] },
 	{ usage: "digest (separate model agent; model quota)", completions: ["digest"] },
 	{ usage: "self-learning (digest, scan and review agents; model quota)", completions: ["self-learning"] },
 	{ usage: "ask <question>", completions: ["ask "] },
@@ -84,6 +80,10 @@ export const USAGE = `usage: ${WORKFLOW_COMMANDS.map((c) => `/workflow ${c.usage
  */
 const REVIEW_REMOVED =
 	"/workflow review was removed. Use /workflow report [--last] for what a run did. Use /workflow self-learning to learn from runs.";
+const SAVE_RETIRED =
+	"/workflow save was retired. Use /workflow log [reason] to capture this session; nothing was captured now.";
+const REPORT_RETIRED =
+	"/workflow report was retired. Each captured conversation keeps its code-computed report.md under conversations/ in the workflow memory; nothing was written now.";
 const KEEPER_RETIRED =
 	"The keeper was retired. Use /workflow proposals, /workflow approve <id> and /workflow reject <id> [reason]; /workflow report shows what a run did.";
 
@@ -291,9 +291,9 @@ function savedRevision(store: MemoryStore, runId: string): number | undefined {
 }
 
 /**
- * The user's save result, without claiming a write for a discarded, deferred or legacy processed run.
+ * The user's log result, without claiming a write for a discarded, deferred or legacy processed run.
  */
-export function saveOutcomeText(
+export function logOutcomeText(
 	runId: string,
 	result: ReturnType<typeof captureRunOutcome>,
 	priorRevision?: number,
@@ -316,32 +316,17 @@ export function saveOutcomeText(
 	return { level: "warning", text: `Run ${runId} capture returned ${result.status}; no new capture was written.` };
 }
 
-function save(pi: ExtensionAPI, reason: string, ctx: ExtensionCommandContext): void {
+function log(pi: ExtensionAPI, reason: string, ctx: ExtensionCommandContext): void {
 	const store = openMemory(pihousePaths().memory);
 	const { records, root } = ownRun(ctx);
-	addFlag(store.dir, root.id, { reason: reason || undefined, by: "save" });
+	addFlag(store.dir, root.id, { reason: reason || undefined, by: "log" });
 	const name = pi.getSessionName();
 	if (!name?.startsWith(WORKFLOW_PREFIX))
 		pi.setSessionName(`workflow-saved · ${name ?? (capTitle(reason, 48) || "chat")}`);
 	const priorRevision = savedRevision(store, root.id);
-	const result = captureRunOutcome(records, root, store, { by: "save", reason: reason || undefined });
-	const outcome = saveOutcomeText(root.id, result, priorRevision, savedRevision(store, root.id), store.pendingCount());
+	const result = captureRunOutcome(records, root, store, { by: "log", reason: reason || undefined });
+	const outcome = logOutcomeText(root.id, result, priorRevision, savedRevision(store, root.id), store.pendingCount());
 	ctx.ui.notify(outcome.text, outcome.level);
-}
-
-function report(args: string[], ctx: ExtensionCommandContext): void {
-	const records = readJournal(hubPaths(agentLinkHome()).sessions);
-	const root = args.includes("--last")
-		? pickRoot(records, {})
-		: pickRoot(records, { sessionId: ctx.sessionManager.getSessionId(), agent: process.env.AGENT_LINK_AGENT });
-	const run = root
-		? buildRun(records, root)
-		: buildRun([], localRecord(ctx.sessionManager.getSessionId(), ctx.cwd, ctx.sessionManager.getSessionFile()));
-	const paths = pihousePaths();
-	mkdirSync(paths.reports, { recursive: true });
-	const file = join(paths.reports, reviewFileName(slugOf(run), new Date()));
-	writeFileSync(file, `${renderReport(run)}\n`);
-	ctx.ui.notify(`Workflow report: ${file}`, "info");
 }
 
 export type ProposalCommand = "proposals" | "approve" | "reject";
@@ -576,9 +561,6 @@ async function runProposalCommand(
 	}
 }
 
-const slugOf = (run: WorkflowRun) =>
-	(run.plan?.split("/").pop()?.replace(/\.md$/, "") ?? run.root.name).replace(/[^\w-]+/g, "-");
-
 export default function workflow(pi: ExtensionAPI): void {
 	// Planner and executor sessions are flagged by name and captured by default (spec: Flags). The flag is written at
 	// the first input, when the run is surely in the journal; the capture follows each answer while the run is pending.
@@ -593,7 +575,14 @@ export default function workflow(pi: ExtensionAPI): void {
 			// Flagging must never block the user's prompt.
 		}
 	});
-	pi.on("agent_end", (_event, ctx) => {
+	/**
+	 * Captures the session when it is flagged; an unflagged session captures nothing.
+	 * Problem: the capture after each answer misses what happens after the last answer, and a throwing handler could
+	 * stall pi while it closes. Example: the executor's last tool calls land after its final agent_end. Solution: the
+	 * same capture runs at session_shutdown. It is synchronous, so it finishes inside the handler; capturing the same
+	 * evidence twice is a no-op (same fingerprint, no new revision); any failure is swallowed and the sweep retries.
+	 */
+	const captureIfFlagged = (ctx: ExtensionContext): void => {
 		try {
 			const store = openMemory(pihousePaths().memory);
 			const { records, root } = ownRun(ctx);
@@ -602,19 +591,22 @@ export default function workflow(pi: ExtensionAPI): void {
 		} catch {
 			// A failed capture is retried by the sweep.
 		}
-	});
+	};
+	pi.on("agent_end", (_event, ctx) => captureIfFlagged(ctx));
+	pi.on("session_shutdown", (_event, ctx) => captureIfFlagged(ctx));
 	pi.registerCommand("workflow", {
 		description:
-			"report [--last]: what the last run did · save [reason] · digest (launches a separate model agent; costs model quota) · self-learning (launches digest, scan and review agents; costs model quota) · ask <question> · proposals · approve <id> [version] · reject <id> [reason]",
+			"log [reason]: capture this session · digest (launches a separate model agent; costs model quota) · self-learning (launches digest, scan and review agents; costs model quota) · ask <question> · proposals · approve <id> [version] · reject <id> [reason]",
 		getArgumentCompletions: (prefix) =>
 			WORKFLOW_COMMANDS.flatMap((c) => [...c.completions])
 				.filter((c) => c.startsWith(prefix))
 				.map((c) => ({ value: c, label: c })),
 		handler: async (raw, ctx) => {
 			const [sub, ...rest] = raw.trim().split(/\s+/);
-			if (sub === "report") return report(rest, ctx);
+			if (sub === "report") return ctx.ui.notify(REPORT_RETIRED, "warning");
 			if (sub === "review") return ctx.ui.notify(REVIEW_REMOVED, "warning");
-			if (sub === "save") return save(pi, rest.join(" ").trim(), ctx);
+			if (sub === "save") return ctx.ui.notify(SAVE_RETIRED, "warning");
+			if (sub === "log") return log(pi, rest.join(" ").trim(), ctx);
 			if (sub === "proposals" || sub === "approve" || sub === "reject") return runProposalCommand(sub, rest, ctx);
 			if (sub === "digest") return learning(ctx, sub, digestCommand);
 			if (sub === "self-learning") return learning(ctx, sub, selfLearningCommand);
