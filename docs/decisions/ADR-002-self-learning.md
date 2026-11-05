@@ -1,7 +1,7 @@
 # ADR-002: Explicit, evidence-backed workflow learning
 
 ## Status
-Accepted; supersedes only conflicting workflow-memory behavior in ADR-001.
+Partially superseded by ADR-004
 
 ## Date
 2026-10-27
