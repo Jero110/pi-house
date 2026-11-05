@@ -36,7 +36,7 @@ export const LIMITS = {
 const ID = /^[a-z0-9][a-z0-9._-]{0,127}$/i;
 const AGENT = /^[a-z0-9][a-z0-9._-]{0,63}$/i;
 const TARGET = /^[a-z0-9][a-z0-9._:-]{0,127}$/i;
-const PROPOSAL_KINDS = ["memory-rule", "edit-skill", "remove-skill", "remove-idea"];
+const PROPOSAL_KINDS = ["memory-rule", "edit-skill", "remove-skill", "remove-idea", "edit-file"];
 const VERDICTS = ["useful", "irrelevant", "outdated"];
 // Every trust level is readable, but each result carries its level so external text is never mistaken for ours.
 const TRUSTS = ["trusted", "derived", "external"];

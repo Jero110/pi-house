@@ -226,6 +226,16 @@ test("propose writes an open proposal only, validated and attributed", async () 
 		});
 		assert.equal(again.data.id, id);
 
+		const file = await client.call("memory_propose", {
+			kind: "edit-file",
+			target: "notes",
+			change: "Replacement text.",
+			evidence: ["mine"],
+			scope: "global",
+		});
+		assert.equal(file.isError, false);
+		assert.equal(file.data.state, "open");
+
 		const bad: Json[] = [
 			{ kind: "delete-raw", target: "x", change: "c", evidence: ["mine"] },
 			{ kind: "memory-rule", target: "../../etc", change: "c", evidence: ["mine"] },
@@ -242,9 +252,17 @@ test("propose writes an open proposal only, validated and attributed", async () 
 		try {
 			const rows = store.db.prepare("SELECT id, state FROM proposals").all();
 			assert.deepEqual(
-				rows.map((r) => [r.id, r.state]),
-				[[id, "open"]],
+				rows.map((r) => [r.id, r.state]).sort(),
+				[
+					[id, "open"],
+					[file.data.id, "open"],
+				].sort(),
 			);
+			const filed = JSON.parse(
+				String(store.db.prepare("SELECT payload FROM proposals WHERE id = ?").get(String(file.data.id))?.payload),
+			);
+			assert.equal(filed.target, "edit-file:notes");
+			assert.equal("scope" in filed, false);
 			const who = store.db.prepare("SELECT payload FROM receipts WHERE proposal_id = ?").get(id);
 			assert.match(String(who?.payload), /worker-1/);
 		} finally {

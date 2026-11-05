@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
+import { checkFileTarget } from "./proposal-target.ts";
 import { createProposal, mergeEvidence, type Proposal } from "./proposals.ts";
 
 const MAX_BLOCK = 100_000;
@@ -74,7 +75,17 @@ function changeHash(before: string, after: string): string {
 		.digest("hex");
 }
 
-function resolveEntry(db: DatabaseSync, entry: IntakeEntry) {
+function resolveEntry(db: DatabaseSync, entry: IntakeEntry, home?: string) {
+	// Problem: a hostile or mistaken path would sit in the queue until someone approves it. Example: `file:~/.ssh/config`
+	// or a relative path. Solution: refuse the whole review at intake with the reason; nothing is written.
+	if (entry.target.startsWith("file:")) {
+		if (entry.kind !== "edit-file") throw new Error(`file target needs kind edit-file: ${entry.target}`);
+		try {
+			checkFileTarget(entry.target.slice(5), home);
+		} catch (error) {
+			throw new Error(`refused file target ${entry.target}: ${error instanceof Error ? error.message : String(error)}`);
+		}
+	} else if (entry.kind === "edit-file") throw new Error(`edit-file needs a file: target: ${entry.target}`);
 	const support: string[] = [];
 	for (const ref of entry.supporting) {
 		const row = db.prepare("SELECT run_id FROM revisions WHERE id = ?").get(ref);
@@ -95,7 +106,12 @@ function resolveEntry(db: DatabaseSync, entry: IntakeEntry) {
 }
 
 /** Intake is all-or-nothing: malformed model output is recorded, never partially trusted. */
-export function ingestReview(db: DatabaseSync, reviewId: string, review: string): IntakeResult {
+export function ingestReview(
+	db: DatabaseSync,
+	reviewId: string,
+	review: string,
+	options: { home?: string } = {},
+): IntakeResult {
 	let entries: IntakeEntry[];
 	try {
 		entries = parseReview(review);
@@ -108,7 +124,7 @@ export function ingestReview(db: DatabaseSync, reviewId: string, review: string)
 	if (prior) return JSON.parse(String(prior.payload)) as IntakeResult;
 	let resolved: ReturnType<typeof resolveEntry>[];
 	try {
-		resolved = entries.map((entry) => resolveEntry(db, entry));
+		resolved = entries.map((entry) => resolveEntry(db, entry, options.home));
 	} catch (error) {
 		return fail(db, reviewId, String(error));
 	}
