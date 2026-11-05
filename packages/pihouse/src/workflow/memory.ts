@@ -58,7 +58,7 @@ export interface RunPackage {
 	id: string;
 	project: string;
 	projectSlug: string;
-	flaggedBy: "planner" | "executor" | "save";
+	flaggedBy: "planner" | "executor" | "save" | "log";
 	reason?: string;
 	capturedAt: string;
 	plan?: string;

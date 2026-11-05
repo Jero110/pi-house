@@ -65,16 +65,16 @@ export function readFlags(dir: string): FlagsFile {
 }
 
 /**
- * Flags a run. An earlier flag keeps its reason unless a new one is given, and a `save` is never downgraded by the
- * automatic flags that come after it.
- * Problem: the user saves a planner run with a reason, then the planner's next agent_end flags it again as "planner"
- * with no reason, and the reason is gone. Solution: merge, with the explicit save winning.
+ * Flags a run. An earlier flag keeps its reason unless a new one is given, and a user's `log` (or a `save` from before
+ * it was renamed) is never downgraded by the automatic flags that come after it.
+ * Problem: the user logs a planner run with a reason, then the planner's next agent_end flags it again as "planner"
+ * with no reason, and the reason is gone. Solution: merge, with the explicit flag winning.
  */
 export function addFlag(dir: string, runId: string, flag: { reason?: string; by: FlagBy }, now = new Date()): Flag {
 	const file = readFlags(dir);
 	const old = file.runs[runId];
 	const merged: Flag = {
-		by: old?.by === "save" ? "save" : flag.by,
+		by: old?.by === "save" || old?.by === "log" ? old.by : flag.by,
 		at: old?.at ?? now.toISOString(),
 	};
 	const reason = flag.reason ?? old?.reason;
@@ -115,7 +115,7 @@ export function ownRoot(
 
 /**
  * A root for a session the hub never saw (`PIHOUSE_NO_LINK=1`): the session alone, read from its own file.
- * Problem: no hub means no journal record, so /workflow save had no run to capture. Example: a plain chat in a
+ * Problem: no hub means no journal record, so /workflow log had no run to capture. Example: a plain chat in a
  * terminal. Solution: a made-up record with the id `local-<pi session id>`.
  */
 export function localRecord(
@@ -702,6 +702,10 @@ export function captureRunOutcome(
 	// Solution: an identical cleaned fingerprint is discarded before anything is written, so it is never reimported.
 	const admitted = operationalRead(store, (db) => capturedAdmission(db, pkg.id, fingerprint)) ?? "admit";
 	if (admitted === "discarded") return { status: "discarded" };
+	// Problem: agent_end and session_shutdown both capture, and writeRun replaces the whole folder. Example: the first
+	// capture keeps the raw `.jsonl` copy; a second capture of the same evidence would rewrite the folder without it and
+	// move `capturedAt`. Solution: identical evidence and metadata (the clock aside) is already stored; leave it alone.
+	if (previous && !cleaned && sameStored(previous, stored)) return { status: "written" };
 	const result = store.writeRun(stored, transcripts, renderEvidenceReport(evidence), { reopen: cleaned !== undefined });
 	if (result === "written" && existsSync(join(store.dir, ACTIVE_MARKER))) {
 		const operational = openOperationalStore(join(store.dir, "memory.sqlite"), { fts: false, legacy: true });
@@ -718,6 +722,18 @@ export function captureRunOutcome(
 		}
 	}
 	return { status: result };
+}
+
+/** Whether a stored package already says what a new capture would write, ignoring when it was captured. */
+function sameStored(previous: StoredPackage, next: StoredPackage): boolean {
+	// The raw copy is kept from the first capture, so a later one names none; that is not a difference.
+	const bare = (pkg: StoredPackage) =>
+		JSON.stringify({
+			...pkg,
+			capturedAt: undefined,
+			agents: pkg.agents.map((agent) => ({ ...agent, raw: undefined })),
+		});
+	return bare(previous) === bare(next);
 }
 
 /**

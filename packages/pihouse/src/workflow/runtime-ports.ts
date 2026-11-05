@@ -24,7 +24,7 @@ interface StoredRun {
 }
 
 const REVISION_ID = /^(.+)\.r([0-9]+)$/;
-const FLAGGED: readonly FlagBy[] = ["planner", "executor", "save"];
+const FLAGGED: readonly FlagBy[] = ["planner", "executor", "save", "log"];
 
 /** The stored package's identity fields, or undefined when run.json is missing or malformed. */
 function storedRun(storeDir: string, runId: string): StoredRun | undefined {
