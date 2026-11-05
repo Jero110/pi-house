@@ -4,6 +4,7 @@ import { join, resolve } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { type DigestIdentity, validateDigest } from "./digest-contract.ts";
 import { commitArtifact } from "./documents.ts";
+import { isValidCompact } from "./run-stages.ts";
 import { vaultPaths } from "./vault-paths.ts";
 
 // Digest commit and owned-copy cleanup. Generation is never deletion authority: the only thing that deletes is
@@ -222,6 +223,135 @@ export function runCleanup(
 	manifest.lastError = undefined;
 	db.prepare("UPDATE cleanup_manifests SET state = 'cleaned', payload = ? WHERE id = ?").run(
 		JSON.stringify(manifest),
+		id,
+	);
+	return { status: "cleaned", id, deleted: present.length };
+}
+
+interface ReviewReceipt {
+	kind: "reviewed";
+	runId: string;
+	revision: string;
+	reviewId: string;
+	compactPath: string;
+	compactHash: string;
+	files: ManifestFile[];
+	cursors?: unknown;
+	lastError?: string;
+	attempts: number;
+}
+
+/**
+ * Delete the full conversation of one revision, only when its review is done.
+ * Problem: a compact made by ask, an edited compact, a run captured again or a run still working must never cost the
+ * only copy of a conversation. Example: ask compacts run-a.r2 (not reviewed) and a stale 'generated' job named
+ * compact-run-a.r2 exists; neither may open this gate. Solution: the only authority is the run_stages row (compact
+ * valid on disk, review finished) plus quiescence, an unchanged evidence fingerprint and a persisted receipt of
+ * SHA-256 hashes. Jobs are never read. Gates re-run on every call, so a resume after a crash is as strict as the first run.
+ * `beforeDelete` is a seam for tests: returning false stops before the next unlink.
+ */
+export function cleanupReviewed(
+	db: DatabaseSync,
+	input: {
+		root: string;
+		revisionId: string;
+		currentFingerprint: string;
+		quiescent: boolean;
+		cursors?: unknown;
+		beforeDelete?: (name: string) => boolean;
+	},
+): CleanupResult {
+	const id = input.revisionId;
+	const stored = () => db.prepare("SELECT state, payload FROM cleanup_manifests WHERE id = ?").get(id);
+	const blocked = (reason: string): CleanupResult => {
+		const row = stored();
+		if (row && row.state !== "cleaned" && typeof row.payload === "string") {
+			const receipt = JSON.parse(row.payload) as ReviewReceipt;
+			receipt.lastError = reason;
+			receipt.attempts = (receipt.attempts ?? 0) + 1;
+			db.prepare("UPDATE cleanup_manifests SET state = 'cleanup-failed', payload = ? WHERE id = ?").run(
+				JSON.stringify(receipt),
+				id,
+			);
+		}
+		return { status: "blocked", id, reason };
+	};
+	if (!SAFE_ID.test(id)) return { status: "blocked", id, reason: "invalid revision id" };
+	const existing = stored();
+	if (existing?.state === "cleaned") return { status: "cleaned", id, deleted: 0 };
+
+	const revision = db.prepare("SELECT run_id, source_hash FROM revisions WHERE id = ?").get(id);
+	if (!revision) return blocked("revision is not recorded");
+	const runId = String(revision.run_id);
+	const stage = db
+		.prepare(
+			"SELECT compact_path, compact_hash, compact_fingerprint, review_id, reviewed_at FROM run_stages WHERE revision_id = ?",
+		)
+		.get(id);
+	if (!stage) return blocked("no compact for this revision");
+	if (stage.reviewed_at === null || typeof stage.review_id !== "string") return blocked("revision is not reviewed");
+	if (!isValidCompact(db, id, input.root)) return blocked("compact is missing, edited or made from other evidence");
+	if (input.currentFingerprint !== stage.compact_fingerprint)
+		return blocked("evidence changed after the compact was made");
+	if (!input.quiescent) return blocked("run is not quiescent");
+
+	const dir = capturedDir(input.root, runId);
+	if (typeof dir !== "string") return blocked(dir.error);
+
+	let receipt: ReviewReceipt;
+	if (existing && typeof existing.payload === "string") {
+		receipt = JSON.parse(existing.payload) as ReviewReceipt;
+		if (
+			receipt.kind !== "reviewed" ||
+			receipt.runId !== runId ||
+			receipt.revision !== id ||
+			receipt.reviewId !== stage.review_id ||
+			receipt.compactHash !== stage.compact_hash ||
+			!Array.isArray(receipt.files)
+		)
+			return blocked("receipt does not match the reviewed revision");
+	} else {
+		const files: ManifestFile[] = [];
+		for (const name of readdirSync(dir).sort()) {
+			const checked = inspectFile(dir, { name });
+			if (typeof checked === "object") return blocked(checked.error);
+			files.push({ name, sha256: sha256(readFileSync(join(dir, name))) });
+		}
+		receipt = {
+			kind: "reviewed",
+			runId,
+			revision: id,
+			reviewId: stage.review_id,
+			compactPath: String(stage.compact_path),
+			compactHash: String(stage.compact_hash),
+			files,
+			cursors: input.cursors,
+			attempts: 0,
+		};
+		db.prepare("INSERT OR IGNORE INTO cleanup_manifests(id, payload, state) VALUES (?, ?, 'committed')").run(
+			id,
+			JSON.stringify(receipt),
+		);
+	}
+
+	const present: string[] = [];
+	for (const file of receipt.files) {
+		const checked = inspectFile(dir, file);
+		if (typeof checked === "object") return blocked(checked.error);
+		if (checked === "present") present.push(file.name);
+	}
+	for (const name of present) {
+		if (input.beforeDelete && !input.beforeDelete(name)) return blocked("cleanup stopped before deleting");
+		unlinkSync(join(dir, name));
+	}
+	try {
+		rmdirSync(dir);
+	} catch {
+		// Not empty or already removed: unlisted files are never deleted.
+	}
+	receipt.lastError = undefined;
+	db.prepare("UPDATE cleanup_manifests SET state = 'cleaned', payload = ? WHERE id = ?").run(
+		JSON.stringify(receipt),
 		id,
 	);
 	return { status: "cleaned", id, deleted: present.length };
