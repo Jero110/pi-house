@@ -9,13 +9,26 @@ export interface ArtifactCommit {
 	hash: string;
 }
 
-export function commitArtifact(input: { root: string; id: string; kind: string; content: string }): ArtifactCommit {
+/**
+ * `fileName` sets the exact file name instead of `<kind>-<id>.md`.
+ * Problem: a compact is named after its revision so a person can find it. Example: workflow/compact/run-a.r2.md, not
+ * compact-run-a.r2.md. Solution: an optional plain `.md` name; without it the name is unchanged for every other caller.
+ */
+export function commitArtifact(input: {
+	root: string;
+	id: string;
+	kind: string;
+	content: string;
+	fileName?: string;
+}): ArtifactCommit {
 	const root = resolve(input.root);
 	if (!/^[a-z0-9][a-z0-9._-]*$/i.test(input.id) || !/^[a-z][a-z0-9-]*$/i.test(input.kind))
 		throw new Error("Invalid artifact identity");
+	if (input.fileName !== undefined && !/^[a-z0-9][a-z0-9._-]*\.md$/i.test(input.fileName))
+		throw new Error("Invalid artifact file name");
 	mkdirSync(root, { recursive: true, mode: 0o700 });
 	chmodSync(root, 0o700);
-	const path = join(root, `${input.kind}-${input.id}.md`);
+	const path = join(root, input.fileName ?? `${input.kind}-${input.id}.md`);
 	const hash = createHash("sha256").update(input.content).digest("hex");
 	const manifest = join(root, `.commit-${input.id}.json`);
 	const temp = join(root, `.${randomUUID()}.tmp`);
