@@ -178,9 +178,10 @@ export async function executeDigest(
 	// Problem: cleanup-failed revisions have commit manifests, so candidate selection excludes them. Example: after a
 	// failed unlink, another invocation sees no digest candidate and never retries deletion. Solution: retry the saved
 	// artifact's cleanup before considering any new generation; this path cannot call the digest worker.
+	// Compact jobs (compact-<revision>) are also left 'generated' and carry no digest receipt: they are not cleanup work.
 	const pendingCleanup = options.db
 		.prepare(
-			"SELECT j.id, j.revision_id, json_extract(j.payload, '$.artifactPath') AS artifact_path FROM jobs j WHERE j.state IN ('generated', 'cleanup-failed') ORDER BY j.id",
+			"SELECT j.id, j.revision_id, json_extract(j.payload, '$.artifactPath') AS artifact_path FROM jobs j WHERE j.state IN ('generated', 'cleanup-failed') AND j.id NOT LIKE 'compact-%' ORDER BY j.id",
 		)
 		.all();
 	for (const row of pendingCleanup) {
