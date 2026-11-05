@@ -161,7 +161,11 @@ export function memoryTools(launch: Launch): Tool[] {
 			inputSchema: schema(
 				{
 					query: { type: "string", description: "Words or a quoted phrase." },
-					kinds: { type: "array", items: { type: "string" }, description: "Optional kinds, e.g. digest." },
+					kinds: {
+						type: "array",
+						items: { type: "string" },
+						description: "Optional kinds: compact, review, idea, consulted.",
+					},
 					limit: { type: "number", description: `At most ${LIMITS.searchHits}.` },
 				},
 				["query"],

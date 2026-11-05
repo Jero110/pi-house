@@ -102,7 +102,7 @@ function fixture(): Fixture {
 
 /** A fully exited synthetic run: its package, one transcript copy and the operational rows a capture writes. */
 function addExitedRun(f: Fixture, runId: string, lineage = `lineage-${runId}`): void {
-	const run = join(f.memory, "runs", runId);
+	const run = join(f.memory, "conversations", runId);
 	mkdirSync(join(run, "transcripts"), { recursive: true });
 	writeFileSync(
 		join(run, "run.json"),
@@ -216,10 +216,17 @@ test("a fully exited run is digested once under digests/, its copies cleaned, an
 		assert.ok(existsSync(digestFile), "the digest is committed under digests/<run>");
 		assert.match(outcome.text, new RegExp(digestFile.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
 		assert.doesNotMatch(outcome.text, /synthetic objective/, "no digest text reaches the session");
-		assert.equal(existsSync(join(f.memory, "runs", "run-one", "transcripts", "a.jsonl")), false, "the copy is cleaned");
+		assert.equal(
+			existsSync(join(f.memory, "conversations", "run-one", "transcripts", "a.jsonl")),
+			false,
+			"the copy is cleaned",
+		);
 		assert.equal(hub.spawns.length, 1);
 		assert.equal(hub.spawns[0].model, "openai-codex/gpt-6-luna", "the child runs the configured model");
-		assert.ok(hub.spawns[0].read?.includes(join(f.memory, "runs", "run-one")), "the child reads only its run folder");
+		assert.ok(
+			hub.spawns[0].read?.includes(join(f.memory, "conversations", "run-one")),
+			"the child reads only its run folder",
+		);
 		assert.ok(
 			progress.some((text) => /Digest 1 of 1/.test(text)),
 			"progress is reported while it works",
@@ -344,7 +351,7 @@ test("self-learning digests the missing runs, then scans and reviews the batch i
 		for (const spawn of [scan, review]) {
 			assert.ok(spawn?.read?.includes(join(f.memory, "batches")), "the batch folder is readable");
 			assert.ok(spawn?.read?.includes(join(f.memory, "digests")), "the digests are readable");
-			assert.ok(!spawn?.read?.includes(join(f.memory, "runs", "run-a")), "no raw run folder is readable");
+			assert.ok(!spawn?.read?.includes(join(f.memory, "conversations", "run-a")), "no raw run folder is readable");
 		}
 
 		assert.match(outcome.text, /Self-learning batch batch-\w+: reviewed 2 run\(s\)\./);

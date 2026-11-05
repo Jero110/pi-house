@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { openMemory, type RunPackage } from "../src/workflow/memory.ts";
+import type { RunPackage } from "../src/workflow/memory.ts";
 import { migrateLegacyStore } from "../src/workflow/migration.ts";
 import {
 	reconcileSearch,
@@ -13,6 +13,7 @@ import {
 	syncSearchStore,
 } from "../src/workflow/search.ts";
 import { openOperationalStore } from "../src/workflow/storage.ts";
+import { openLegacyMemory, toLegacyLayout } from "./legacy-store.ts";
 
 test("reconciles canonical documents and searches only authorized active trusted scope", () => {
 	const dir = mkdtempSync(join(tmpdir(), "pihouse-search-"));
@@ -145,7 +146,7 @@ function run(id: string): RunPackage {
 function activated(): { dir: string; cleanup: () => void } {
 	const root = mkdtempSync(join(tmpdir(), "pihouse-sync-"));
 	const dir = join(root, "memory");
-	const mem = openMemory(dir);
+	const mem = openLegacyMemory(dir);
 	mem.writeRun(run("r1"), [{ agentId: "a1", normalized: { messages: ["TRANSCRIPTSECRET zebra"] } }]);
 	mem.writeDigest("r1", "---\nsummary: digest summary\n---\n\nThe digest mentions quasar behaviour.");
 	const meta = { title: "Src", project: "/abs/p", projectSlug: "p" };
@@ -154,6 +155,7 @@ function activated(): { dir: string; cleanup: () => void } {
 	const a = mem.propose({ kind: "memory-rule", target: "m", change: "approved nebula rule", evidence: "e" });
 	mem.propose({ kind: "memory-rule", target: "m", change: "pending vortex rule", evidence: "e" });
 	if (a.result === "created") mem.decide(a.id, "approved");
+	toLegacyLayout(dir);
 	migrateLegacyStore(dir);
 	return { dir, cleanup: () => rmSync(root, { recursive: true, force: true }) };
 }
@@ -224,7 +226,7 @@ test("syncSearchIndex refuses non-activated, missing and corrupt stores with a d
 	const root = mkdtempSync(join(tmpdir(), "pihouse-refuse-"));
 	try {
 		const legacyDir = join(root, "legacy");
-		openMemory(legacyDir).writeIdea({ id: "i", title: "t", project: "p", projectSlug: "p" }, "body");
+		openLegacyMemory(legacyDir).writeIdea({ id: "i", title: "t", project: "p", projectSlug: "p" }, "body");
 		assert.throws(() => syncSearchIndex(legacyDir), /not activated|migrate/i);
 		assert.equal(
 			openOperationalStore(join(legacyDir, "memory.sqlite"))

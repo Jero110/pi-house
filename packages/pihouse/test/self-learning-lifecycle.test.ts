@@ -211,12 +211,13 @@ function learningDeps(
 }
 
 function packageFingerprint(f: ReturnType<typeof fixture>, runId: string): string {
-	return (JSON.parse(readFileSync(join(f.memory, "runs", runId, "run.json"), "utf8")) as { fingerprint: string })
-		.fingerprint;
+	return (
+		JSON.parse(readFileSync(join(f.memory, "conversations", runId, "run.json"), "utf8")) as { fingerprint: string }
+	).fingerprint;
 }
 
 function transcriptCopy(f: ReturnType<typeof fixture>, runId: string): string {
-	const dir = join(f.memory, "runs", runId, "transcripts");
+	const dir = join(f.memory, "conversations", runId, "transcripts");
 	return readdirSync(dir)
 		.map((name) => readFileSync(join(dir, name), "utf8"))
 		.join("\n");
@@ -225,7 +226,7 @@ function transcriptCopy(f: ReturnType<typeof fixture>, runId: string): string {
 test("public digestCommand retries pending cleanup without calling a digest worker", async () => {
 	const f = fixture();
 	try {
-		const run = join(f.memory, "runs", "run-pending");
+		const run = join(f.memory, "conversations", "run-pending");
 		mkdirSync(join(run, "transcripts"), { recursive: true });
 		writeFileSync(
 			join(run, "run.json"),
@@ -284,7 +285,7 @@ test("connected lifecycle captures, retries one failed digest, reviews and appli
 		const third = captureSyntheticRun(f, "run-c", 3);
 		for (const { root } of [first, second, third]) {
 			assert.ok(
-				existsSync(join(f.memory, "runs", root.id, "report.md")),
+				existsSync(join(f.memory, "conversations", root.id, "report.md")),
 				"capture writes the synthetic computed report",
 			);
 		}
@@ -310,17 +311,17 @@ test("connected lifecycle captures, retries one failed digest, reviews and appli
 		assert.match(firstOutcome.text, /Proposals: 1 created, 0 merged/);
 		assert.doesNotMatch(firstOutcome.text, /synthetic objective/);
 		assert.ok(existsSync(join(f.memory, "digests", "run-b", "digest-run-b.r1.md")));
-		assert.equal(existsSync(join(f.memory, "runs", "run-b", "transcripts")), false);
+		assert.equal(existsSync(join(f.memory, "conversations", "run-b", "transcripts")), false);
 		assert.equal(
-			existsSync(join(f.memory, "runs", "run-a", "transcripts")),
+			existsSync(join(f.memory, "conversations", "run-a", "transcripts")),
 			true,
 			"failed digest retains captured evidence",
 		);
 
 		const retryOutcome = await selfLearningCommand(deps);
 		assert.match(retryOutcome.text, /2 generated, 2 cleaned, 0 cleanup pending, 0 failed/);
-		assert.equal(existsSync(join(f.memory, "runs", "run-a", "transcripts")), false);
-		assert.equal(existsSync(join(f.memory, "runs", "run-c", "transcripts")), false);
+		assert.equal(existsSync(join(f.memory, "conversations", "run-a", "transcripts")), false);
+		assert.equal(existsSync(join(f.memory, "conversations", "run-c", "transcripts")), false);
 		assert.equal(
 			hub.spawns.filter((child) => /job digest-/.test(child.task)).length,
 			4,
@@ -349,8 +350,8 @@ test("connected lifecycle captures, retries one failed digest, reviews and appli
 			store.close();
 		}
 
-		const target = join(f.memory, "approved-records", "preference", "test-first.md");
-		mkdirSync(join(f.memory, "approved-records", "preference"), { recursive: true });
+		const target = join(f.memory, "workflow", "approved-records", "preference", "test-first.md");
+		mkdirSync(join(f.memory, "workflow", "approved-records", "preference"), { recursive: true });
 		writeFileSync(target, "existing preference");
 		// Approval itself uses the public command so it applies against a real temporary target and records its receipt.
 		// A merged proposal approves only with the version the user listed; approve without one refuses it.
@@ -396,7 +397,7 @@ test("connected lifecycle captures, retries one failed digest, reviews and appli
 		appendFileSync(first.source, `${nativeMessage("run-a-2", "new appended delta only")}\n`);
 		const reopening = openMemory(f.memory);
 		assert.equal(captureRun([first.root], first.root, reopening, { by: "planner" }), "written");
-		const reopened = JSON.parse(readFileSync(join(f.memory, "runs", "run-a", "run.json"), "utf8")) as {
+		const reopened = JSON.parse(readFileSync(join(f.memory, "conversations", "run-a", "run.json"), "utf8")) as {
 			revision: number;
 		};
 		assert.equal(reopened.revision, 2);

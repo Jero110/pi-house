@@ -155,7 +155,7 @@ test("rollback refuses a real skill file changed after application", async () =>
 test("memory approved-record target is writable; unsafe kinds and traversal are refused", async () => {
 	const root = mkdtempSync(join(tmpdir(), "proposal-memory-target-"));
 	try {
-		const records = join(root, "approved-records", "preference");
+		const records = join(root, "workflow", "approved-records", "preference");
 		mkdirSync(records, { recursive: true });
 		writeFileSync(join(records, "x.md"), "before");
 		const target = createProposalTarget({

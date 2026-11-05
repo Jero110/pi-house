@@ -101,8 +101,8 @@ test("proposals lists each one with its id prefix, kind, scope, target, state, r
 test("approve applies a memory proposal through the scoped target, records a receipt and says so", async () => {
 	const f = fixture();
 	try {
-		const recordPath = join(f.memory, "approved-records", "preference", "tests.md");
-		mkdirSync(join(f.memory, "approved-records", "preference"), { recursive: true });
+		const recordPath = join(f.memory, "workflow", "approved-records", "preference", "tests.md");
+		mkdirSync(join(f.memory, "workflow", "approved-records", "preference"), { recursive: true });
 		writeFileSync(recordPath, "x");
 		const db = openStore(f.memory);
 		createProposal(db.db, {
@@ -160,8 +160,8 @@ test("approve applies a skill proposal inside the repo's skills folder and names
 test("approve reports a stale target as not applied, with the stored reason, and never says applied", async () => {
 	const f = fixture();
 	try {
-		mkdirSync(join(f.memory, "approved-records", "preference"), { recursive: true });
-		writeFileSync(join(f.memory, "approved-records", "preference", "tests.md"), "edited by someone else");
+		mkdirSync(join(f.memory, "workflow", "approved-records", "preference"), { recursive: true });
+		writeFileSync(join(f.memory, "workflow", "approved-records", "preference", "tests.md"), "edited by someone else");
 		const db = openStore(f.memory);
 		createProposal(db.db, {
 			id: "p-stale",
@@ -205,8 +205,8 @@ test("approve of a legacy hypothesis ends failed with its stored reason, never a
 test("an approved proposal is applied by approve without approving it again", async () => {
 	const f = fixture();
 	try {
-		mkdirSync(join(f.memory, "approved-records", "preference"), { recursive: true });
-		const recordPath = join(f.memory, "approved-records", "preference", "tests.md");
+		mkdirSync(join(f.memory, "workflow", "approved-records", "preference"), { recursive: true });
+		const recordPath = join(f.memory, "workflow", "approved-records", "preference", "tests.md");
 		writeFileSync(recordPath, "x");
 		const db = openStore(f.memory);
 		const proposal = createProposal(db.db, {
@@ -389,8 +389,8 @@ test("removed invocations start nothing and say what to use instead; digest with
 test("approve on an interrupted application recovers it to failed and leaves the target alone", async () => {
 	const f = fixture();
 	try {
-		mkdirSync(join(f.memory, "approved-records", "preference"), { recursive: true });
-		const recordPath = join(f.memory, "approved-records", "preference", "tests.md");
+		mkdirSync(join(f.memory, "workflow", "approved-records", "preference"), { recursive: true });
+		const recordPath = join(f.memory, "workflow", "approved-records", "preference", "tests.md");
 		writeFileSync(recordPath, "x");
 		const db = openStore(f.memory);
 		const proposal = createProposal(db.db, {
@@ -420,8 +420,8 @@ test("approve on an interrupted application recovers it to failed and leaves the
 
 /** An open memory proposal whose record holds its before-state; the record path is returned for file checks. */
 function openMemoryProposal(memory: string, id: string, evidence: string[]) {
-	const recordPath = join(memory, "approved-records", "preference", "tests.md");
-	mkdirSync(join(memory, "approved-records", "preference"), { recursive: true });
+	const recordPath = join(memory, "workflow", "approved-records", "preference", "tests.md");
+	mkdirSync(join(memory, "workflow", "approved-records", "preference"), { recursive: true });
 	writeFileSync(recordPath, "x");
 	const db = openStore(memory);
 	try {

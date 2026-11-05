@@ -8,6 +8,7 @@ import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { openMemory, type RunPackage } from "../src/workflow/memory.ts";
 import { migrateLegacyStore } from "../src/workflow/migration.ts";
+import { openLegacyMemory, toLegacyLayout } from "./legacy-store.ts";
 
 const T0 = Date.parse("2026-10-26T12:00:00Z");
 const sha = (text: string) => createHash("sha256").update(text).digest("hex");
@@ -30,7 +31,7 @@ function run(id: string): RunPackage {
 function legacy(): { dir: string; fingerprint: string } {
 	const dir = join(mkdtempSync(join(tmpdir(), "pihouse-migration-")), "memory");
 	const clock = { t: T0 };
-	const store = openMemory(dir, { now: () => new Date(clock.t++) });
+	const store = openLegacyMemory(dir, { now: () => new Date(clock.t++) });
 	const transcripts = [{ agentId: "a1", normalized: { messages: ["SECRET TRANSCRIPT"] } }];
 	for (const id of ["pend", "done", "claim"]) store.writeRun(run(id), transcripts);
 	store.markProcessed(["done"], "b-old");
@@ -53,6 +54,7 @@ function legacy(): { dir: string; fingerprint: string } {
 	store.markApplied(app.id);
 	writeFileSync(join(dir, "flags.json"), JSON.stringify({ schema: 1, runs: { pend: { by: "save" } } }));
 	store.writeWorkflowMemory("# memory\n");
+	toLegacyLayout(dir);
 	return { dir, fingerprint: rej.fingerprint };
 }
 

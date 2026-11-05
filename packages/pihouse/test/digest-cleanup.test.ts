@@ -45,7 +45,7 @@ interface Fixture {
 function fixture(options: { metrics?: boolean; lineage?: boolean } = {}): Fixture {
 	const dir = mkdtempSync(join(tmpdir(), "digest-cleanup-"));
 	const owned = join(dir, "memory");
-	const transcripts = join(owned, "runs", identity.runId, "transcripts");
+	const transcripts = join(owned, "conversations", identity.runId, "transcripts");
 	mkdirSync(transcripts, { recursive: true });
 	for (const name of FILES) writeFileSync(join(transcripts, name), `conversation ${name}\n`);
 	const outside = join(dir, "native-session.jsonl");

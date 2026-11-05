@@ -151,7 +151,7 @@ test("the current fingerprint recomputes the revision's fingerprint from its sou
 		const planner = root(home, source);
 		assert.equal(captureRun([planner], planner, store, { by: "planner" }), "written");
 		writeJournal(journalDir, [planner]);
-		const stored = JSON.parse(readFileSync(join(memoryDir, "runs", RUN, "run.json"), "utf8")) as {
+		const stored = JSON.parse(readFileSync(join(memoryDir, "conversations", RUN, "run.json"), "utf8")) as {
 			fingerprint: string;
 		};
 		const ports = runtimePorts({ storeDir: memoryDir, journalDir });
@@ -169,7 +169,7 @@ test("the current fingerprint recomputes the revision's fingerprint from its sou
 		assert.equal(ports.currentFingerprint(`${RUN}.r1`), undefined);
 		assert.equal(ports.currentFingerprint(`${RUN}.r9`), undefined);
 		assert.equal(ports.currentFingerprint("not-a-revision"), undefined);
-		assert.equal(existsSync(join(memoryDir, "runs", RUN, "run.json")), true);
+		assert.equal(existsSync(join(memoryDir, "conversations", RUN, "run.json")), true);
 	} finally {
 		rmSync(home, { recursive: true, force: true });
 	}

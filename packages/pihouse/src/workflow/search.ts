@@ -103,6 +103,8 @@ export interface SyncResult {
 const KIND_TRUST: Record<string, string> = {
 	digest: "derived",
 	batch: "derived",
+	compact: "derived",
+	review: "derived",
 	proposal: "derived",
 	idea: "derived",
 	consulted: "external",
@@ -115,12 +117,34 @@ function inside(root: string, rel: string): string {
 	return path;
 }
 
+/**
+ * The hash a compact must have, or null when the compact is stale and must not be indexed.
+ * Problem: a compact is only worth searching while it still describes the evidence it was made from. Example: the run
+ * was captured again and the revision changed. Solution: the row in run_stages names the fingerprint and the hash;
+ * a different fingerprint leaves the compact out, and a different hash on disk is refused by `verify` like any other.
+ */
+function compactHash(db: DatabaseSync, entry: IndexEntry): string | null {
+	const row = db
+		.prepare(
+			"SELECT s.compact_hash, s.compact_fingerprint, r.source_hash FROM run_stages s JOIN revisions r ON r.id = s.revision_id WHERE s.revision_id = ?",
+		)
+		.get(entry.id.slice("compact:".length));
+	if (!row || row.compact_fingerprint !== row.source_hash) return null;
+	return String(row.compact_hash);
+}
+
 /** The inventory comes from the activated store's own index, never from a caller-supplied list. */
-function inventory(root: string, entries: IndexEntry[]): SearchDocument[] {
+function inventory(db: DatabaseSync, root: string, entries: IndexEntry[]): SearchDocument[] {
 	const docs: SearchDocument[] = [];
 	for (const e of entries) {
 		const trust = KIND_TRUST[e.kind];
 		if (!trust) continue;
+		let hash: string | undefined;
+		if (e.kind === "compact") {
+			const expected = compactHash(db, e);
+			if (expected === null) continue;
+			hash = expected;
+		}
 		let path = inside(root, e.path);
 		// A consulted note's .md holds the summary; the fetched text next to it is the body worth searching.
 		if (e.kind === "consulted") {
@@ -140,6 +164,7 @@ function inventory(root: string, entries: IndexEntry[]): SearchDocument[] {
 			summary: e.summary,
 			provenance: `${e.kind} ${e.id} (${e.createdAt})`,
 			date: e.createdAt,
+			...(hash === undefined ? {} : { hash }),
 		});
 	}
 	return docs;
@@ -280,7 +305,7 @@ function syncLocked(store: OperationalStore, root: string, full: boolean, before
 	const entries = (db.prepare("SELECT payload FROM index_entries ORDER BY seq").all() as { payload: string }[]).map(
 		(r) => JSON.parse(r.payload) as IndexEntry,
 	);
-	const verified = verify(inventory(root, entries));
+	const verified = verify(inventory(db, root, entries));
 	// A hash recorded when a document was committed outranks the bytes found now.
 	const committed = new Map(
 		(

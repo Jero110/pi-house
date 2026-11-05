@@ -24,7 +24,7 @@ test("candidate production requires an operational revision, retained complete p
 	const store = openOperationalStore(join(root, "memory.sqlite"), { fts: false });
 	try {
 		const owned = join(root, "owned");
-		const run = join(owned, "runs", "run-one");
+		const run = join(owned, "conversations", "run-one");
 		mkdirSync(join(run, "transcripts"), { recursive: true });
 		writeFileSync(
 			join(run, "run.json"),
@@ -68,7 +68,7 @@ test("execution defers cleanup when the run becomes active after digest commit",
 	const store = openOperationalStore(join(root, "memory.sqlite"), { fts: false });
 	try {
 		const owned = join(root, "owned");
-		const run = join(owned, "runs", "run-one");
+		const run = join(owned, "conversations", "run-one");
 		mkdirSync(join(run, "transcripts"), { recursive: true });
 		mkdirSync(join(root, "digests"), { recursive: true });
 		writeFileSync(
@@ -154,7 +154,7 @@ test("verified synthetic digest execution commits then fences cleanup against a 
 	const store = openOperationalStore(join(root, "memory.sqlite"), { fts: false });
 	try {
 		const owned = join(root, "owned");
-		const run = join(owned, "runs", "run-one");
+		const run = join(owned, "conversations", "run-one");
 		mkdirSync(join(run, "transcripts"), { recursive: true });
 		mkdirSync(join(root, "digests"), { recursive: true });
 		const cursor = {

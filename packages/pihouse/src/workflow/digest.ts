@@ -16,6 +16,7 @@ import {
 	proposalFingerprint,
 	type RunPackage,
 } from "./memory.ts";
+import { vaultPaths } from "./vault-paths.ts";
 
 /** One nested model call: a prompt in, text out. */
 export type Complete = (prompt: string) => Promise<string>;
@@ -82,7 +83,7 @@ function readJson<T>(file: string): T | null {
 	}
 }
 
-const runDir = (store: MemoryStore, runId: string) => join(store.dir, "runs", runId);
+const runDir = (store: MemoryStore, runId: string) => vaultPaths(store.dir).runDir(runId);
 
 /**
  * The prompt that digests one run: the one full read of it. The report plus a condensed view of every agent's
@@ -224,7 +225,7 @@ export interface DigestDeps {
 }
 
 /** Where a run's raw transcripts go once digested. */
-const rawArchive = (store: MemoryStore, runId: string) => join(store.dir, "archive", "raw", runId);
+const rawArchive = (store: MemoryStore, runId: string) => vaultPaths(store.dir).rawArchive(runId);
 
 /**
  * Moves a digested run's transcripts out of runs/. Problem: archive/runs/<id> is where archiving the run entry

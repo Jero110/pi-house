@@ -33,6 +33,23 @@ const SCHEMA_V2 = `CREATE TABLE IF NOT EXISTS index_entries(id TEXT PRIMARY KEY,
  CREATE TABLE IF NOT EXISTS legacy_records(id TEXT PRIMARY KEY, kind TEXT NOT NULL, rel_path TEXT, source_sha256 TEXT, legacy INTEGER NOT NULL DEFAULT 1, coverage TEXT NOT NULL, deletion_authority TEXT, payload TEXT NOT NULL DEFAULT '{}');
  CREATE TABLE IF NOT EXISTS legacy_migrations(manifest_hash TEXT NOT NULL, state TEXT NOT NULL, at TEXT NOT NULL, PRIMARY KEY(manifest_hash, state));`;
 
+/**
+ * Schema v3 (vault review), additive: the stage of each run revision. A revision with no row is captured, a row with
+ * `reviewed_at` NULL is compacted, a row with `reviewed_at` set is reviewed.
+ * Problem: "was this run compacted, and reviewed?" cannot be answered from files alone; example: a compact edited by
+ * hand must not authorize deleting the full conversation. Solution: the compact's hash and the evidence fingerprint it
+ * was made from live in this row, next to the review that covered it.
+ */
+const SCHEMA_V3 = `CREATE TABLE IF NOT EXISTS run_stages(
+ revision_id TEXT PRIMARY KEY REFERENCES revisions(id),
+ compact_path TEXT NOT NULL,
+ compact_hash TEXT NOT NULL,
+ compact_fingerprint TEXT NOT NULL,
+ compacted_by TEXT NOT NULL CHECK (compacted_by IN ('review','ask')),
+ compacted_at TEXT NOT NULL,
+ review_id TEXT,
+ reviewed_at TEXT);`;
+
 export function openOperationalStore(
 	path: string,
 	options: { fts?: boolean; legacy?: boolean } = {},
@@ -72,8 +89,12 @@ export function openOperationalStore(
 			db.prepare("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (2, ?)").run(
 				new Date().toISOString(),
 			);
+			db.exec(SCHEMA_V3);
+			db.prepare("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (3, ?)").run(
+				new Date().toISOString(),
+			);
 			db.exec("COMMIT");
-			version = 2;
+			version = 3;
 		} catch (error) {
 			db.exec("ROLLBACK");
 			db.close();

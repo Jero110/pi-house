@@ -21,6 +21,7 @@ import {
 import { type IntakeResult, ingestReview } from "./proposal-intake.ts";
 import { runtimePorts } from "./runtime-ports.ts";
 import { type OperationalStore, openOperationalStore } from "./storage.ts";
+import { vaultPaths } from "./vault-paths.ts";
 import { nativeWorkerAdapter, type WorkerJob, type WorkerResult } from "./worker-adapter.ts";
 
 /** The model every learning child runs, as pi's `provider/model-id`. Overridden by this environment variable only. */
@@ -175,7 +176,7 @@ async function digestStep(deps: LearningDeps, ready: Ready, options: RuntimeOpti
 			.map((row) => String(row.revision_id)),
 	);
 
-	const digestRoot = join(deps.memory, "digests");
+	const digestRoot = vaultPaths(deps.memory).digestsDir;
 	const total = Math.min(produced.candidates.length, DIGEST_JOBS_PER_INVOCATION);
 	let started = 0;
 	const results = await executeDigest(
@@ -343,8 +344,8 @@ export async function selfLearningCommand(deps: LearningDeps): Promise<LearningO
 	return withStore(deps, async (store) => {
 		const options = runtimeOf(deps, store);
 		const digest = await digestStep(deps, ready, options);
-		const digestRoot = join(deps.memory, "digests");
-		const reviewRoot = join(deps.memory, "batches");
+		const digestRoot = vaultPaths(deps.memory).digestsDir;
+		const reviewRoot = vaultPaths(deps.memory).batchesDir;
 		let intake: IntakeResult | undefined;
 		const learned = await runSelfLearning(store.db, {
 			invocation: randomUUID(),

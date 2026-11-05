@@ -16,12 +16,13 @@ import { dirname, join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import type { IndexEntry } from "./memory.ts";
 import { openOperationalStore } from "./storage.ts";
+import { DATABASE_FILE, hasLegacyContent, initVault, LEGACY_DIRS, LEGACY_FILES } from "./vault-paths.ts";
 
 export const ACTIVE_MARKER = "migration-active.json";
 const BACKUP = "migration-backup";
 const INCOMPLETE = "migration-backup.incomplete";
-const LEGACY_FILES = ["index.json", "flags.json", "workflow-memory.md"];
-const LEGACY_DIRS = ["runs", "digests", "batches", "consulted", "ideas", "proposals", "archive"];
+/** The manifest hash of a store that started fresh: there was nothing to import. */
+const FRESH = "fresh";
 
 interface ManifestFile {
 	path: string;
@@ -230,11 +231,49 @@ function importAll(db: DatabaseSync, backupDir: string, manifest: Manifest, hook
 		);
 }
 
+/**
+ * Starts an empty memory folder active, with the whole layout, and no legacy migration.
+ * Problem: the legacy migration backs up and imports what the folder holds; on a new install that is nothing, and it
+ * would still leave an empty `migration-backup/` and a manifest that means nothing. Example: a first run of pihouse.
+ * Solution: lay out the folders, create the store and write the marker, in that order, so a crash before the marker
+ * leaves a folder that starts fresh again on the next call. Returns false (and touches nothing) when the folder is
+ * already active or holds legacy content, which only the migration may adopt.
+ */
+export function startFreshStore(dir: string, opts: { now?: () => Date } = {}): boolean {
+	const markerPath = join(dir, ACTIVE_MARKER);
+	if (existsSync(markerPath) || hasLegacyContent(dir)) {
+		if (existsSync(markerPath)) initVault(dir);
+		return false;
+	}
+	const stamp = (opts.now ?? (() => new Date()))().toISOString();
+	initVault(dir);
+	const store = openOperationalStore(join(dir, DATABASE_FILE), { fts: false, legacy: true });
+	try {
+		store.db
+			.prepare("INSERT OR IGNORE INTO legacy_migrations(manifest_hash, state, at) VALUES (?, 'active', ?)")
+			.run(FRESH, stamp);
+	} finally {
+		store.close();
+	}
+	atomicWrite(markerPath, JSON.stringify({ manifestHash: FRESH, activatedAt: stamp }));
+	return true;
+}
+
+function startedFresh(markerPath: string): boolean {
+	try {
+		return (JSON.parse(readFileSync(markerPath, "utf8")) as { manifestHash?: unknown }).manifestHash === FRESH;
+	} catch {
+		return false;
+	}
+}
+
 export function migrateLegacyStore(dir: string, opts: MigrationOptions = {}): MigrationResult {
+	// A store that started fresh has no legacy files to adopt; calling the migration on it must not invent a backup.
+	if (startedFresh(join(dir, ACTIVE_MARKER)) && !hasLegacyContent(dir)) return { state: "active", manifestHash: FRESH };
 	const hook = opts.onBoundary ?? (() => {});
 	const stamp = () => (opts.now ?? (() => new Date()))().toISOString();
 	const done = join(dir, BACKUP);
-	const dbPath = join(dir, "memory.sqlite");
+	const dbPath = join(dir, DATABASE_FILE);
 	const markerPath = join(dir, ACTIVE_MARKER);
 	let manifest: Manifest;
 	let store: ReturnType<typeof openOperationalStore>;

@@ -6,7 +6,8 @@ import { cleanupAdapter, commitDigest } from "./cleanup.ts";
 import type { DigestIdentity } from "./digest-contract.ts";
 import { type DispatchInput, dispatchCleanup, dispatchJobs, enqueueJob, isQuiescent } from "./jobs.ts";
 import { runSelfLearning, type SelfLearningOptions } from "./learning-review.ts";
-import { migrateLegacyStore } from "./migration.ts";
+import { migrateLegacyStore, startFreshStore } from "./migration.ts";
+import { vaultPaths } from "./vault-paths.ts";
 import type { WorkerJob, WorkerResult } from "./worker-adapter.ts";
 
 const SAFE_ID = /^[a-z0-9][a-z0-9._-]*$/i;
@@ -42,7 +43,7 @@ export interface RuntimeOptions {
  * Solution: it takes the store folder alone and returns before anything else reads it.
  */
 export function activateLearningStore(storeDir: string): void {
-	migrateLegacyStore(storeDir);
+	if (!startFreshStore(storeDir)) migrateLegacyStore(storeDir);
 }
 
 /** Select only safe, operational revisions with complete captured packages and known quiescence. */
@@ -74,7 +75,7 @@ export function produceDigestCandidates(options: RuntimeOptions): {
 			deferred.push({ revision, reason: "source fingerprint is unavailable or changed" });
 			continue;
 		}
-		const root = join(options.ownedRoot, "runs", runId);
+		const root = vaultPaths(options.ownedRoot).runDir(runId);
 		const packagePath = join(root, "run.json");
 		const transcripts = join(root, "transcripts");
 		try {
@@ -230,8 +231,8 @@ export async function executeDigest(
 				readDirs: [evidencePath],
 			});
 			if (outcome.status !== "success") return { status: outcome.status === "cancelled" ? "cancelled" : "failure" };
-			const packagePath = join(options.ownedRoot, "runs", candidate.runId, "run.json");
-			const transcriptDir = join(options.ownedRoot, "runs", candidate.runId, "transcripts");
+			const packagePath = vaultPaths(options.ownedRoot).runJson(candidate.runId);
+			const transcriptDir = vaultPaths(options.ownedRoot).transcripts(candidate.runId);
 			const names = candidate.expectedFiles;
 			const bytes = readFileSync(packagePath);
 			const inputs = names.map((name) => [name, readFileSync(join(transcriptDir, name))] as const);

@@ -6,6 +6,7 @@ import { validateDigest } from "./digest-contract.ts";
 import { commitArtifact } from "./documents.ts";
 import { claimJob, type DispatchInput, type DispatchOptions, dispatchJobs, enqueueJob, finishJob } from "./jobs.ts";
 import { type IntakeResult, ingestReview } from "./proposal-intake.ts";
+import { batchReviewFile } from "./vault-paths.ts";
 
 // One self-learning invocation: prepare missing digests, scan the retained ones, review the batch in a separate agent.
 // The invocation is the authorization for all three steps; nothing here applies a change (proposal approval and
@@ -487,7 +488,7 @@ export async function runSelfLearning(db: DatabaseSync, options: SelfLearningOpt
 	});
 	result.summaryPath = summary.path;
 
-	const reviewPath = join(options.reviewRoot, "reviews", `${batchId}.md`);
+	const reviewPath = batchReviewFile(options.reviewRoot, batchId);
 	const reviewed = await stage(db, options, {
 		jobId: `review:${batchId}`,
 		fingerprint,

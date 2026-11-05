@@ -2,15 +2,15 @@
 // writing anything. Every unknown answers "not safe", so captured evidence stays in place until it is proven unused.
 
 import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import { type AgentState, readJournal, type SessionRecord, treeOf } from "agent-link-core";
 import type { TranscriptRoots } from "agent-transcripts";
 import { type FlagBy, previewRunFingerprint } from "./capture.ts";
 import type { RuntimeOptions } from "./learning-runtime.ts";
 import { openMemory } from "./memory.ts";
+import { vaultPaths } from "./vault-paths.ts";
 
 export interface RuntimePortOptions {
-	/** The memory directory: captured copies live under its runs folder. */
+	/** The memory directory: captured copies live under its conversations folder. */
 	storeDir: string;
 	/** The agent-link journal folder (`<agent-link home>/sessions`). */
 	journalDir: string;
@@ -29,7 +29,7 @@ const FLAGGED: readonly FlagBy[] = ["planner", "executor", "save"];
 /** The stored package's identity fields, or undefined when run.json is missing or malformed. */
 function storedRun(storeDir: string, runId: string): StoredRun | undefined {
 	try {
-		const value: unknown = JSON.parse(readFileSync(join(storeDir, "runs", runId, "run.json"), "utf8"));
+		const value: unknown = JSON.parse(readFileSync(vaultPaths(storeDir).runJson(runId), "utf8"));
 		if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
 		const record = value as Record<string, unknown>;
 		if (!Number.isSafeInteger(record.revision) || !Array.isArray(record.agents)) return undefined;

@@ -14,6 +14,7 @@ import {
 } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
 import type { ScopedTarget } from "./proposals.ts";
+import { vaultPaths, vaultRel } from "./vault-paths.ts";
 
 function inside(root: string, path: string): boolean {
 	return path === root || path.startsWith(`${root}${sep}`);
@@ -78,11 +79,11 @@ export function createProposalTarget(options: ProposalTargetOptions): ScopedTarg
 		const key = options.target.slice(7);
 		if (!/^(preference|fact|procedure)\/[a-z0-9][a-z0-9._-]{0,127}$/i.test(key))
 			throw new Error("Unsafe memory target");
-		relative = `approved-records/${key}.md`;
+		relative = vaultRel.approvedRecord(key);
 	} else throw new Error("Unknown target kind");
 	const root = skillName ? options.repoRoot : options.storeRoot;
 	const path = safeComponents(root, relative);
-	const backupRoot = join(options.storeRoot, "proposals", options.proposalId);
+	const backupRoot = vaultPaths(options.storeRoot).proposalBackups(options.proposalId);
 	let failure: string | undefined;
 	return {
 		failureReason: () => failure,

@@ -4,8 +4,9 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
-import { ACTIVE_MARKER } from "./migration.ts";
+import { ACTIVE_MARKER, startFreshStore } from "./migration.ts";
 import { openOperationalStore } from "./storage.ts";
+import { vaultRel } from "./vault-paths.ts";
 
 /** Size limits in chars (about chars/4 tokens), in one place; tests hold the engine to them. */
 export const LIMITS = {
@@ -19,7 +20,7 @@ export const LIMITS = {
 	summary: 200,
 } as const;
 
-export type EntryKind = "run" | "digest" | "consulted" | "idea" | "proposal" | "batch";
+export type EntryKind = "run" | "digest" | "consulted" | "idea" | "proposal" | "batch" | "compact" | "review";
 export type EntryStatus =
 	| "pending"
 	| "processed"
@@ -45,7 +46,7 @@ export interface RunAgentEntry {
 	usage: Record<string, unknown>;
 	activeMs: number;
 	messages: number;
-	/** Relative to runs/<id>/, e.g. transcripts/<agentId>.json. */
+	/** Relative to conversations/<id>/, e.g. transcripts/<agentId>.json. */
 	transcript: string;
 	raw: string | null;
 	/** Why there is no transcript, else null. */
@@ -154,7 +155,7 @@ export interface MemoryStore {
 	finishBatch(batchId: string, summaryMarkdown: string): BatchRecord;
 	writeConsulted(meta: NoteMeta, text: string, summary: string): IndexEntry;
 	writeIdea(meta: NoteMeta, body: string, summary?: string): IndexEntry;
-	/** Indexes the ideas/*.md files written by hand (by a model) that index.json does not list yet; returns their ids. */
+	/** Indexes the ask/ideas/*.md files written by hand (by a model) that index.json does not list yet; returns their ids. */
 	adoptIdeas(): string[];
 	propose(p: Proposal): ProposeResult;
 	decide(id: string, decision: "approved" | "rejected", why?: string): IndexEntry;
@@ -244,6 +245,8 @@ export function openMemory(dir: string, opts: { now?: () => Date } = {}): Memory
 	const now = opts.now ?? (() => new Date());
 	const stamp = () => now().toISOString();
 	const abs = (rel: string) => join(dir, rel);
+	// A new folder starts active with the whole layout; one holding legacy content waits for its migration.
+	startFreshStore(dir, { now });
 	const indexFile = abs("index.json");
 
 	/**
@@ -312,10 +315,10 @@ export function openMemory(dir: string, opts: { now?: () => Date } = {}): Memory
 		createdAt: stamp(),
 		lastUsedAt: stamp(),
 	});
-	const batchFile = (id: string) => abs(`batches/${safeId(id)}.json`);
+	const batchFile = (id: string) => abs(vaultRel.batchRecord(safeId(id)));
 	const readBatch = (id: string) => readJson<BatchRecord>(batchFile(id));
 	const allBatches = (): BatchRecord[] => {
-		const folder = abs("batches");
+		const folder = abs(vaultRel.batchesDir);
 		if (!existsSync(folder)) return [];
 		return readdirSync(folder)
 			.filter((n) => n.endsWith(".json"))
@@ -352,7 +355,7 @@ export function openMemory(dir: string, opts: { now?: () => Date } = {}): Memory
 			// a reopened revision: its cleaned predecessor's evidence was verified, and only the appended delta is new.
 			// Example: a resumed planner adds two answers after its digest; those answers must reach the next review.
 			if (existing && existing.status !== "pending" && !options?.reopen) return "processed";
-			const root = abs(`runs/${id}`);
+			const root = abs(vaultRel.runDir(id));
 			rmSync(root, { recursive: true, force: true });
 			for (const t of transcripts) {
 				const agent = safeId(t.agentId);
@@ -365,7 +368,7 @@ export function openMemory(dir: string, opts: { now?: () => Date } = {}): Memory
 				"run",
 				id,
 				{ ...pkg, summary: pkg.reason ?? `${pkg.agents.length} agents, ${pkg.metrics.messages} messages` },
-				`runs/${id}/run.json`,
+				vaultRel.runJson(id),
 				"pending",
 			);
 			if (existing) entry.createdAt = existing.createdAt;
@@ -407,7 +410,7 @@ export function openMemory(dir: string, opts: { now?: () => Date } = {}): Memory
 			const id = safeId(runId);
 			if (markdown.length > LIMITS.digest)
 				throw new RangeError(`Digest is ${markdown.length} chars, over ${LIMITS.digest}`);
-			atomicWrite(abs(`digests/${id}.md`), markdown);
+			atomicWrite(abs(vaultRel.digest(id)), markdown);
 			const run = load().entries.find((e) => e.id === `run:${id}`);
 			const { fields, body } = parseFrontmatter(markdown);
 			return upsert(
@@ -420,13 +423,13 @@ export function openMemory(dir: string, opts: { now?: () => Date } = {}): Memory
 						title: run ? `Digest: ${run.title}` : `Digest ${id}`,
 						summary: fields.summary ?? body,
 					},
-					`digests/${id}.md`,
+					vaultRel.digest(id),
 					"active",
 				),
 			);
 		},
 		readDigest(runId) {
-			const file = abs(`digests/${safeId(runId)}.md`);
+			const file = abs(vaultRel.digest(safeId(runId)));
 			return existsSync(file) ? readFileSync(file, "utf8") : null;
 		},
 
@@ -459,7 +462,7 @@ export function openMemory(dir: string, opts: { now?: () => Date } = {}): Memory
 		finishBatch(batchId, summaryMarkdown) {
 			const batch = readBatch(batchId);
 			if (!batch) throw new Error(`No batch ${batchId}`);
-			const summaryPath = `batches/${batch.id}.md`;
+			const summaryPath = vaultRel.batchSummary(batch.id);
 			atomicWrite(abs(summaryPath), summaryMarkdown);
 			const done: BatchRecord = { ...batch, state: "done", summaryPath };
 			writeJson(batchFile(batch.id), done);
@@ -483,9 +486,9 @@ export function openMemory(dir: string, opts: { now?: () => Date } = {}): Memory
 
 		writeConsulted(meta, text, summary) {
 			const id = safeId(meta.id);
-			atomicWrite(abs(`consulted/${id}.txt`), text);
+			atomicWrite(abs(vaultRel.consultedText(id)), text);
 			atomicWrite(
-				abs(`consulted/${id}.md`),
+				abs(vaultRel.consultedNote(id)),
 				renderFrontmatter(
 					{
 						id,
@@ -498,18 +501,18 @@ export function openMemory(dir: string, opts: { now?: () => Date } = {}): Memory
 					`## Summary\n\n${summary}`,
 				),
 			);
-			return upsert(baseEntry("consulted", id, { ...meta, summary }, `consulted/${id}.md`, "active"));
+			return upsert(baseEntry("consulted", id, { ...meta, summary }, vaultRel.consultedNote(id), "active"));
 		},
 		writeIdea(meta, body, summary) {
 			const id = safeId(meta.id);
 			atomicWrite(
-				abs(`ideas/${id}.md`),
+				abs(vaultRel.idea(id)),
 				renderFrontmatter(
 					{ id, title: meta.title, project: meta.project, projectSlug: meta.projectSlug, createdAt: stamp() },
 					body,
 				),
 			);
-			return upsert(baseEntry("idea", id, { ...meta, summary: summary ?? body }, `ideas/${id}.md`, "active"));
+			return upsert(baseEntry("idea", id, { ...meta, summary: summary ?? body }, vaultRel.idea(id), "active"));
 		},
 
 		/**
@@ -518,7 +521,7 @@ export function openMemory(dir: string, opts: { now?: () => Date } = {}): Memory
 		 * Solution: index every file the index lacks, from its frontmatter; running it twice adds nothing.
 		 */
 		adoptIdeas() {
-			const folder = abs("ideas");
+			const folder = abs(vaultRel.ideasDir);
 			if (!existsSync(folder)) return [];
 			const known = new Set(load().entries.map((e) => e.id));
 			const adopted: string[] = [];
@@ -535,7 +538,7 @@ export function openMemory(dir: string, opts: { now?: () => Date } = {}): Memory
 						title: fields.title ?? id,
 						summary: body.split("\n").find((l) => l.trim()) ?? "",
 					},
-					`ideas/${name}`,
+					`${vaultRel.ideasDir}/${name}`,
 					"active",
 				);
 				if (fields.createdAt) entry.createdAt = fields.createdAt;
@@ -564,7 +567,7 @@ export function openMemory(dir: string, opts: { now?: () => Date } = {}): Memory
 				.slice(0, 14)}-${fingerprint.slice(0, 8)}`;
 			const title = p.title ?? `${p.kind}: ${p.target}`;
 			atomicWrite(
-				abs(`proposals/${id}.md`),
+				abs(vaultRel.proposalNote(id)),
 				renderFrontmatter(
 					{
 						id,
@@ -582,7 +585,7 @@ export function openMemory(dir: string, opts: { now?: () => Date } = {}): Memory
 				"proposal",
 				id,
 				{ project: p.project ?? "", projectSlug: p.projectSlug ?? "", title, summary: p.change },
-				`proposals/${id}.md`,
+				vaultRel.proposalNote(id),
 				"open",
 			);
 			entry.fingerprint = fingerprint;
@@ -650,10 +653,10 @@ export function openMemory(dir: string, opts: { now?: () => Date } = {}): Memory
 			if (entry.kind === "consulted") rels.push(entry.path.replace(/\.md$/, ".txt"));
 			for (const rel of rels) {
 				if (!existsSync(abs(rel))) continue;
-				mkdirSync(dirname(abs(`archive/${rel}`)), { recursive: true });
-				renameSync(abs(rel), abs(`archive/${rel}`));
+				mkdirSync(dirname(abs(vaultRel.archived(rel))), { recursive: true });
+				renameSync(abs(rel), abs(vaultRel.archived(rel)));
 			}
-			entry.path = `archive/${entry.path}`;
+			entry.path = vaultRel.archived(entry.path);
 			entry.status = "archived";
 			save(f);
 			return entry;

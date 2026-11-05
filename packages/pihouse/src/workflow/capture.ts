@@ -27,6 +27,7 @@ import { readRoutingDecisions } from "./routing-profiles.ts";
 import { buildRun, isExecutor, type RunAgent, type WorkflowRun } from "./run.ts";
 import { inspectJsonlCursor, type JsonlSourceCursor } from "./source-cursor.ts";
 import { openOperationalStore } from "./storage.ts";
+import { vaultPaths } from "./vault-paths.ts";
 
 export type FlagBy = RunPackage["flaggedBy"];
 
@@ -398,7 +399,7 @@ function mergeParticipant(
 	};
 }
 
-const runFile = (store: MemoryStore, id: string) => join(store.dir, "runs", id, "run.json");
+const runFile = (store: MemoryStore, id: string) => vaultPaths(store.dir).runJson(id);
 
 function readPackage(store: MemoryStore, id: string): StoredPackage | undefined {
 	try {
@@ -798,7 +799,7 @@ export function lastFlagged(records: readonly SessionRecord[], store: MemoryStor
 
 /** The report text and plan of a captured run, for a review of a run the journal no longer has. */
 export function storedReport(store: MemoryStore, id: string): { report: string; plan?: string } | undefined {
-	const file = join(store.dir, "runs", id, "report.md");
+	const file = vaultPaths(store.dir).runReport(id);
 	if (!existsSync(file)) return undefined;
 	return { report: readFileSync(file, "utf8"), plan: readPackage(store, id)?.plan };
 }

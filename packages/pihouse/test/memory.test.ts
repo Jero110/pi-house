@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -13,6 +13,7 @@ import {
 	type RunAgentEntry,
 	type RunPackage,
 } from "../src/workflow/memory.ts";
+import { openOperationalStore } from "../src/workflow/storage.ts";
 
 const DAY = 86_400_000;
 const T0 = Date.parse("2026-10-26T12:00:00Z");
@@ -75,16 +76,16 @@ test("writeRun writes the package, transcripts and a pending entry; recapturing 
 	const { store, dir } = fixture();
 	assert.equal(store.writeRun(run("r1"), transcripts, "# report"), "written");
 	for (const f of ["run.json", "report.md", "transcripts/a1.json", "transcripts/a1.jsonl"]) {
-		assert.ok(existsSync(join(dir, "runs/r1", f)), f);
+		assert.ok(existsSync(join(dir, "conversations/r1", f)), f);
 	}
-	assert.equal(JSON.parse(readFileSync(join(dir, "runs/r1/run.json"), "utf8")).id, "r1");
+	assert.equal(JSON.parse(readFileSync(join(dir, "conversations/r1/run.json"), "utf8")).id, "r1");
 	assert.equal(store.pendingCount(), 1);
 	const again = { ...run("r1"), title: "Newer" };
 	assert.equal(store.writeRun(again, [{ agentId: "a1", normalized: {} }]), "written");
 	assert.equal(store.pendingCount(), 1);
 	assert.equal(store.pending()[0].title, "Newer");
-	assert.ok(!existsSync(join(dir, "runs/r1/transcripts/a1.jsonl")), "old files are replaced, not merged");
-	assert.deepEqual(readdirSync(join(dir, "runs/r1/transcripts")), ["a1.json"]);
+	assert.ok(!existsSync(join(dir, "conversations/r1/transcripts/a1.jsonl")), "old files are replaced, not merged");
+	assert.deepEqual(readdirSync(join(dir, "conversations/r1/transcripts")), ["a1.json"]);
 });
 
 test("writeRun rejects an id that would leave the memory dir", () => {
@@ -165,12 +166,12 @@ test("consulted sources and ideas are written with frontmatter and indexed", () 
 	const { store, dir } = fixture();
 	const meta = { id: "yt-1", title: "A talk", project: "/abs/p", projectSlug: "p", source: "https://youtu.be/x" };
 	store.writeConsulted(meta, "full transcript text", "short summary");
-	assert.equal(readFileSync(join(dir, "consulted/yt-1.txt"), "utf8"), "full transcript text");
-	const md = parseFrontmatter(readFileSync(join(dir, "consulted/yt-1.md"), "utf8"));
+	assert.equal(readFileSync(join(dir, "ask/consulted/yt-1.txt"), "utf8"), "full transcript text");
+	const md = parseFrontmatter(readFileSync(join(dir, "ask/consulted/yt-1.md"), "utf8"));
 	assert.equal(md.fields.source, "https://youtu.be/x");
 	assert.match(md.body, /## Summary\n\nshort summary/);
 	store.writeIdea({ id: "i1", title: "Idea", project: "/abs/p", projectSlug: "p" }, "Do the thing");
-	assert.equal(parseFrontmatter(readFileSync(join(dir, "ideas/i1.md"), "utf8")).body.trim(), "Do the thing");
+	assert.equal(parseFrontmatter(readFileSync(join(dir, "ask/ideas/i1.md"), "utf8")).body.trim(), "Do the thing");
 	assert.deepEqual(
 		store.readIndex().map((e) => e.id),
 		["consulted:yt-1", "idea:i1"],
@@ -186,14 +187,17 @@ test("propose: fingerprint ignores case and spacing, duplicates are caught, a re
 	const dup = store.propose({ ...proposal, change: "always split TASKS before   coding" });
 	assert.equal(dup.result, "duplicate");
 	assert.equal(dup.fingerprint, first.fingerprint);
-	const fm = parseFrontmatter(readFileSync(join(dir, `proposals/${first.id}.md`), "utf8"));
+	const fm = parseFrontmatter(readFileSync(join(dir, `workflow/proposals/${first.id}.md`), "utf8"));
 	assert.equal(fm.fields.status, "open");
 	assert.equal(fm.fields.kind, "memory-rule");
 	assert.equal(fm.fields.fingerprint, first.fingerprint);
 	assert.match(fm.body, /Always {2}split tasks\nbefore coding/);
 
 	store.decide(first.id, "rejected", "not for me");
-	assert.equal(parseFrontmatter(readFileSync(join(dir, `proposals/${first.id}.md`), "utf8")).fields.status, "rejected");
+	assert.equal(
+		parseFrontmatter(readFileSync(join(dir, `workflow/proposals/${first.id}.md`), "utf8")).fields.status,
+		"rejected",
+	);
 	assert.equal(store.propose(proposal).result, "rejected-before");
 	assert.equal(store.propose({ ...proposal, change: "A different rule" }).result, "created");
 });
@@ -236,8 +240,8 @@ test("indexSlice reads only the index, filters, orders newest first and never ex
 	// Problem: ask must not load transcripts. Example: a 2 MB transcript read for a one-line slice.
 	// Solution: the test makes every transcript unreadable; a slice that opened one would throw.
 	for (let i = 1; i <= 5; i++) {
-		chmodSync(join(dir, `runs/r${i}/transcripts/a1.json`), 0o000);
-		chmodSync(join(dir, `runs/r${i}/transcripts/a1.jsonl`), 0o000);
+		chmodSync(join(dir, `conversations/r${i}/transcripts/a1.json`), 0o000);
+		chmodSync(join(dir, `conversations/r${i}/transcripts/a1.jsonl`), 0o000);
 	}
 	const all = store.indexSlice({ limit: 10, maxChars: 10_000 }).split("\n");
 	assert.equal(all.length, 5);
@@ -249,8 +253,8 @@ test("indexSlice reads only the index, filters, orders newest first and never ex
 		assert.ok(store.indexSlice({ limit: 10, maxChars: max }).length <= max, `max ${max}`);
 	}
 	for (let i = 1; i <= 5; i++) {
-		chmodSync(join(dir, `runs/r${i}/transcripts/a1.json`), 0o600);
-		chmodSync(join(dir, `runs/r${i}/transcripts/a1.jsonl`), 0o600);
+		chmodSync(join(dir, `conversations/r${i}/transcripts/a1.json`), 0o600);
+		chmodSync(join(dir, `conversations/r${i}/transcripts/a1.jsonl`), 0o600);
 	}
 });
 
@@ -275,11 +279,11 @@ test("archiveStale archives an entry unused for 91 days, keeps it on disk and sp
 	clock.t += 91 * DAY;
 	const archived = store.archiveStale();
 	assert.deepEqual(archived.sort(), ["consulted:c1", "run:r1"]);
-	assert.ok(existsSync(join(dir, "archive/runs/r1/run.json")));
-	assert.ok(existsSync(join(dir, "archive/runs/r1/transcripts/a1.json")));
-	assert.ok(existsSync(join(dir, "archive/consulted/c1.md")));
-	assert.ok(existsSync(join(dir, "archive/consulted/c1.txt")));
-	assert.ok(!existsSync(join(dir, "runs/r1")));
+	assert.ok(existsSync(join(dir, "archive/conversations/r1/run.json")));
+	assert.ok(existsSync(join(dir, "archive/conversations/r1/transcripts/a1.json")));
+	assert.ok(existsSync(join(dir, "archive/ask/consulted/c1.md")));
+	assert.ok(existsSync(join(dir, "archive/ask/consulted/c1.txt")));
+	assert.ok(!existsSync(join(dir, "conversations/r1")));
 	assert.equal(store.readIndex().find((e) => e.id === "run:r1")?.status, "archived");
 	assert.equal(store.pendingCount(), 1, "pending runs are never archived by age");
 	assert.equal(store.readIndex().find((e) => e.kind === "proposal")?.status, "open");
@@ -293,9 +297,16 @@ test("archiveStale at 89 days archives nothing; superseded entries are archived 
 	store.writeIdea({ id: "i1", title: "Idea", project: "", projectSlug: "" }, "idea");
 	clock.t += 89 * DAY;
 	assert.deepEqual(store.archiveStale(), []);
-	const f = JSON.parse(readFileSync(join(store.dir, "index.json"), "utf8"));
-	f.entries.find((e: { id: string }) => e.id === "idea:i1").supersededBy = "idea:i2";
-	writeFileSync(join(store.dir, "index.json"), JSON.stringify(f));
+	// The index lives in the operational store: a fresh folder starts active, so there is no index.json to edit.
+	const operational = openOperationalStore(join(store.dir, "memory.sqlite"), { fts: false, legacy: true });
+	try {
+		const row = operational.db.prepare("SELECT payload FROM index_entries WHERE id = 'idea:i1'").get();
+		const entry = JSON.parse(String(row?.payload));
+		entry.supersededBy = "idea:i2";
+		operational.db.prepare("UPDATE index_entries SET payload = ? WHERE id = 'idea:i1'").run(JSON.stringify(entry));
+	} finally {
+		operational.close();
+	}
 	assert.deepEqual(store.archiveStale(), ["idea:i1"]);
 });
 
@@ -305,8 +316,8 @@ test("deleteArchived deletes only archived entries", () => {
 	store.writeRun(run("r2"), transcripts);
 	store.archive("run:r1");
 	assert.deepEqual(store.deleteArchived(["run:r1", "run:r2"]), ["run:r1"]);
-	assert.ok(!existsSync(join(dir, "archive/runs/r1")));
-	assert.ok(existsSync(join(dir, "runs/r2/run.json")));
+	assert.ok(!existsSync(join(dir, "archive/conversations/r1")));
+	assert.ok(existsSync(join(dir, "conversations/r2/run.json")));
 	assert.deepEqual(
 		store.readIndex().map((e) => e.id),
 		["run:r2"],

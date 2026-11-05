@@ -11,6 +11,7 @@ import { ACTIVE_MARKER } from "../src/workflow/migration.ts";
 import { renderEvidenceReport, type WorkflowEvidence } from "../src/workflow/report.ts";
 import { appendRoutingDecision } from "../src/workflow/routing-profiles.ts";
 import { openOperationalStore } from "../src/workflow/storage.ts";
+import { openLegacyMemory } from "./legacy-store.ts";
 
 test("activated verified capture persists operational rows and repeats idempotently", () => {
 	const home = mkdtempSync(join(tmpdir(), "pihouse-evidence-activation-"));
@@ -75,7 +76,7 @@ test("unactivated capture does not create an operational database", () => {
 		updatedAt: "2026-01-01T00:01:00.000Z",
 	};
 	const memoryDir = join(home, "memory");
-	const store = openMemory(memoryDir);
+	const store = openLegacyMemory(memoryDir);
 	assert.equal(captureRun([root], root, store, { by: "planner" }), "written");
 	assert.equal(existsSync(join(memoryDir, "memory.sqlite")), false);
 	rmSync(home, { recursive: true, force: true });
@@ -101,8 +102,8 @@ test("a report can be regenerated from retained evidence without captured transc
 	};
 	const store = openMemory(join(home, "memory"));
 	captureRun([root], root, store, { by: "planner" });
-	const stored = JSON.parse(readFileSync(join(home, "memory/runs/root/run.json"), "utf8"));
-	const runDir = join(home, "memory/runs/root");
+	const stored = JSON.parse(readFileSync(join(home, "memory/conversations/root/run.json"), "utf8"));
+	const runDir = join(home, "memory/conversations/root");
 	mkdirSync(join(runDir, "transcripts"), { recursive: true });
 	writeFileSync(join(runDir, "transcripts/captured.json"), "captured private body");
 	const nativeFixture = join(home, "native-session.jsonl");
@@ -242,7 +243,7 @@ test("verified JSONL append advances a revision at the same journal timestamp an
 	const store = openMemory(join(home, "memory"));
 	writeSource(["message-1"]);
 	assert.equal(captureRun([record], record, store, { by: "planner" }), "written");
-	const file = join(home, "memory/runs/root/run.json");
+	const file = join(home, "memory/conversations/root/run.json");
 	const first = JSON.parse(readFileSync(file, "utf8"));
 	assert.equal(first.evidence.metrics.newTokens, 12, "the initial captured usage is retained structurally");
 	assert.equal(first.evidence.participants[0].activeMs, null, "absent answer durations remain unknown");
@@ -250,7 +251,7 @@ test("verified JSONL append advances a revision at the same journal timestamp an
 	const repeated = JSON.parse(readFileSync(file, "utf8"));
 	assert.equal(repeated.revision, first.revision, "same source prefix remains idempotent");
 	assert.equal(repeated.fingerprint, first.fingerprint);
-	rmSync(join(home, "memory/runs/root/transcripts"), { recursive: true });
+	rmSync(join(home, "memory/conversations/root/transcripts"), { recursive: true });
 	writeSource(["message-1", "message-2"]);
 	assert.equal(captureRun([record], record, store, { by: "planner" }), "written");
 	const appended = JSON.parse(readFileSync(file, "utf8"));
@@ -266,11 +267,11 @@ test("verified JSONL append advances a revision at the same journal timestamp an
 	assert.equal(appended.evidence.metrics.cacheRead, 6);
 	assert.deepEqual(appended.evidence.cursor.root.appendedRecordIds, ["message-2"]);
 	assert.equal(appended.evidence.cursor.root.byteOffset, Buffer.byteLength(readFileSync(source)));
-	const capturedDelta = readFileSync(join(home, "memory/runs/root/transcripts/root.json"), "utf8");
+	const capturedDelta = readFileSync(join(home, "memory/conversations/root/transcripts/root.json"), "utf8");
 	assert.match(capturedDelta, /synthetic message-2/);
 	assert.doesNotMatch(capturedDelta, /synthetic message-1/, "discarded source prefix must not be reimported");
 	assert.equal(
-		existsSync(join(home, "memory/runs/root/transcripts/root.jsonl")),
+		existsSync(join(home, "memory/conversations/root/transcripts/root.jsonl")),
 		false,
 		"old raw transcript copy is not recreated",
 	);
@@ -313,7 +314,7 @@ test("truncation and unknown native cursor provenance defer without replacing re
 	const store = openMemory(join(home, "memory"));
 	writeSource(["message-1", "message-2"]);
 	assert.equal(captureRun([record], record, store, { by: "planner" }), "written");
-	const file = join(home, "memory/runs/root/run.json");
+	const file = join(home, "memory/conversations/root/run.json");
 	const before = readFileSync(file, "utf8");
 	writeSource(["replacement"]);
 	assert.equal(captureRun([record], record, store, { by: "planner" }), "deferred");
@@ -363,7 +364,7 @@ test("unverifiable native source captures labeled evidence once then defers reca
 	};
 	const store = openMemory(join(home, "memory"));
 	assert.equal(captureRun([record], record, store, { by: "planner" }), "written");
-	const file = join(home, "memory/runs/native-root/run.json");
+	const file = join(home, "memory/conversations/native-root/run.json");
 	const before = readFileSync(file, "utf8");
 	const stored = JSON.parse(before);
 	assert.equal(stored.evidence.cursor["native-root"].sourceKind, "unknown");
@@ -409,7 +410,7 @@ test("observable JSONL fork preserves the ancestor lineage and defers destructiv
 		transcript: forkSource,
 	};
 	assert.equal(captureRun([fork], fork, store, { by: "planner" }), "written");
-	const stored = JSON.parse(readFileSync(join(home, "memory/runs/fork-root/run.json"), "utf8"));
+	const stored = JSON.parse(readFileSync(join(home, "memory/conversations/fork-root/run.json"), "utf8"));
 	assert.equal(stored.evidence.lineage, "base-root");
 	assert.equal(stored.evidence.lineageStatus, "fork-parent-lineage-resolved");
 	assert.equal(stored.evidence.forkProvenance, "base-session");
@@ -438,7 +439,7 @@ test("fork provenance stays unknown when the source does not expose its parent",
 	writeFileSync(source, `${JSON.stringify({ type: "session", id: "fork-session" })}\n`);
 	const store = openMemory(join(home, "memory"));
 	assert.equal(captureRun([record], record, store, { by: "planner" }), "written");
-	const stored = JSON.parse(readFileSync(join(home, "memory/runs/fork-root/run.json"), "utf8"));
+	const stored = JSON.parse(readFileSync(join(home, "memory/conversations/fork-root/run.json"), "utf8"));
 	assert.equal(stored.evidence.forkProvenance, "unknown");
 	assert.equal(stored.evidence.destructiveEligibility, "deferred");
 });
@@ -464,7 +465,7 @@ test("capture persists body-free stable revisions and is idempotent", () => {
 	};
 	const store = openMemory(join(home, "memory"));
 	assert.equal(captureRun([root], root, store, { by: "planner" }), "written");
-	const file = join(home, "memory/runs/root/run.json");
+	const file = join(home, "memory/conversations/root/run.json");
 	const first = JSON.parse(readFileSync(file, "utf8"));
 	assert.ok(first.fingerprint);
 	assert.equal(first.revision, 1);
@@ -483,7 +484,7 @@ test("capture persists body-free stable revisions and is idempotent", () => {
 	assert.match(repeated.agents[0].missing, /no transcript/);
 	assert.equal(createHash("sha256").update(JSON.stringify(repeated.evidence)).digest("hex"), repeated.fingerprint);
 	assert.match(repeated.agents[0].missing, /no transcript reader/);
-	const reportPath = join(home, "memory/runs/root/report.md");
+	const reportPath = join(home, "memory/conversations/root/report.md");
 	const report = readFileSync(reportPath, "utf8");
 	assert.ok(!report.includes("secret body"));
 	assert.match(report, /Usage unavailable/);
@@ -547,7 +548,7 @@ test("a routed worker keeps the decision that chose it in captured evidence, and
 		});
 		const store = openMemory(join(home, "memory"));
 		assert.equal(captureRun([root, worker], root, store, { by: "planner" }), "written");
-		const stored = JSON.parse(readFileSync(join(home, "memory/runs/root-routed/run.json"), "utf8"));
+		const stored = JSON.parse(readFileSync(join(home, "memory/conversations/root-routed/run.json"), "utf8"));
 		const participants = stored.evidence.participants as { id: string; routing?: unknown }[];
 		assert.deepEqual(participants.find((p) => p.id === "worker-w2")?.routing, {
 			profile: "build",
@@ -598,7 +599,7 @@ test("an unrouted run keeps its evidence fingerprint when a routing journal exis
 		};
 		const store = openMemory(join(home, "memory"));
 		assert.equal(captureRun([root], root, store, { by: "planner" }), "written");
-		const file = join(home, "memory/runs/root-fingerprint/run.json");
+		const file = join(home, "memory/conversations/root-fingerprint/run.json");
 		const before = JSON.parse(readFileSync(file, "utf8"));
 		appendRoutingDecision(home, {
 			time: Date.parse("2026-01-01T00:00:10Z"),

@@ -204,7 +204,7 @@ test("a quota failure replaces a worker on a second account: both decisions reac
 		// The captured evidence keeps the same two decisions after the raw copies are gone.
 		const memory = join(home, "memory");
 		assert.equal(captureRun(records, planner, openMemory(memory), { by: "planner" }), "written");
-		const stored = JSON.parse(readFileSync(join(memory, "runs", "planner", "run.json"), "utf8"));
+		const stored = JSON.parse(readFileSync(join(memory, "conversations", "planner", "run.json"), "utf8"));
 		const routed = (id: string) =>
 			(
 				stored.evidence.participants as { id: string; routing?: { account: string | null; model: string | null } }[]
@@ -256,7 +256,7 @@ test("capture and report resolve the same routing journal under a custom PIHOUSE
 		// The store sits under the custom home, so its sibling routing/ folder is the journal capture reads.
 		const store = openMemory(join(home, "memory"));
 		assert.equal(captureRun(records, planner, store, { by: "planner" }), "written");
-		const stored = JSON.parse(readFileSync(join(home, "memory", "runs", "planner", "run.json"), "utf8"));
+		const stored = JSON.parse(readFileSync(join(home, "memory", "conversations", "planner", "run.json"), "utf8"));
 		const account = (id: string) =>
 			(stored.evidence.participants as { id: string; routing?: { account: string } }[]).find((p) => p.id === id)
 				?.routing?.account;

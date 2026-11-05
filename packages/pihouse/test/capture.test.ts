@@ -129,7 +129,7 @@ test("a three-level tree is one package with every transcript copied, and no mod
 	assert.ok(root);
 	assert.equal(captureRun(records, root, f.store, { by: "executor", roots: f.roots }), "written");
 
-	const runDir = join(f.store.dir, "runs", "a");
+	const runDir = join(f.store.dir, "conversations", "a");
 	const pkg = JSON.parse(readFileSync(join(runDir, "run.json"), "utf8"));
 	assert.equal(pkg.schema, 1);
 	assert.equal(pkg.flaggedBy, "executor");
@@ -170,7 +170,7 @@ test("run.json holds no transcript text and its title is at most 80 chars", () =
 	const root = agent(f, "a", "pihouse", null);
 	assert.ok(SECRET.length > TITLE_MAX);
 	captureRun([root], root, f.store, { by: "save", roots: f.roots });
-	const text = readFileSync(join(f.store.dir, "runs", "a", "run.json"), "utf8");
+	const text = readFileSync(join(f.store.dir, "conversations", "a", "run.json"), "utf8");
 	const pkg = JSON.parse(text);
 	assert.ok(pkg.title.length <= TITLE_MAX, `title is ${pkg.title.length} chars`);
 	assert.equal(pkg.title, "pihouse", "titles do not persist conversational requests");
@@ -178,7 +178,9 @@ test("run.json holds no transcript text and its title is at most 80 chars", () =
 	assert.ok(!text.includes('"done"'), "no answer text either");
 	const withReason = captureRun([root], root, f.store, { by: "save", reason: "x".repeat(300), roots: f.roots });
 	assert.equal(withReason, "written");
-	assert.ok(JSON.parse(readFileSync(join(f.store.dir, "runs", "a", "run.json"), "utf8")).title.length <= TITLE_MAX);
+	assert.ok(
+		JSON.parse(readFileSync(join(f.store.dir, "conversations", "a", "run.json"), "utf8")).title.length <= TITLE_MAX,
+	);
 });
 
 test("an unflagged run is ignored by the sweep, --last and the pending list", () => {
@@ -244,12 +246,12 @@ test("save on a plain chat with no workers and no hub captures it with its reaso
 	assert.equal(ownRoot([], { sessionId: "chat-1" }), undefined, "no journal record: the caller makes a local one");
 	addFlag(f.store.dir, root.id, { by: "save", reason: "I liked how this went" });
 	assert.equal(captureRun([root], root, f.store, { by: "save", reason: "I liked how this went" }), "written");
-	const pkg = JSON.parse(readFileSync(join(f.store.dir, "runs", "local-chat-1", "run.json"), "utf8"));
+	const pkg = JSON.parse(readFileSync(join(f.store.dir, "conversations", "local-chat-1", "run.json"), "utf8"));
 	assert.equal(pkg.reason, "I liked how this went");
 	assert.equal(pkg.title, "I liked how this went");
 	assert.equal(pkg.agents.length, 1);
 	assert.equal(pkg.agents[0].role, "root");
-	assert.ok(existsSync(join(f.store.dir, "runs", "local-chat-1", "transcripts", "local-chat-1.json")));
+	assert.ok(existsSync(join(f.store.dir, "conversations", "local-chat-1", "transcripts", "local-chat-1.json")));
 	const last = lastFlagged([], f.store);
 	assert.deepEqual(last, { stored: "local-chat-1" });
 });
@@ -260,13 +262,13 @@ test("a missing transcript is recorded, not fatal; a processed run is not captur
 	const lost = agent(f, "l", "workflow-executor", root, { startedAt: at(2), sessionId: "nope" });
 	const records = [root, lost];
 	captureRun(records, root, f.store, { by: "executor", roots: f.roots });
-	const pkg = JSON.parse(readFileSync(join(f.store.dir, "runs", "a", "run.json"), "utf8"));
+	const pkg = JSON.parse(readFileSync(join(f.store.dir, "conversations", "a", "run.json"), "utf8"));
 	const gone = pkg.agents.find((a: { id: string }) => a.id === "l");
 	assert.match(gone.missing, /no transcript on disk/);
 	assert.equal(gone.transcript, "");
 	assert.ok(recordReview(f.store, "a", "/r.md"));
 	captureRun(records, root, f.store, { by: "executor", roots: f.roots });
-	assert.equal(JSON.parse(readFileSync(join(f.store.dir, "runs", "a", "run.json"), "utf8")).review, "/r.md");
+	assert.equal(JSON.parse(readFileSync(join(f.store.dir, "conversations", "a", "run.json"), "utf8")).review, "/r.md");
 	f.store.markProcessed(["a"], "b1");
 	assert.equal(captureRun(records, root, f.store, { by: "executor", roots: f.roots }), "processed");
 	assert.equal(recordReview(f.store, "nope", "/r.md"), false);

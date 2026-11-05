@@ -89,7 +89,7 @@ test("ask scopes latest retained snapshots per project after captured-copy clean
 			}),
 		);
 		writeFileSync(join(skills, "build", "skill-a", "SKILL.md"), "Skill A description.");
-		const captured = join(memory, "runs", "a", "transcripts");
+		const captured = join(memory, "conversations", "a", "transcripts");
 		mkdirSync(captured, { recursive: true });
 		writeFileSync(join(captured, "captured.json"), "PRIVATE CONVERSATION");
 		rmSync(captured, { recursive: true, force: true });

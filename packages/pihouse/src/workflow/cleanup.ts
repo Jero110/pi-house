@@ -4,6 +4,7 @@ import { join, resolve } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { type DigestIdentity, validateDigest } from "./digest-contract.ts";
 import { commitArtifact } from "./documents.ts";
+import { vaultPaths } from "./vault-paths.ts";
 
 // Digest commit and owned-copy cleanup. Generation is never deletion authority: the only thing that deletes is
 // runCleanup, and only for the files a persisted receipt names, after every gate below passes again.
@@ -38,11 +39,11 @@ export type CleanupResult =
 
 const sha256 = (bytes: Buffer | string): string => createHash("sha256").update(bytes).digest("hex");
 
-/** Resolve the one directory cleanup may touch: <owned>/runs/<id>/transcripts, with no symlink anywhere on the way. */
+/** Resolve the one directory cleanup may touch: <owned>/conversations/<id>/transcripts, with no symlink anywhere on the way. */
 function capturedDir(ownedRoot: string, runId: string): string | { error: string } {
 	if (!SAFE_ID.test(runId)) return { error: "invalid run id" };
 	try {
-		const expected = join(realpathSync(ownedRoot), "runs", runId, "transcripts");
+		const expected = vaultPaths(realpathSync(ownedRoot)).transcripts(runId);
 		if (lstatSync(expected).isSymbolicLink() || realpathSync(expected) !== expected)
 			return { error: "captured directory resolves outside the owned root" };
 		return expected;

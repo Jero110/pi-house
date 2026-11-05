@@ -39,6 +39,7 @@ import { catalogReadme, readCatalog, skillPath } from "../src/workflow/catalog.t
 import { LIMITS, openMemory } from "../src/workflow/memory.ts";
 import { renderReport } from "../src/workflow/report.ts";
 import { briefOf, buildRun, pickRoot } from "../src/workflow/run.ts";
+import { openLegacyMemory } from "./legacy-store.ts";
 
 function tempHome(t: { after: (fn: () => void) => void }): { home: string; env: NodeJS.ProcessEnv } {
 	const home = mkdtempSync(join(tmpdir(), "pihouse-"));
@@ -902,15 +903,15 @@ test("/workflow ask retrieves bounded architecture snippets and marks unsupporte
 	assert.doesNotMatch(text, /# Skills catalog/);
 });
 
-function askFixture(t: { after: (fn: () => void) => void }) {
+function askFixture(t: { after: (fn: () => void) => void }, options: { legacy?: boolean } = {}) {
 	const { home, env } = tempHome(t);
 	const memoryDir = join(home, "memory");
-	const store = openMemory(memoryDir);
+	const store = options.legacy ? openLegacyMemory(memoryDir) : openMemory(memoryDir);
 	return { env: { ...env, PIHOUSE_HOME: join(home, ".pihouse") }, memoryDir, store };
 }
 
 test("/workflow ask reads the memory, the index and the matching digests, never a transcript", async (t) => {
-	const { env, memoryDir, store } = askFixture(t);
+	const { env, memoryDir, store } = askFixture(t, { legacy: true });
 	store.writeWorkflowMemory("The user prefers small commits.");
 	for (let i = 0; i < 20; i++) {
 		const id = `run-${i}`;
@@ -971,9 +972,9 @@ test("a YouTube link in the question is transcribed and saved to consulted/", as
 
 test("adoptIdeas indexes an idea file written by hand, once", (t) => {
 	const { memoryDir, store } = askFixture(t);
-	mkdirSync(join(memoryDir, "ideas"), { recursive: true });
+	mkdirSync(join(memoryDir, "ask", "ideas"), { recursive: true });
 	writeFileSync(
-		join(memoryDir, "ideas", "src-ab12-cache.md"),
+		join(memoryDir, "ask", "ideas", "src-ab12-cache.md"),
 		"---\nid: src-ab12-cache\ntitle: Cache the catalog\nproject: /p\nprojectSlug: p\ncreatedAt: 2026-10-26T01:00:00.000Z\n---\n\nRead the catalog once per session.\nMore.\n",
 	);
 	assert.deepEqual(store.adoptIdeas(), ["idea:src-ab12-cache"]);

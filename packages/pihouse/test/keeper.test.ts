@@ -136,9 +136,9 @@ test("a batch of 3 is digested once: 3 digests and 1 consolidation, then 0 pendi
 	assert.equal(f.store.readDigest("r2")?.startsWith("summary: digest of r2"), true);
 	assert.match(f.store.readWorkflowMemory(), /tests first/);
 	// The raw copies were archived; the package stays in place for skill counts.
-	assert.equal(existsSync(join(f.store.dir, "runs", "r1", "transcripts")), false);
+	assert.equal(existsSync(join(f.store.dir, "conversations", "r1", "transcripts")), false);
 	assert.equal(existsSync(join(f.store.dir, "archive", "raw", "r1", "transcripts", "a.json")), true);
-	assert.equal(existsSync(join(f.store.dir, "runs", "r1", "run.json")), true);
+	assert.equal(existsSync(join(f.store.dir, "conversations", "r1", "run.json")), true);
 	// Nothing is left to do: no second read.
 	assert.equal(await digestPending(digestDeps(f, model.complete)), undefined);
 	assert.equal(model.calls.length, 4);
@@ -292,8 +292,8 @@ test("pruning archives an entry unused for 90 days, and deletes nothing", () => 
 	f.store.writeIdea({ id: "i2", title: "new idea", project: "/p", projectSlug: "p" }, "Try Y");
 	const r = prune({ store: f.store, catalog, now: f.c.now });
 	assert.deepEqual(r.archived, [idea.id]);
-	assert.equal(existsSync(join(f.store.dir, "archive", "ideas", "i1.md")), true, "moved, not deleted");
-	assert.equal(existsSync(join(f.store.dir, "ideas", "i2.md")), true);
+	assert.equal(existsSync(join(f.store.dir, "archive", "ask", "ideas", "i1.md")), true, "moved, not deleted");
+	assert.equal(existsSync(join(f.store.dir, "ask", "ideas", "i2.md")), true);
 	assert.equal(f.store.readIndex().find((e) => e.id === idea.id)?.status, "archived");
 	assert.deepEqual(r.proposed, [], "no delete proposal for it");
 });
@@ -322,7 +322,7 @@ test("raw copies archived over 90 days ago get a delete-raw proposal that delete
 		"the digest is archived, not deleted",
 	);
 	assert.equal(
-		existsSync(join(f.store.dir, "archive", "runs", "r1", "run.json")),
+		existsSync(join(f.store.dir, "archive", "conversations", "r1", "run.json")),
 		true,
 		"the package is archived, not deleted",
 	);
@@ -357,7 +357,10 @@ test("every digest input and every consolidation input stay under the limits wit
 	for (const total of [1, 5, 20]) {
 		const f = fixture();
 		for (let i = 0; i < total; i++) addRun(f.store, `r${i}`, { transcript: big });
-		assert.ok(bytesUnder(join(f.store.dir, "runs")) >= total * 2_000_000, "the runs really are about 2 MB each");
+		assert.ok(
+			bytesUnder(join(f.store.dir, "conversations")) >= total * 2_000_000,
+			"the runs really are about 2 MB each",
+		);
 		const model = fakeModel({
 			digest: `summary: s\n${"d".repeat(1900)}`,
 			memory: `# Memory\n${"- a rule of the user\n".repeat(380)}`.slice(0, LIMITS.workflowMemory),

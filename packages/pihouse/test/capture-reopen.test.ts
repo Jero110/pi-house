@@ -92,7 +92,7 @@ function cleanNewestRevision(fixture: Fixture): void {
 			.get(RUN);
 		const revision = String(row?.id);
 		const fingerprint = String(row?.source_hash);
-		const runDir = join(fixture.memoryDir, "runs", RUN);
+		const runDir = join(fixture.memoryDir, "conversations", RUN);
 		const pkg = JSON.parse(readFileSync(join(runDir, "run.json"), "utf8")) as { project: string; cursor: unknown };
 		const committed = commitDigest(operational.db, {
 			ownedRoot: fixture.memoryDir,
@@ -133,7 +133,7 @@ function revisionCount(memoryDir: string): number {
 }
 
 function capturedText(memoryDir: string): string {
-	const dir = join(memoryDir, "runs", RUN, "transcripts");
+	const dir = join(memoryDir, "conversations", RUN, "transcripts");
 	return readdirSync(dir)
 		.map((name) => readFileSync(join(dir, name), "utf8"))
 		.join("\n");
@@ -146,13 +146,13 @@ test("a cleaned run that gained lines is reopened as one new revision holding on
 		const { store } = fixture;
 		assert.equal(captureRun([fixture.root], fixture.root, store, { by: "planner" }), "written");
 		cleanNewestRevision(fixture);
-		assert.equal(existsSync(join(fixture.memoryDir, "runs", RUN, "transcripts")), false);
+		assert.equal(existsSync(join(fixture.memoryDir, "conversations", RUN, "transcripts")), false);
 
 		appendFileSync(fixture.source, `${message("m2", "second-note")}\n`);
 		const outcome = captureRunOutcome([fixture.root], fixture.root, store, { by: "planner" });
 		assert.equal(outcome.status, "written");
 		assert.equal(revisionCount(fixture.memoryDir), 2);
-		const pkg = JSON.parse(readFileSync(join(fixture.memoryDir, "runs", RUN, "run.json"), "utf8")) as {
+		const pkg = JSON.parse(readFileSync(join(fixture.memoryDir, "conversations", RUN, "run.json"), "utf8")) as {
 			revision: number;
 		};
 		assert.equal(pkg.revision, 2);
@@ -172,11 +172,11 @@ test("a cleaned run with no new evidence is discarded without a new revision", (
 		const { store } = fixture;
 		assert.equal(captureRun([fixture.root], fixture.root, store, { by: "planner" }), "written");
 		cleanNewestRevision(fixture);
-		const before = readFileSync(join(fixture.memoryDir, "runs", RUN, "run.json"), "utf8");
+		const before = readFileSync(join(fixture.memoryDir, "conversations", RUN, "run.json"), "utf8");
 
 		assert.equal(captureRunOutcome([fixture.root], fixture.root, store, { by: "planner" }).status, "discarded");
 		assert.equal(revisionCount(fixture.memoryDir), 1);
-		assert.equal(readFileSync(join(fixture.memoryDir, "runs", RUN, "run.json"), "utf8"), before);
+		assert.equal(readFileSync(join(fixture.memoryDir, "conversations", RUN, "run.json"), "utf8"), before);
 	} finally {
 		rmSync(home, { recursive: true, force: true });
 	}

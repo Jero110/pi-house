@@ -53,6 +53,7 @@ import { renderReport } from "../workflow/report.ts";
 import { buildRun, pickRoot, type WorkflowRun } from "../workflow/run.ts";
 import { fetchSource, type SourceResult } from "../workflow/sources.ts";
 import { openOperationalStore } from "../workflow/storage.ts";
+import { vaultPaths, vaultRel } from "../workflow/vault-paths.ts";
 import { sessionTitle } from "./brand.ts";
 
 export const MESSAGE_TYPE = "pihouse-workflow";
@@ -157,7 +158,7 @@ export function sourcesIn(question: string): string[] {
 /**
  * Saves what each source gave and says what to do with it.
  * Problem: a link in the question was left to the model to open, so the same video was read twice and never kept.
- * Example: "what do you think of https://youtu.be/abc?" must leave consulted/<id>.md and .txt behind. Solution: code
+ * Example: "what do you think of https://youtu.be/abc?" must leave ask/consulted/<id>.md and .txt behind. Solution: code
  * fetches and saves the text through the store; the model only writes the summary, the ideas and the question back.
  */
 async function sourcesSection(
@@ -167,6 +168,7 @@ async function sourcesSection(
 	fetcher: (input: string) => Promise<SourceResult>,
 ): Promise<string> {
 	const where = projectOf(deps.cwd ?? process.cwd());
+	const paths = vaultPaths(store.dir);
 	const parts: string[] = [];
 	const saved: string[] = [];
 	for (const input of inputs) {
@@ -183,7 +185,7 @@ async function sourcesSection(
 			[
 				`## Source: ${title}`,
 				"",
-				`- Entry: ${join(store.dir, "consulted", `${id}.md`)} (text: ${join(store.dir, "consulted", `${id}.txt`)})`,
+				`- Entry: ${paths.resolve(vaultRel.consultedNote(id))} (text: ${paths.resolve(vaultRel.consultedText(id))})`,
 				`- From: ${input} (${got.meta.kind}, ${got.meta.method})`,
 				"",
 				got.text.slice(0, SOURCE_CHARS),
@@ -197,7 +199,7 @@ async function sourcesSection(
 				"For each source above:",
 				"1. Write a summary of at most 1,500 chars under `## Summary` in its entry file (edit only that section).",
 				"2. Relate it to the user's past runs, using the digests and the memory above; name the runs.",
-				`3. For each idea worth keeping, write ${join(store.dir, "ideas", "<source id>-<short-name>.md")} starting with`,
+				`3. For each idea worth keeping, write ${join(paths.ideasDir, "<source id>-<short-name>.md")} starting with`,
 				"   `---`, then lines `id: <source id>-<short-name>`, `title: <title>`, `project: <project>`, `projectSlug: <slug>`,",
 				"   `createdAt: <ISO time>`, then `---`, then the idea in a few lines.",
 				"4. Ask the user what they need from it to go on (use ask_user_question).",
@@ -279,7 +281,7 @@ function ownRun(ctx: ExtensionContext): { records: SessionRecord[]; root: Sessio
  */
 function savedRevision(store: MemoryStore, runId: string): number | undefined {
 	try {
-		const value: unknown = JSON.parse(readFileSync(join(store.dir, "runs", runId, "run.json"), "utf8"));
+		const value: unknown = JSON.parse(readFileSync(vaultPaths(store.dir).runJson(runId), "utf8"));
 		if (typeof value !== "object" || value === null || !Number.isSafeInteger(Reflect.get(value, "revision")))
 			return undefined;
 		return Number(Reflect.get(value, "revision"));
