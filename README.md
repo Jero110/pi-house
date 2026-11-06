@@ -58,12 +58,12 @@ LLMs are still not great at technical design, and there are incredible resources
 ## Also included
 
 - **Quota-aware model choice.** On a fresh start, pi-house can pick an authenticated Claude or OpenAI-Codex model that your subscription quota confirms has room. If quota is unknown it warns, and it never silently falls back to a paid model.
-- **Workflow commands.** `/workflow ask` answers questions about your own setup (tokens, MCPs, skills, architecture), `/workflow report` writes a code-computed report, and `/workflow proposals`, `approve` and `reject` manage self-learning changes.
+- **Workflow commands.** `/workflow ask` answers questions about your own setup and past runs, `/workflow log` saves a session, `/workflow review` looks back over your saved runs, and `/workflow proposals`, `approve` and `reject` manage the changes a review proposes.
 - **Skills: only the ones needed.** A skill is a plain Markdown file you can read and edit. The philosophy is to have very few, and to load one only when it is really used. Skills are grouped by phase (pre-build to understand the idea and plan, build to guide the executor, post-build for what you invoke yourself). During planning the planner recommends which skills should be used for the work, you choose, and only your choices reach the plan and every executor task. Nothing is loaded "just in case", and the self-learning watcher flags skills that are always read but rarely useful.
 - **Two MCP servers, and the problem they solve.**
   - **agent-link** solves agents that cannot talk to each other. Every harness (Claude Code, Codex, opencode, pi) gets the same tools to launch, message, answer permissions for, switch the model of and stop other agents, with no shared protocol needed. It journals who started whom, so a plan can run unattended and unused agents are cleaned up.
   - **cmux MCP** solves the multiplexer being a black box to the agents. It lets an agent find sessions, open and arrange panes and workspaces, and read what another agent did from its transcript, so each worker has its own visible pane you can watch or take over.
-- **On-demand memory.** pi-house remembers what happened (digests, reviews, metrics, approved changes), but it does not stuff that into every prompt. Most memory systems inject history at startup, which costs tokens on every turn and puts stale facts in front of the model. Here an agent starts with only a short rule and two tools: `memory_search` to look something up and `memory_get` to read one result. Only what it explicitly asks for enters the context, in small bounded pieces and marked as untrusted source material, never as instructions. The same memory powers `/workflow ask`, so you can ask about your own setup ("how many tokens did my last runs use?", "should I adopt this new model?") and get answers with the evidence cited. Agents can also propose a change (`memory_propose`), but only you can approve it.
+- **On-demand memory.** pi-house remembers what happened (compacts, reviews, metrics, approved changes), but it does not stuff that into every prompt. Most memory systems inject history at startup, which costs tokens on every turn and puts stale facts in front of the model. Here an agent starts with only a short rule and two tools: `memory_search` to look something up and `memory_get` to read one result. Only what it explicitly asks for enters the context, in small bounded pieces and marked as untrusted source material, never as instructions. The same memory powers `/workflow ask`, so you can ask about your own setup ("how many tokens did my last runs use?", "should I adopt this new model?") and get answers with the evidence cited. Agents can also propose a change (`memory_propose`), but only you can approve it.
 
 ## Make your own tools
 
@@ -99,19 +99,19 @@ pih
 2. **Pick a model** with `/model`.
 3. **Plan.** Run `/skill:planner`, write your prompt, and answer its questions. It recommends skills, you select the ones you want, and you agree on the plan with it.
 4. **Execute.** The planner hands the plan to the executor, which runs the tasks in their own panes on its own. Follow the flow.
-5. **Learn (optional).** Start with `/workflow report`, then use the rest:
+5. **Learn (optional).** Planner and executor sessions are saved by themselves, so there is nothing to run after a feature. When you want to look back, run `/workflow review`:
 
 | Command | What it does |
 |---|---|
-| `/workflow report [--last]` | Writes a code-computed Markdown report and returns its path. No model call. |
-| `/workflow save [reason]` | Keeps an otherwise unselected conversation for learning. |
-| `/workflow digest` | Generates the missing digests in separate agents. |
-| `/workflow self-learning` | Prepares digests, then scans and reviews a batch in separate agents. Applies nothing. |
-| `/workflow ask <question>` | Answers from your retained evidence, metrics, architecture and skills. |
-| `/workflow proposals` | Lists proposed changes with their evidence and status. |
-| `/workflow approve <id>` | Approves a proposal and applies it after validation. |
+| `/workflow log [reason]` | Saves the current session, which is otherwise not saved. Planner and executor sessions need no command. No model call. |
+| `/workflow review [--yes]` | Shows how many saved runs are waiting, asks you to confirm (it uses model quota), makes a compact version of each, writes one review and proposes changes. Then it deletes the full conversations it covered; their compacts stay. |
+| `/workflow ask <question>` | Answers from your compacts, reviews, ideas and consulted sources by keyword. If saved runs of this project have no compact, it asks once whether to compact them. |
+| `/workflow proposals [id]` | Lists proposed changes, or shows one with the file path and its diff. |
+| `/workflow approve <id> [version]` | Approves a proposal and applies it, with a backup and a check. |
 | `/workflow reject <id> [reason]` | Rejects a proposal and records why. |
 | `/skill:<name>` | Runs a skill by hand, e.g. `/skill:ask-books <question>`. |
+
+The vault lives in `~/.pihouse/memory/`: `conversations/` (full copies, temporary), `workflow/` (compacts, reviews, proposal backups; permanent) and `ask/` (ideas and consulted sources). `/workflow report`, `save`, `digest` and `self-learning` are retired and only print what replaces them. Limits: there is no lock between two reviews, a run whose agent-link records are gone is not offered, and a review reads at most 60,000 characters of compacts and defers the rest to the next one. See the [self-learning guide](docs/self-learning.md).
 
 ## How it is built
 
@@ -137,14 +137,18 @@ flowchart LR
 
 ```mermaid
 flowchart TB
-  H([Human manually starts digest / self-learning]) --> C[Code captures revision + metrics]
-  C --> R[(Captured report and transcript copies)]
-  R --> D{{Isolated digest agent}} --> V[Code validates identity and durable bytes]
-  V -->|invalid, unstable, or live| Q[Retain and queue / defer]
-  V -->|valid and quiescent| G[(Canonical digest + receipt)] --> X[Remove owned captured copies only]
-  G --> S[Candidate scan] --> B{{Separate bounded batch review agent}}
-  B --> P[(Review and proposals)] --> A([Human approves pinned change])
-  A --> I[Allowlisted apply + validation] --> K[(Approved knowledge + receipt)]
+  S([Planner or executor session]) --> C[Code captures after each answer and at close]
+  C --> R[(Full conversation copy + report)]
+  H([Human runs /workflow review and confirms]) --> K{{Isolated compact agents}}
+  R --> K --> V[Code validates the compact]
+  V -->|invalid or stale| X[Nothing written; try again next review]
+  V -->|valid| M[(Compact: permanent)]
+  M --> W{{One review agent: new compacts + latest review}}
+  W --> B[Code validates and writes the review]
+  B --> L[(Review: permanent)]
+  B --> P[(Proposals)] --> A([Human approves a pinned version])
+  A --> I[Apply with backup + validation + receipt]
+  B --> Z[Delete covered full conversations only]
 ```
 
 ### On-demand memory
@@ -154,7 +158,7 @@ flowchart LR
   H([Human asks]) --> A[/workflow ask/] --> M[Scoped memory MCP]
   E[Everyday agent] -. explicit search / get .-> M
   M --> F[(Rebuildable FTS5)]
-  M --> D[(Canonical digests, reviews, approved records)]
+  M --> D[(Compacts, reviews, approved records)]
   M --> O[(Operational SQLite: metrics, decisions, receipts)]
   M --> C[Bounded sourced context] --> E
   N[No startup injection] -.-> E

@@ -187,8 +187,9 @@ Launch the executor with agent-link `spawn`:
 
 `handoff: true` makes the executor take over: once it runs and your turn ends, agent-link closes this pane, the
 executor stays on the left, and its agents stack to its right. Tell the user in two lines: the executor takes over
-from here and reports in its own pane, and `/workflow report` there shows afterwards what ran, with which skills,
-tokens and time. Then end your turn. Do not start post-build or extra skills: the user invokes them if they want.
+from here and reports in its own pane, and that session is saved by itself (a report of what ran, with which skills,
+tokens and time, plus the conversation). `/workflow review` and `/workflow ask` are the ways to look back later. Then
+end your turn. Do not start post-build or extra skills: the user invokes them if they want.
 
 ## Red flags
 

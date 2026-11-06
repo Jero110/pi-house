@@ -122,7 +122,7 @@ COMMIT: <sha> on <branch> (or "no changes")
 CONCERNS: judgment calls outside the brief, or none
 ```
 
-The `Skills:` line lists only the skills the plan gives that task; `/workflow report` reads it.
+The `Skills:` line lists only the skills the plan gives that task; the saved run's compact version lists the skills that were loaded.
 
 ## Step 2: Supervise
 
@@ -154,8 +154,9 @@ Your final answer, the only long message:
 - **Gaps:** what did not pass, and why.
 
 Your pane is the user's now (the planner closed), so the report is for them. Close every agent still open with
-`cancel`, end by offering a report: "Run `/workflow report` here to see what ran, with which skills, tokens and
-time?" Only offer it; never run it yourself. Then stop. Do not start post-build or extra skills; the user invokes those
+`cancel`, end by telling the user that this session is saved by itself and that `/workflow review` (compacts and
+reviews saved runs, uses model quota) and `/workflow ask` are the ways to look back. Only mention them; never run them
+yourself. Then stop. Do not start post-build or extra skills; the user invokes those
 if they want them.
 
 ## Red flags
