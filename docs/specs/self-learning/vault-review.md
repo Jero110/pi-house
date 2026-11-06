@@ -1,6 +1,6 @@
 # Specification: vault-review
 
-Status: proposed. Decision record: [ADR-004](../../decisions/ADR-004-vault-review.md). Plan:
+Status: accepted. Decision record: [ADR-004](../../decisions/ADR-004-vault-review.md). Plan:
 `docs/plans/workflow-vault-review.md`. Supersedes the per-run digest, scan and batch-review parts of the other files in
 this folder; those files are not edited and remain as history.
 
