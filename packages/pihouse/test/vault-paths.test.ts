@@ -125,7 +125,18 @@ test("ideas and consulted notes under ask/ are findable by searchMemory after in
 			join(root, "ask", "ideas", "by-hand.md"),
 			"---\nid: by-hand\ntitle: By hand\nproject: /p/app\nprojectSlug: app\n---\n\nPangolinnote here.\n",
 		);
-		assert.deepEqual(store.adoptIdeas(), ["idea:by-hand"]);
+		// A consulted source moved in from an older vault has no index row either; it is adopted with its text.
+		writeFileSync(
+			join(root, "ask", "consulted", "old-src.md"),
+			"---\nid: old-src\ntitle: Old source\nsource: https://x.test/old\nproject: /p/app\nprojectSlug: app\n---\n\n## Summary\n\nsum\n",
+		);
+		writeFileSync(join(root, "ask", "consulted", "old-src.txt"), "Axolotlbody fetched.");
+		assert.deepEqual(store.adoptIdeas(), ["idea:by-hand", "consulted:old-src"]);
+		assert.deepEqual(store.adoptIdeas(), []);
+		assert.deepEqual(
+			searchMemory(root, "axolotlbody", scope).map((h) => h.id),
+			["consulted:old-src"],
+		);
 		assert.deepEqual(
 			searchMemory(root, "pangolinnote", scope).map((h) => h.id),
 			["idea:by-hand"],

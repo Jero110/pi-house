@@ -545,6 +545,30 @@ export function openMemory(dir: string, opts: { now?: () => Date } = {}): Memory
 				upsert(entry);
 				adopted.push(entry.id);
 			}
+			// Same problem for sources: a consulted note moved in from an older vault has a note and a text but no row.
+			const sources = abs(vaultRel.consultedDir);
+			if (existsSync(sources)) {
+				for (const name of readdirSync(sources).filter((n) => n.endsWith(".md"))) {
+					const { fields, body } = parseFrontmatter(readFileSync(join(sources, name), "utf8"));
+					const id = fields.id ?? name.replace(/\.md$/, "");
+					if (!SAFE_ID.test(id) || known.has(`consulted:${id}`)) continue;
+					const entry = baseEntry(
+						"consulted",
+						id,
+						{
+							project: fields.project ?? "",
+							projectSlug: fields.projectSlug ?? "",
+							title: fields.title ?? id,
+							summary: body.split("\n").find((l) => l.trim() && !l.startsWith("#")) ?? "",
+						},
+						`${vaultRel.consultedDir}/${name}`,
+						"active",
+					);
+					if (fields.createdAt) entry.createdAt = fields.createdAt;
+					upsert(entry);
+					adopted.push(entry.id);
+				}
+			}
 			return adopted;
 		},
 
