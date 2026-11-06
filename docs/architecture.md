@@ -25,21 +25,25 @@ The hub journals participants and routes work; it does not own memory. Each work
 
 ```mermaid
 flowchart TB
-  H([Human: manually run digest or self-learning]) --> C[Code captures selected run revision]
-  C --> R[(Captured report + transcript copies)]
-  C --> Q[(SQLite jobs + structured metrics)]
-  R --> D{{Isolated digest worker; one run revision}}
-  D --> V[Code validates identity, structure and persisted bytes]
-  V -->|invalid / unstable| X[Retain evidence; retry or defer] --> Q
-  V -->|valid and quiescent| G[(Canonical digest + commit receipt)]
-  Q --> G
-  G --> Z[Code removes only owned captured conversational copies]
-  Z --> S[Candidate scan] --> B{{Separate bounded batch review worker}}
-  B --> P[(Review and proposals)] --> A([Human approves pinned proposal])
-  A --> I[Allowlisted apply + validation + receipt] --> K[(Approved knowledge)]
+  S([Planner or executor session; any other only via /workflow log]) --> C[Code captures after each answer and at close]
+  C --> R[(conversations: report.md, run.json, full transcripts)]
+  C --> Q[(SQLite: metrics, run_stages)]
+  H([Human runs /workflow review and confirms the count]) --> K{{Compact agents, up to 3 at once, one per revision}}
+  R --> K
+  K --> V[Code validates, computes Facts, writes the compact]
+  V -->|invalid or stale| X[Nothing written; revision stays uncompacted]
+  V -->|valid| M[(workflow/compact: permanent)]
+  M --> W{{One review agent: new compacts + latest review only}}
+  W --> B[Code validates and writes the review]
+  B --> L[(workflow/reviews: permanent)]
+  B --> P[(Proposals)]
+  B --> Z[Code deletes covered full conversations only]
+  Z --> R
+  P --> A([Human approves a pinned version])
+  A --> I[Apply literally: backup, compare-and-swap, validation, receipt]
 ```
 
-A **report** is code-computed Markdown (partial while work is active); a **transcript** is source conversation; a **digest** is a lossy, validated summary of a stable revision. Digest and review are manually triggered and run in separate agents. Failure or uncertain liveness retains captured copies and queues work. Cleanup never claims to delete native harness sessions, project files, or migration backups. Candidate recommendations are not approved knowledge until a human authorizes the pinned change and validation records a receipt.
+Capture is code and runs no model. A **report** is code-computed Markdown for the human and is no input of compact or review; a **transcript** is the source conversation, kept as a temporary full copy; a **compact** is a validated summary of one revision (at most 6,000 characters) with code-computed Facts; a **review** is one file (at most 12,000 characters) that reads only the new compacts and the previous review and carries the previous essentials forward. Compact and review run in separate agents on the hub and need it. Deletion removes only pi-house-owned copies in `conversations/<run id>/transcripts/`, per run, after its review was written and ingested, the run is quiescent and its evidence fingerprint is unchanged; a compact made by `/workflow ask` never authorizes it. A review that fails halfway keeps every conversation. Nothing deletes native harness sessions, project files, compacts, reviews or migration backups. A proposal is not applied until a human approves its pinned version, and a `file:` proposal may name any existing regular file except credentials. There is no lock between two reviews, and a review input beyond 60,000 characters defers the newest compacts to the next review. See the [self-learning guide](self-learning.md) for the limits.
 
 ## Memory consultation
 
@@ -47,14 +51,14 @@ A **report** is code-computed Markdown (partial while work is active); a **trans
 flowchart LR
   A[Everyday agent] -->|explicit search / get| M[Memory MCP + scope checks]
   M --> F[(SQLite FTS5: derived, rebuildable)] --> M
-  M --> D[(Canonical digests, reviews, approved records)]
+  M --> D[(Compacts, reviews, ideas, consulted sources, approved records)]
   M --> S[(SQLite operational metrics and decisions)]
   Q[Current architecture and skills] --> M
   M -->|bounded sourced context| A
   H([Human asks]) --> Ask[/workflow ask/] --> M
 ```
 
-SQLite's operational tables are authoritative and are not disposable search data. Rebuilding FTS does not rebuild or erase job, metric, decision, or receipt state. Ordinary sessions see no automatic memory bootstrap; `/workflow ask` or explicit MCP retrieval selects bounded material on demand.
+SQLite's operational tables are authoritative and are not disposable search data. Rebuilding FTS does not rebuild or erase job, metric, decision, or receipt state. Ordinary sessions see no automatic memory bootstrap; `/workflow ask` or explicit MCP retrieval selects bounded material on demand. `/workflow ask` answers from **compacts and reviews** (plus ideas and consulted sources) through a keyword search that matches any word, never from a transcript, and its context is capped at 80,000 characters. When saved runs of the current project have no compact it asks once, and only on a yes the `workflow_compact` tool compacts them; ask never deletes a conversation or marks a run reviewed.
 
 ## Authorized routing
 
@@ -74,7 +78,7 @@ The router does not imply universal quota visibility. In-place switching is limi
 
 ## Workflow implementation
 
-`packages/pihouse/src/extensions/workflow.ts` exposes the public command family. Supporting modules under `packages/pihouse/src/workflow/` divide reporting, capture/evidence, migration, storage, search, isolated digest jobs, batch review, proposals and routing. Canonical documents remain readable; the local SQLite store owns operational state and derived FTS. `migrateLegacyStore` is an explicit migration operation, not an automatic startup migration. See the [self-learning guide](self-learning.md), [module specifications](specs/self-learning/common.md), [ADR-001](decisions/ADR-001-workflow-memory.md), and [ADR-002](decisions/ADR-002-self-learning.md).
+`packages/pihouse/src/extensions/workflow.ts` exposes the public command family. Supporting modules under `packages/pihouse/src/workflow/` divide reporting, capture/evidence, migration, storage, search, compact and review runs, the deletion gate, proposals and routing; `vault-paths.ts` is the only module that knows the vault layout. Canonical documents remain readable; the local SQLite store owns operational state and derived FTS. `migrateLegacyStore` is an explicit migration operation, not an automatic startup migration. See the [self-learning guide](self-learning.md), [module specifications](specs/self-learning/common.md), [ADR-001](decisions/ADR-001-workflow-memory.md), [ADR-002](decisions/ADR-002-self-learning.md), and [ADR-004](decisions/ADR-004-vault-review.md), which defines the current loop and the [vault-review specification](specs/self-learning/vault-review.md).
 
 ## Other components
 
@@ -84,7 +88,7 @@ The router does not imply universal quota visibility. In-place switching is limi
 - **cmux MCP:** optional tools for cmux sessions, panes, workspaces and browser. It can read transcripts from harness-owned files; it does not manage retention.
 - **agent-transcripts:** parsers normalize supported harness transcripts for reporting and selected capture.
 
-For package boundaries, installation and public commands, see [README](../README.md). Historical workflow design remains in [ADR-001](decisions/ADR-001-workflow-memory.md) and the [historical specification](specs/workflow-memory.md); current conflicting decisions are specified in ADR-002.
+For package boundaries, installation and public commands, see [README](../README.md). Historical workflow design remains in [ADR-001](decisions/ADR-001-workflow-memory.md) and the [historical specification](specs/workflow-memory.md); current conflicting decisions are specified in ADR-002 and ADR-004.
 
 ## Books library
 

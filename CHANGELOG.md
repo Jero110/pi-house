@@ -2,12 +2,27 @@
 
 ## Unreleased
 
+### Added
+- `/workflow log [reason]`: saves a session that is not a planner or executor session. Planner and executor sessions are now saved by themselves after every answer and when the session closes.
+- `/workflow review [--yes]`: counts the saved runs, asks for confirmation (it uses model quota), makes a compact version of each (at most 6,000 characters, with code-computed Facts), then one review agent reads the new compacts and the latest review and writes one review file (at most 12,000 characters) with proposals. The full conversation of each covered run is then deleted; its compact stays. A failed review keeps every conversation.
+- `workflow_compact` tool: `/workflow ask` offers once to compact the current project's uncompacted runs and compacts them only on a yes. A compact made by ask never authorizes a deletion.
+- Proposals may target any existing regular file with `file:<absolute path>`, applied only after approval with a backup, compare-and-swap and validation. Credentials (`auth.json`, `.env`, keys, `~/.ssh` and similar) are refused.
+- A vault with one place per origin under `~/.pihouse/memory/`: `conversations/` (temporary full copies), `workflow/` (permanent compacts, reviews, proposal backups) and `ask/` (ideas and consulted sources), with a `README.md` written by code. See [ADR-004](docs/decisions/ADR-004-vault-review.md).
+
 ### Changed
-- Replaced `/workflow review` and keeper-era public commands (`/keeper`, `pih keeper`) with `/workflow report`, `digest`, `self-learning`, and proposal commands. Removed commands return replacement guidance, not compatibility aliases.
-- Reports are code-computed and may be partial; digest generation and batch review are manually triggered in separate agents. Only validated, stable evidence can remove pi-house-owned captured conversation copies. Native harness sessions, project files, and migration backups are not deleted.
-- Workflow memory now separates readable canonical documents, authoritative SQLite operational state, and rebuildable FTS search. Memory is retrieved on demand rather than injected into ordinary context.
+- `/workflow ask` answers from compacts, reviews, ideas and consulted sources by keyword (any word matches); it never reads a transcript.
+- Proposal ids are shown as `proposal-` and the first 6 hash characters, longer only when two collide.
+- The default model for compacting and reviewing is `claude-bridge/claude-sonnet-5-5` (`PIHOUSE_LEARNING_MODEL` still overrides it).
+- The planner and executor skills no longer mention `/workflow report`; `/workflow review` and `/workflow ask` are the ways to look back.
+- Documentation describes the real limits: no lock between two reviews, a run whose agent-link records are gone is not offered, and a review input over 60,000 characters defers the later compacts to the next review. See the [self-learning guide](docs/self-learning.md).
+
+### Removed
+- `/workflow report`, `save`, `digest` and `self-learning`, and the earlier `/keeper` and `pih keeper`. Each prints replacement guidance, starts nothing and has no alias.
+
+### Earlier in this release
+- Workflow memory separates readable canonical documents, authoritative SQLite operational state, and rebuildable FTS search. Memory is retrieved on demand rather than injected into ordinary context.
 - Proposal approval pins the current displayed version and remains distinct from verified application; see [migration and recovery guidance](docs/self-learning.md).
-- Added architecture diagrams and successor decision [ADR-002](docs/decisions/ADR-002-self-learning.md); ADR-001 remains as historical rationale.
+- Added architecture diagrams and decisions [ADR-002](docs/decisions/ADR-002-self-learning.md) and [ADR-004](docs/decisions/ADR-004-vault-review.md); ADR-001 remains as historical rationale.
 
 ## 0.1.0
 
