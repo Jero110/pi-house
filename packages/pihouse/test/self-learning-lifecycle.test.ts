@@ -6,31 +6,28 @@ import {
 	mkdtempSync,
 	readdirSync,
 	readFileSync,
+	realpathSync,
 	rmSync,
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import type { HubClient, SessionRecord } from "agent-link-core";
+import type { SessionRecord } from "agent-link-core";
 import { askContext, proposalCommand } from "../src/extensions/workflow.ts";
-import { captureRun } from "../src/workflow/capture.ts";
-import { DIGEST_SECTIONS } from "../src/workflow/digest-contract.ts";
-import { digestCommand, type LearningDeps, selfLearningCommand } from "../src/workflow/learning-commands.ts";
+import { captureRun, captureRunOutcome } from "../src/workflow/capture.ts";
+import { COMPACT_SECTIONS } from "../src/workflow/compact-contract.ts";
+import { type LearningDeps, reviewCommand } from "../src/workflow/learning-commands.ts";
 import { openMemory } from "../src/workflow/memory.ts";
 import { migrateLegacyStore } from "../src/workflow/migration.ts";
-import { getProposal, rollbackProposal, shortVersion } from "../src/workflow/proposals.ts";
+import { getProposal, shortVersion } from "../src/workflow/proposals.ts";
+import { REVIEW_SECTIONS } from "../src/workflow/review-contract.ts";
+import { pendingForReview, stageOf } from "../src/workflow/run-stages.ts";
 import { openOperationalStore } from "../src/workflow/storage.ts";
-
-interface ChildRecord {
-	name: string;
-	cwd: string;
-	task: string;
-	model?: string;
-}
+import type { WorkerJob, WorkerResult } from "../src/workflow/worker-adapter.ts";
 
 function fixture() {
-	const root = mkdtempSync(join(tmpdir(), "connected-learning-lifecycle-"));
+	const root = realpathSync(mkdtempSync(join(tmpdir(), "vault-review-lifecycle-")));
 	const memory = join(root, "memory");
 	const journal = join(root, "journal");
 	mkdirSync(journal);
@@ -81,132 +78,87 @@ function captureSyntheticRun(
 	return { root, source };
 }
 
-function digestText(task: string): string {
-	const revision = /for revision ([^\s.]+(?:\.r[0-9]+)?)\./.exec(task)?.[1] ?? "";
-	const runId = revision.replace(/\.r[0-9]+$/, "");
-	const input = /Input: ([^\n]+)/.exec(task)?.[1] ?? "";
-	const pkg = JSON.parse(readFileSync(join(input, "run.json"), "utf8")) as { project: string };
-	return JSON.stringify({
-		schemaVersion: 1,
-		runId,
-		project: pkg.project,
-		revision,
-		sections: Object.fromEntries(DIGEST_SECTIONS.map((section) => [section, `synthetic ${section}`])),
-	});
-}
-
-function manifestRevisions(task: string): string[] {
-	const input = /Input: ([^\n]+)/.exec(task)?.[1] ?? "";
-	const manifest = JSON.parse(readFileSync(input, "utf8")) as { items?: Array<{ revision: string }> };
-	return manifest.items?.map((item) => item.revision) ?? [];
-}
-
-function groupArtifact(revisions: string[]): string {
-	return JSON.stringify({
-		schemaVersion: 1,
-		groups: [
-			{
-				id: "repeat",
-				claim: "Keep test-first changes",
-				scope: { kind: "global" },
-				supporters: revisions,
-				opposers: [],
-				priorProposals: [],
-			},
-		],
-	});
-}
-
-function reviewArtifact(revisions: string[]): string {
-	return [
-		"Synthetic review: repeated test-first practice is supported by independent runs.",
-		"```json",
-		JSON.stringify({
-			schemaVersion: 1,
-			proposals: [
-				{
-					kind: "memory",
-					scope: "global",
-					target: "memory:preference/test-first",
-					before: "existing preference",
-					after: "Run focused tests before committing.",
-					supporting: revisions,
-					opposing: [],
-					conditions: ["when changing code"],
-					uncertainty: "synthetic evidence",
-					validation: "verify the focused test suite",
-				},
-			],
-		}),
-		"```",
-	].join("\n");
-}
-
-function fakeHub(
-	f: ReturnType<typeof fixture>,
-	behavior: (task: string) => string,
-	finish: (task: string) => string = () => "stop",
-) {
-	const spawns: ChildRecord[] = [];
-	const client = {
-		register: async () => ({ name: "coordinator", identity: { agent: "coordinator", hub: "", token: "", depth: 0 } }),
-		spawn: async (body: { task: string; name: string; cwd: string; model?: string }) => {
-			spawns.push({ name: body.name, cwd: body.cwd, task: body.task, model: body.model });
-			const output = /Output: ([^\n]+)/.exec(body.task)?.[1];
-			assert.ok(output, "production command supplies an isolated worker output path");
-			writeFileSync(output, behavior(body.task));
-			const transcript = join(f.journal, `${body.name}.jsonl`);
-			writeFileSync(
-				transcript,
-				`${JSON.stringify({ message: { role: "assistant", stopReason: finish(body.task), content: [{ type: "text", text: "status only" }] } })}\n`,
-			);
-			writeFileSync(
-				join(f.journal, `${body.name}.json`),
+/** A fake child for both stages, answering like a real one from the revisions in the store and the contract it was given. */
+function fakeWorker(f: ReturnType<typeof fixture>, target: string) {
+	const jobs: string[] = [];
+	const worker = async (job: WorkerJob): Promise<WorkerResult> => {
+		jobs.push(job.id);
+		const ok = (text: string): WorkerResult => ({ status: "success", outputPath: job.outputPath, outputText: text });
+		const db = openOperationalStore(join(f.memory, "memory.sqlite"), { fts: false, legacy: true });
+		try {
+			if (job.id.startsWith("compact-")) {
+				const row = db.db.prepare("SELECT run_id, source_hash FROM revisions WHERE id = ?").get(job.revision);
+				const project = JSON.parse(
+					String(
+						db.db.prepare("SELECT value FROM metrics WHERE revision_id = ? AND kind = 'run.lineage'").get(job.revision)
+							?.value,
+					),
+				) as { project: string };
+				return ok(
+					JSON.stringify({
+						schemaVersion: 1,
+						runId: row?.run_id,
+						revision: job.revision,
+						fingerprint: row?.source_hash,
+						project: project.project,
+						sections: Object.fromEntries(
+							COMPACT_SECTIONS.map((key) => [key, `the zebra layout ${key} of ${job.revision}`]),
+						),
+					}),
+				);
+			}
+			const contract = job.contract ?? "";
+			const shape = JSON.parse(contract.slice(contract.indexOf("{"), contract.indexOf("\n}\n") + 2)) as {
+				reviewId: string;
+				covered: string[];
+				previousReview: string | null;
+			};
+			return ok(
 				JSON.stringify({
-					id: `20260101T000000Z-${body.name}`,
-					name: body.name,
-					parent: "coordinator",
-					parentName: "coordinator",
-					root: "coordinator",
-					harness: "pihouse",
-					model: body.model ?? null,
-					cwd: body.cwd,
-					task: body.task,
-					state: "done",
-					depth: 1,
-					startedAt: new Date().toISOString(),
-					updatedAt: new Date().toISOString(),
-					transcript,
+					schemaVersion: 1,
+					reviewId: shape.reviewId,
+					covered: shape.covered,
+					previousReview: shape.previousReview,
+					sections: Object.fromEntries(
+						REVIEW_SECTIONS.map((key) => [key, `review ${key} of ${shape.covered.join("+")}`]),
+					),
+					proposals: [
+						{
+							kind: "edit-file",
+							scope: "global",
+							target: `file:${target}`,
+							before: "existing preference\n",
+							after: "Run focused tests before committing.\n",
+							supporting: shape.covered,
+							opposing: [],
+							conditions: [],
+							uncertainty: "three runs only",
+							validation: "read the next run",
+						},
+					],
 				}),
 			);
-			return { name: body.name };
-		},
-		cancel: async () => ({ ok: true }),
-		event: async () => ({ ok: true }),
+		} finally {
+			db.close();
+		}
 	};
-	return { client: client as unknown as HubClient, spawns };
+	return { worker, jobs };
 }
 
-function learningDeps(
-	f: ReturnType<typeof fixture>,
-	client: HubClient,
-	fingerprint: (runId: string) => string | undefined,
-): LearningDeps {
+function learningDeps(f: ReturnType<typeof fixture>, worker: LearningDeps["worker"]): LearningDeps {
 	return {
 		memory: f.memory,
 		journalDir: f.journal,
-		env: { AGENT_LINK_AGENT: "coordinator", AGENT_LINK_HUB: "/fake/hub.sock", AGENT_LINK_TOKEN: "fake-token" },
+		env: {},
 		cwd: f.root,
 		backend: "tmux",
 		modelAvailable: () => true,
 		progress: () => {},
-		client,
-		ports: {
-			operationalState: () => ({ states: ["stopped"], deliveries: 0, handoff: false, livenessKnown: true }),
-			currentFingerprint: (revision) => fingerprint(revision.replace(/\.r[0-9]+$/, "")),
-		},
-		pollMs: 20,
-		timeoutMs: 5_000,
+		confirm: () => true,
+		worker,
+		isActive: () => false,
+		currentFingerprint: (runId) => packageFingerprint(f, runId),
+		now: () => Date.UTC(2026, 0, 2, 3, 4, 5),
 	};
 }
 
@@ -216,193 +168,103 @@ function packageFingerprint(f: ReturnType<typeof fixture>, runId: string): strin
 	).fingerprint;
 }
 
-function transcriptCopy(f: ReturnType<typeof fixture>, runId: string): string {
-	const dir = join(f.memory, "conversations", runId, "transcripts");
-	return readdirSync(dir)
-		.map((name) => readFileSync(join(dir, name), "utf8"))
-		.join("\n");
-}
-
-test("public digestCommand retries pending cleanup without calling a digest worker", async () => {
-	const f = fixture();
-	try {
-		const run = join(f.memory, "conversations", "run-pending");
-		mkdirSync(join(run, "transcripts"), { recursive: true });
-		writeFileSync(
-			join(run, "run.json"),
-			JSON.stringify({ id: "run-pending", fingerprint: "source", project: "fixture", agents: [{ id: "a" }] }),
-		);
-		writeFileSync(join(run, "transcripts", "a.jsonl"), "captured evidence");
-		const store = openOperationalStore(join(f.memory, "memory.sqlite"), { fts: false, legacy: true });
-		try {
-			store.db.exec(
-				"INSERT INTO runs(id,created_at) VALUES ('run-pending','now'); INSERT INTO revisions(id,run_id,source_hash,created_at) VALUES ('run-pending.r1','run-pending','source','now'); INSERT INTO metrics(id,revision_id,kind,value) VALUES ('metric','run-pending.r1','run.metrics','{}'); INSERT INTO metrics(id,revision_id,kind,value) VALUES ('lineage','run-pending.r1','run.lineage','{}'); INSERT INTO participants(id,revision_id,role,payload) VALUES ('participant','run-pending.r1','planner','{}')",
-			);
-			const digestPath = join(f.memory, "digests", "run-pending", "digest.md");
-			mkdirSync(join(f.memory, "digests", "run-pending"), { recursive: true });
-			writeFileSync(digestPath, "durable but invalid receipt digest");
-			store.db
-				.prepare("INSERT INTO cleanup_manifests(id,payload,state) VALUES ('run-pending.r1',?,'cleanup-failed')")
-				.run(
-					JSON.stringify({
-						runId: "run-pending",
-						revision: "run-pending.r1",
-						digestPath,
-						digestHash: "not-the-file-hash",
-						files: [{ name: "a.jsonl", hash: "irrelevant" }],
-						attempts: 1,
-					}),
-				);
-			store.db
-				.prepare(
-					"INSERT INTO jobs(id,revision_id,state,payload) VALUES ('digest-run-pending.r1','run-pending.r1','cleanup-failed',?)",
-				)
-				.run(JSON.stringify({ fingerprint: "source", attempts: 1, artifactPath: digestPath }));
-			const hub = fakeHub(f, () => {
-				throw new Error("pending cleanup must not spawn a digest or review child");
-			});
-			const outcome = await digestCommand(learningDeps(f, hub.client, () => "source"));
-			assert.match(outcome.text, /0 generated, 0 cleaned, 1 cleanup pending, 0 failed, 0 deferred, 0 not started/);
-			assert.equal(hub.spawns.length, 0, "public retry does not regenerate or start a review worker");
-			assert.equal(
-				store.db.prepare("SELECT state FROM cleanup_manifests WHERE id='run-pending.r1'").get()?.state,
-				"cleanup-failed",
-			);
-			assert.ok(existsSync(join(run, "transcripts", "a.jsonl")));
-		} finally {
-			store.close();
-		}
-	} finally {
-		f.cleanup();
-	}
-});
-
-test("connected lifecycle captures, retries one failed digest, reviews and applies evidence, asks after cleanup, then captures only reopened delta", async () => {
+test("lifecycle: capture, review with one confirmation, approve a file proposal, ask from the compacts, reopen a run", async () => {
 	const f = fixture();
 	try {
 		const first = captureSyntheticRun(f, "run-a", 1);
-		const second = captureSyntheticRun(f, "run-b", 2);
-		const third = captureSyntheticRun(f, "run-c", 3);
-		for (const { root } of [first, second, third]) {
-			assert.ok(
-				existsSync(join(f.memory, "conversations", root.id, "report.md")),
-				"capture writes the synthetic computed report",
-			);
+		captureSyntheticRun(f, "run-b", 2);
+		captureSyntheticRun(f, "run-c", 3);
+		for (const id of ["run-a", "run-b", "run-c"]) {
+			assert.ok(existsSync(join(f.memory, "conversations", id, "report.md")), "capture writes the computed report");
+			assert.ok(existsSync(join(f.memory, "conversations", id, "transcripts")));
 		}
-		const fingerprints = new Map([first, second, third].map(({ root }) => [root.id, packageFingerprint(f, root.id)]));
-		let failFirstRunOnce = true;
-		const hub = fakeHub(f, (task) => {
-			if (/job digest-/.test(task)) {
-				const revision = /for revision ([^\s.]+(?:\.r[0-9]+)?)\./.exec(task)?.[1] ?? "";
-				if (revision.startsWith("run-a.") && failFirstRunOnce) {
-					failFirstRunOnce = false;
-					return "not a valid digest";
-				}
-				return digestText(task);
-			}
-			if (/job scan-/.test(task)) return groupArtifact(manifestRevisions(task));
-			if (/job review-/.test(task)) return reviewArtifact(manifestRevisions(task));
-			return "unexpected job";
-		});
-		const deps = learningDeps(f, hub.client, (runId) => fingerprints.get(runId));
+		const target = join(f.root, "preferences.md");
+		writeFileSync(target, "existing preference\n");
+		const { worker, jobs } = fakeWorker(f, target);
 
-		const firstOutcome = await selfLearningCommand(deps);
-		assert.match(firstOutcome.text, /1 generated, 1 cleaned, 0 cleanup pending, 1 failed/);
-		assert.match(firstOutcome.text, /Proposals: 1 created, 0 merged/);
-		assert.doesNotMatch(firstOutcome.text, /synthetic objective/);
-		assert.ok(existsSync(join(f.memory, "digests", "run-b", "digest-run-b.r1.md")));
-		assert.equal(existsSync(join(f.memory, "conversations", "run-b", "transcripts")), false);
-		assert.equal(
-			existsSync(join(f.memory, "conversations", "run-a", "transcripts")),
-			true,
-			"failed digest retains captured evidence",
-		);
+		const outcome = await reviewCommand(learningDeps(f, worker));
+		assert.equal(outcome.level, "info", outcome.text);
+		assert.match(outcome.text, /Reviewed 3 runs \(3 compacted now\)/);
+		assert.equal(jobs.filter((id) => id.startsWith("compact-")).length, 3);
+		assert.equal(jobs.filter((id) => id.startsWith("review-")).length, 1, "one review for all three runs");
+		const line = outcome.text.split("\n").find((l) => l.startsWith("1. "));
+		assert.ok(line?.includes(target), "the numbered line names the target path");
+		assert.doesNotMatch(outcome.text, /original evidence/);
 
-		const retryOutcome = await selfLearningCommand(deps);
-		assert.match(retryOutcome.text, /2 generated, 2 cleaned, 0 cleanup pending, 0 failed/);
-		assert.equal(existsSync(join(f.memory, "conversations", "run-a", "transcripts")), false);
-		assert.equal(existsSync(join(f.memory, "conversations", "run-c", "transcripts")), false);
-		assert.equal(
-			hub.spawns.filter((child) => /job digest-/.test(child.task)).length,
-			4,
-			"the failure is retried once and each successful run is digested once",
-		);
-		assert.match(retryOutcome.text, /Proposals: 0 created, 1 merged/);
-		assert.doesNotMatch(retryOutcome.text, /synthetic objective|Synthetic review:/);
-
+		// Conversations are gone, the compacts and the computed reports stay, and every revision is reviewed.
+		for (const id of ["run-a", "run-b", "run-c"]) {
+			assert.equal(existsSync(join(f.memory, "conversations", id, "transcripts")), false, `${id} transcripts deleted`);
+			assert.ok(existsSync(join(f.memory, "workflow", "compact", `${id}.r1.md`)), `${id} compact stays`);
+			assert.ok(existsSync(join(f.memory, "conversations", id, "report.md")), `${id} report stays`);
+		}
 		const store = openOperationalStore(join(f.memory, "memory.sqlite"), { fts: false, legacy: true });
 		let proposalId = "";
-		let listedVersion = "";
+		let version = "";
 		try {
-			const row = store.db
-				.prepare("SELECT id, payload FROM proposals")
-				.all()
-				.find(
-					(item) => (JSON.parse(String(item.payload)) as { target?: string }).target === "memory:preference/test-first",
-				);
-			assert.ok(row);
-			proposalId = String(row.id);
+			for (const id of ["run-a", "run-b", "run-c"]) assert.equal(stageOf(store.db, `${id}.r1`), "reviewed");
+			assert.deepEqual(pendingForReview(store.db), []);
+			const row = store.db.prepare("SELECT id FROM proposals").get();
+			proposalId = String(row?.id);
 			const proposal = getProposal(store.db, proposalId);
-			listedVersion = shortVersion(proposal.version);
-			assert.equal(proposal.state, "open");
-			assert.equal(proposal.evidence.length, 3, "independent run evidence merges into the same proposal");
+			version = shortVersion(proposal.version);
+			assert.equal(proposal.target, `file:${target}`);
+			assert.equal(proposal.evidence.length, 3);
 		} finally {
 			store.close();
 		}
 
-		const target = join(f.memory, "workflow", "approved-records", "preference", "test-first.md");
-		mkdirSync(join(f.memory, "workflow", "approved-records", "preference"), { recursive: true });
-		writeFileSync(target, "existing preference");
-		// Approval itself uses the public command so it applies against a real temporary target and records its receipt.
-		// A merged proposal approves only with the version the user listed; approve without one refuses it.
-		const approved = await proposalCommand("approve", [proposalId, listedVersion], {
-			memory: f.memory,
-			repoRoot: f.root,
+		// A second review has nothing to do and asks nothing.
+		let asked = 0;
+		const again = await reviewCommand({
+			...learningDeps(f, worker),
+			confirm: () => {
+				asked += 1;
+				return true;
+			},
 		});
-		assert.equal(approved.level, "info");
+		assert.match(again.text, /Nothing to review/);
+		assert.equal(asked, 0);
+
+		// The proposal shows its diff, then approval writes the file and records a receipt.
+		const detail = await proposalCommand("proposals", [proposalId], { memory: f.memory, repoRoot: f.root });
+		assert.match(detail.text, /^-existing preference$/m);
+		assert.match(detail.text, /^\+Run focused tests before committing\.$/m);
+		const approved = await proposalCommand("approve", [proposalId, version], { memory: f.memory, repoRoot: f.root });
+		assert.equal(approved.level, "info", approved.text);
 		assert.match(approved.text, /Applied .*Receipt recorded/);
-		assert.equal(readFileSync(target, "utf8"), "Run focused tests before committing.");
-		const appliedStore = openOperationalStore(join(f.memory, "memory.sqlite"), { fts: false, legacy: true });
-		try {
-			assert.equal(getProposal(appliedStore.db, proposalId).state, "applied");
-			assert.ok(
-				appliedStore.db.prepare("SELECT 1 FROM receipts WHERE proposal_id=? AND kind='application'").get(proposalId),
-			);
-			writeFileSync(target, "user edited after application");
-			await assert.rejects(
-				rollbackProposal(appliedStore.db, proposalId, {
-					read: async () => readFileSync(target, "utf8"),
-					compareAndSwap: async (expected, replacement) => {
-						if (readFileSync(target, "utf8") !== expected) return false;
-						writeFileSync(target, replacement);
-						return true;
-					},
-					validate: async () => true,
-				}),
-				/rollback|changed/i,
-			);
-			assert.equal(readFileSync(target, "utf8"), "user edited after application");
-		} finally {
-			appliedStore.close();
-		}
+		assert.equal(readFileSync(target, "utf8"), "Run focused tests before committing.\n");
 
-		const asked = await askContext(
-			"Why did the synthetic run change?",
-			{ PIHOUSE_HOME: f.root },
-			{ memoryDir: f.memory, cwd: f.root },
+		// Ask answers from the compact and the review, never from a conversation.
+		const answer = await askContext(
+			"what happened with the zebra layout?",
+			{ PIHOUSE_HOME: f.root, AGENT_LINK_HOME: join(f.root, "hub") },
+			{ memoryDir: f.memory, cwd: f.root, isActive: () => false },
 		);
-		assert.match(asked, /retained|run|digest/i);
-		assert.doesNotMatch(asked, /original evidence|transcripts\/.*jsonl/);
+		assert.match(answer, /compact:run-/);
+		assert.match(answer, /zebra layout/);
+		assert.doesNotMatch(answer, /original evidence|transcripts\/.*jsonl/);
 
+		// New evidence in a reviewed run reopens it as a new revision, pending again.
 		appendFileSync(first.source, `${nativeMessage("run-a-2", "new appended delta only")}\n`);
-		const reopening = openMemory(f.memory);
-		assert.equal(captureRun([first.root], first.root, reopening, { by: "planner" }), "written");
+		const reopenedOutcome = captureRunOutcome([first.root], first.root, openMemory(f.memory), { by: "planner" });
+		assert.deepEqual(reopenedOutcome, { status: "written" });
 		const reopened = JSON.parse(readFileSync(join(f.memory, "conversations", "run-a", "run.json"), "utf8")) as {
 			revision: number;
 		};
 		assert.equal(reopened.revision, 2);
-		assert.match(transcriptCopy(f, "run-a"), /new appended delta only/);
-		assert.doesNotMatch(transcriptCopy(f, "run-a"), /run-a original evidence/);
+		const pending = openOperationalStore(join(f.memory, "memory.sqlite"), { fts: false, legacy: true });
+		try {
+			assert.deepEqual(
+				pendingForReview(pending.db).map((r) => r.revisionId),
+				["run-a.r2"],
+			);
+		} finally {
+			pending.close();
+		}
+		assert.ok(
+			readdirSync(join(f.memory, "conversations", "run-a", "transcripts")).length > 0,
+			"the reopened run has its new conversation again",
+		);
 	} finally {
 		f.cleanup();
 	}

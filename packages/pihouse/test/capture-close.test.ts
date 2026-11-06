@@ -55,6 +55,7 @@ function setup(t: { after: (fn: () => void) => void }, sessionId = "s1"): Fixtur
 	const commands = new Map<string, (raw: string, ctx: ExtensionCommandContext) => Promise<void> | void>();
 	const pi = {
 		on: (event: string, handler: Handler) => handlers.set(event, [...(handlers.get(event) ?? []), handler]),
+		registerTool: () => {},
 		registerCommand: (n: string, spec: { handler: (raw: string, ctx: ExtensionCommandContext) => void }) =>
 			commands.set(n, spec.handler),
 		sendMessage: (...args: unknown[]) => sent.push(args),

@@ -40,6 +40,7 @@ function fakePi() {
 	const users: unknown[][] = [];
 	const pi = {
 		on: () => {},
+		registerTool: () => {},
 		registerCommand: (
 			name: string,
 			spec: { handler: (raw: string, ctx: ExtensionCommandContext) => Promise<void> | void },
@@ -52,11 +53,14 @@ function fakePi() {
 	return { pi, commands, sent, users };
 }
 
-test("/workflow review is removed: it points to report, starts no model turn and writes no report", async (t) => {
-	const home = mkdtempSync(join(tmpdir(), "workflow-review-removed-"));
+test("/workflow review without the hub starts no model turn and writes no report", async (t) => {
+	const home = mkdtempSync(join(tmpdir(), "workflow-review-nohub-"));
 	const previous = process.env.PIHOUSE_HOME;
 	process.env.PIHOUSE_HOME = home;
+	const saved = Object.entries(process.env).filter(([key]) => key.startsWith("AGENT_LINK_"));
+	for (const [key] of saved) delete process.env[key];
 	t.after(() => {
+		for (const [key, value] of saved) process.env[key] = value;
 		if (previous === undefined) delete process.env.PIHOUSE_HOME;
 		else process.env.PIHOUSE_HOME = previous;
 		rmSync(home, { recursive: true, force: true });
@@ -73,13 +77,12 @@ test("/workflow review is removed: it points to report, starts no model turn and
 	assert.ok(handler);
 
 	await handler("review", ctx);
-	await handler("review --last", ctx);
+	await handler("review --yes", ctx);
 
 	assert.equal(notes.length, 2);
 	for (const note of notes) {
 		assert.equal(note.level, "warning");
-		assert.match(note.text, /\/workflow review was removed/);
-		assert.match(note.text, /\/workflow report/);
+		assert.match(note.text, /need the agent-link hub.*Nothing was started/);
 	}
 	assert.equal(sent.length, 0, "no sendMessage: no model turn");
 	assert.equal(users.length, 0, "no sendUserMessage: no model turn");
