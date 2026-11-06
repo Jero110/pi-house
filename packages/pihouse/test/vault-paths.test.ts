@@ -1,10 +1,20 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readdirSync,
+	readFileSync,
+	rmSync,
+	statSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import test from "node:test";
 import { openMemory } from "../src/workflow/memory.ts";
+import { migrateLegacyStore } from "../src/workflow/migration.ts";
 import { searchMemory } from "../src/workflow/search.ts";
 import { initVault, vaultPaths } from "../src/workflow/vault-paths.ts";
 
@@ -190,4 +200,19 @@ test("no source file builds a vault path with a literal; vault-paths.ts is the o
 	}
 	assert.deepEqual(offenders, []);
 	assert.ok(existsSync(join(src, "workflow", "vault-paths.ts")));
+});
+
+test("a fresh vault stays active after capture writes flags.json next to a stale migration backup", () => {
+	const root = mkdtempSync(join(tmpdir(), "pihouse-vault-"));
+	try {
+		openMemory(root);
+		// Problem: capture keeps its flags in flags.json, which looks like legacy content, so the next command ran the
+		// legacy migration and failed on the old backup. Example: /workflow log, then /workflow review ("drifted").
+		mkdirSync(join(root, "migration-backup", "files"), { recursive: true });
+		writeFileSync(join(root, "migration-backup", "manifest.json"), '{"hash":"a810ef9e6b51","files":[]}');
+		writeFileSync(join(root, "flags.json"), '{"schema":1,"runs":{}}');
+		assert.deepEqual(migrateLegacyStore(root), { state: "active", manifestHash: "fresh" });
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
 });

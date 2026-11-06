@@ -268,8 +268,8 @@ function startedFresh(markerPath: string): boolean {
 }
 
 export function migrateLegacyStore(dir: string, opts: MigrationOptions = {}): MigrationResult {
-	// A store that started fresh has no legacy files to adopt; calling the migration on it must not invent a backup.
-	if (startedFresh(join(dir, ACTIVE_MARKER)) && !hasLegacyContent(dir)) return { state: "active", manifestHash: FRESH };
+	// A store that started fresh has no legacy files to adopt, even if flags.json or an old backup sit next to it.
+	if (startedFresh(join(dir, ACTIVE_MARKER))) return { state: "active", manifestHash: FRESH };
 	const hook = opts.onBoundary ?? (() => {});
 	const stamp = () => (opts.now ?? (() => new Date()))().toISOString();
 	const done = join(dir, BACKUP);
