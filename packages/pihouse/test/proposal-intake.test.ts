@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -183,6 +183,46 @@ test("unknown digest reference fails atomically and records the intake failure",
 		assert.equal(store.db.prepare("SELECT COUNT(*) AS n FROM receipts WHERE kind = 'intake-failure'").get()?.n, 1);
 	} finally {
 		store.close();
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("intake accepts a file target and refuses unsafe ones with a reason and no proposal", () => {
+	const dir = realpathSync(mkdtempSync(join(tmpdir(), "proposal-intake-file-")));
+	const store = openOperationalStore(join(dir, "db.sqlite"), { fts: false });
+	try {
+		store.db.prepare("INSERT INTO runs(id, created_at) VALUES (?, ?)").run("run1", "now");
+		store.db
+			.prepare("INSERT INTO revisions(id, run_id, source_hash, created_at) VALUES (?, ?, ?, ?)")
+			.run("r1", "run1", "h", "now");
+		const file = join(dir, "notes.txt");
+		writeFileSync(file, "old");
+		writeFileSync(join(dir, "id_rsa"), "key");
+		symlinkSync(file, join(dir, "link.txt"));
+		const fileEntry = (path: string, kind = "edit-file") => ({ ...entry(["r1"]), kind, target: `file:${path}` });
+		for (const [name, bad] of [
+			["relative", fileEntry("notes.txt")],
+			["missing", fileEntry(join(dir, "missing.txt"))],
+			["directory", fileEntry(dir)],
+			["symlink", fileEntry(join(dir, "link.txt"))],
+			["forbidden", fileEntry(join(dir, "id_rsa"))],
+			["wrong kind", fileEntry(file, "skill")],
+		] as const) {
+			const result = ingestReview(store.db, `bad-${name}`, review([bad]), { home: dir });
+			assert.equal(result.status, "failed", name);
+			assert.match(JSON.stringify(result), /file target|edit-file/, name);
+		}
+		assert.equal(listProposals(store.db).length, 0);
+		const ok = ingestReview(store.db, "good", review([fileEntry(file)]), { home: dir });
+		assert.deepEqual(ok, { status: "ingested", created: 1, merged: 0, suppressed: 0 });
+		const [created] = listProposals(store.db);
+		assert.equal(created?.target, `file:${file}`);
+		assert.equal(created?.kind, "edit-file");
+		const full = JSON.parse(String(store.db.prepare("SELECT payload FROM proposals").get()?.payload));
+		assert.equal(full.before, "old");
+		assert.equal(full.after, "new");
+	} finally {
+		store.db.close();
 		rmSync(dir, { recursive: true, force: true });
 	}
 });

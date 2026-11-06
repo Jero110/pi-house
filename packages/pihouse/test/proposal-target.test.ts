@@ -1,5 +1,14 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+	mkdirSync,
+	mkdtempSync,
+	readdirSync,
+	readFileSync,
+	realpathSync,
+	rmSync,
+	symlinkSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -244,6 +253,148 @@ test("unsafe, unlisted and symlink targets are refused", () => {
 		assert.throws(() =>
 			createProposalTarget({ repoRoot: root, storeRoot: root, target: "unknown:x", proposalId: "p" }),
 		);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+const fileDb = () => {
+	const db = new DatabaseSync(":memory:");
+	db.exec(
+		"CREATE TABLE proposals(id TEXT PRIMARY KEY, state TEXT NOT NULL, payload TEXT NOT NULL); CREATE TABLE receipts(id TEXT PRIMARY KEY, proposal_id TEXT, kind TEXT NOT NULL, payload TEXT NOT NULL)",
+	);
+	return db;
+};
+// macOS temp folders sit behind symlinks (/var -> /private/var), which `file:` rightly refuses.
+const realTmp = () => mkdtempSync(join(realpathSync(tmpdir()), "file-target-"));
+const fileTarget = (root: string, path: string, id: string, home?: string) =>
+	createProposalTarget({
+		repoRoot: root,
+		storeRoot: join(root, "store"),
+		target: `file:${path}`,
+		proposalId: id,
+		home,
+	});
+
+test("file target is created, approved with its version, applied; the backup holds the old bytes", async () => {
+	const root = realTmp();
+	const db = fileDb();
+	try {
+		const file = join(root, "notes.txt");
+		writeFileSync(file, "old\n");
+		const proposal = createProposal(db, {
+			id: "f1",
+			target: `file:${file}`,
+			before: "old\n",
+			after: "new\n",
+			evidence: ["r"],
+		});
+		approveProposal(db, proposal.id, proposal.version);
+		const applied = await applyProposal(db, "f1", fileTarget(root, file, "f1"));
+		assert.equal(applied.state, "applied");
+		assert.equal(readFileSync(file, "utf8"), "new\n");
+		const found = readdirSync(join(root, "store"), { recursive: true }).map(String);
+		const backup = found.find((name) => name.endsWith(".before"));
+		assert.ok(backup, found.join(","));
+		assert.equal(readFileSync(join(root, "store", backup), "utf8"), "old\n");
+		assert.equal(applied.before, "old\n");
+		assert.equal(applied.after, "new\n");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("file target refuses relative, missing, directory, symlink, parent symlink and forbidden paths", () => {
+	const root = realTmp();
+	try {
+		mkdirSync(join(root, "dir"));
+		mkdirSync(join(root, "real"));
+		writeFileSync(join(root, "real", "a.txt"), "x");
+		symlinkSync(join(root, "real", "a.txt"), join(root, "link.txt"));
+		symlinkSync(join(root, "real"), join(root, "linkdir"));
+		const forbidden = [
+			"auth.json",
+			"mcp-auth.json",
+			".env",
+			".env.local",
+			"k.pem",
+			"id_rsa",
+			"id_rsa.pub",
+			"id_ed25519",
+		];
+		for (const name of forbidden) writeFileSync(join(root, name), "x");
+		writeFileSync(join(root, ".env.example"), "x");
+		const home = join(root, "home");
+		for (const dir of [".ssh", ".aws", ".gnupg", ".pihouse/agent", ".pi/agent"]) {
+			mkdirSync(join(home, dir), { recursive: true });
+			writeFileSync(join(home, dir, "auth.txt"), "x");
+		}
+		writeFileSync(join(home, ".pihouse", "agent", "auth-extra.txt"), "x");
+		const inHome = [
+			".ssh/auth.txt",
+			".aws/auth.txt",
+			".gnupg/auth.txt",
+			".pihouse/agent/auth-extra.txt",
+			".pi/agent/auth.txt",
+		];
+		for (const bad of [
+			"relative.txt",
+			"./a.txt",
+			join(root, "missing.txt"),
+			join(root, "dir"),
+			join(root, "link.txt"),
+			join(root, "linkdir", "a.txt"),
+			`${root}/real/../real/a.txt`,
+			...inHome.map((path) => join(home, path)),
+			...forbidden.map((name) => join(root, name)),
+		])
+			assert.throws(() => fileTarget(root, bad, "p", home), Error, bad);
+		assert.doesNotThrow(() => fileTarget(root, join(root, ".env.example"), "p", home));
+		assert.doesNotThrow(() => fileTarget(root, join(root, "real", "a.txt"), "p", home));
+		assert.equal(readdirSync(root).includes("store"), false);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("file target apply refuses when the file changed since the proposal", async () => {
+	const root = realTmp();
+	const db = fileDb();
+	try {
+		const file = join(root, "n.txt");
+		writeFileSync(file, "old");
+		const proposal = createProposal(db, {
+			id: "f2",
+			target: `file:${file}`,
+			before: "old",
+			after: "new",
+			evidence: ["r"],
+		});
+		approveProposal(db, proposal.id, proposal.version);
+		writeFileSync(file, "edited by someone");
+		const result = await applyProposal(db, "f2", fileTarget(root, file, "f2"));
+		assert.equal(result.state, "failed");
+		assert.equal(readFileSync(file, "utf8"), "edited by someone");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("file target validation: invalid JSON restores the original, empty files are rejected, valid JSON applies", async () => {
+	const root = realTmp();
+	const db = fileDb();
+	try {
+		const run = async (name: string, before: string, after: string) => {
+			const file = join(root, name);
+			writeFileSync(file, before);
+			const proposal = createProposal(db, { id: `v-${name}`, target: `file:${file}`, before, after, evidence: ["r"] });
+			approveProposal(db, proposal.id, proposal.version);
+			const result = await applyProposal(db, proposal.id, fileTarget(root, file, proposal.id));
+			return { state: result.state, bytes: readFileSync(file, "utf8") };
+		};
+		assert.deepEqual(await run("bad.json", '{"a":1}', '{"a":'), { state: "failed", bytes: '{"a":1}' });
+		assert.deepEqual(await run("empty.txt", "something", "  \n"), { state: "failed", bytes: "something" });
+		assert.deepEqual(await run("good.json", '{"a":1}', '{"a":2}'), { state: "applied", bytes: '{"a":2}' });
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}

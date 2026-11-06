@@ -12,7 +12,8 @@ import {
 	unlinkSync,
 	writeFileSync,
 } from "node:fs";
-import { dirname, join, resolve, sep } from "node:path";
+import { homedir } from "node:os";
+import { basename, dirname, join, resolve, sep } from "node:path";
 import type { ScopedTarget } from "./proposals.ts";
 import { vaultPaths, vaultRel } from "./vault-paths.ts";
 
@@ -40,7 +41,56 @@ function safeComponents(root: string, relative: string): string {
 	return real;
 }
 
+const FORBIDDEN_BASENAMES = [
+	/^auth\.json$/,
+	/^mcp-auth\.json$/,
+	/^\.env$/,
+	/^\.env\./,
+	/\.pem$/,
+	/^id_rsa/,
+	/^id_ed25519/,
+];
+const FORBIDDEN_EXCEPTIONS = new Set([".env.example"]);
+const FORBIDDEN_HOME_DIRS = [".ssh", ".aws", ".gnupg"];
+const FORBIDDEN_HOME_PREFIXES = [".pihouse/agent/auth", ".pi/agent/auth"];
+
+/**
+ * Problem: a `file:` proposal comes from a model that read conversations, so its path can be hostile. Example:
+ * `file:/Users/me/.ssh/config`, or `file:/tmp/ok/../../etc/hosts`, or a folder symlink that points at credentials.
+ * Solution: accept only an absolute, already-normalized path whose every component is a real entry (no symlink), that
+ * ends in an existing regular file, and that is not on the credential list. Returns the path; throws with the reason.
+ */
+export function checkFileTarget(path: string, home: string = homedir()): string {
+	if (!path.startsWith("/") || resolve(path) !== path)
+		throw new Error("File target must be an absolute, normalized path");
+	let current = "/";
+	for (const part of path.split("/").filter(Boolean)) {
+		current = join(current, part);
+		let stat: ReturnType<typeof lstatSync>;
+		try {
+			stat = lstatSync(current);
+		} catch {
+			throw new Error("File target does not exist");
+		}
+		if (stat.isSymbolicLink()) throw new Error("Symlink target refused");
+	}
+	if (!lstatSync(path).isFile()) throw new Error("Target is not a regular file");
+	const name = basename(path);
+	if (!FORBIDDEN_EXCEPTIONS.has(name) && FORBIDDEN_BASENAMES.some((pattern) => pattern.test(name)))
+		throw new Error("File target is a credential file and is refused");
+	const rel = path.startsWith(`${home}${sep}`) ? path.slice(home.length + 1) : undefined;
+	if (
+		rel !== undefined &&
+		(FORBIDDEN_HOME_DIRS.some((dir) => rel === dir || rel.startsWith(`${dir}/`)) ||
+			FORBIDDEN_HOME_PREFIXES.some((prefix) => rel.startsWith(prefix)))
+	)
+		throw new Error("File target is in a credential folder and is refused");
+	return path;
+}
+
 export interface ProposalTargetOptions {
+	/** Home folder used for the credential list of `file:` targets; defaults to the user's home. */
+	home?: string;
 	repoRoot: string;
 	storeRoot: string;
 	target: string;
@@ -54,7 +104,11 @@ export function createProposalTarget(options: ProposalTargetOptions): ScopedTarg
 	const catalogPath = options.catalog ?? join(options.repoRoot, "skills", "catalog.json");
 	let relative: string;
 	let skillName: string | undefined;
-	if (options.target.startsWith("skill:")) {
+	let filePath: string | undefined;
+	if (options.target.startsWith("file:")) {
+		filePath = checkFileTarget(options.target.slice(5), options.home);
+		relative = "";
+	} else if (options.target.startsWith("skill:")) {
 		skillName = options.target.slice("skill:".length);
 		if (!/^[a-z0-9][a-z0-9-]*$/i.test(skillName)) throw new Error("Invalid skill name");
 		const catalog = JSON.parse(readFileSync(catalogPath, "utf8")) as unknown;
@@ -82,7 +136,9 @@ export function createProposalTarget(options: ProposalTargetOptions): ScopedTarg
 		relative = vaultRel.approvedRecord(key);
 	} else throw new Error("Unknown target kind");
 	const root = skillName ? options.repoRoot : options.storeRoot;
-	const path = safeComponents(root, relative);
+	const path = filePath ?? safeComponents(root, relative);
+	const jsonFile = filePath?.toLowerCase().endsWith(".json") === true;
+	let lastBefore: string | undefined;
 	const backupRoot = vaultPaths(options.storeRoot).proposalBackups(options.proposalId);
 	let failure: string | undefined;
 	return {
@@ -114,6 +170,7 @@ export function createProposalTarget(options: ProposalTargetOptions): ScopedTarg
 					closeSync(tempFd);
 				}
 				renameSync(temp, path);
+				lastBefore = expected;
 				return true;
 			} finally {
 				closeSync(fd);
@@ -126,6 +183,24 @@ export function createProposalTarget(options: ProposalTargetOptions): ScopedTarg
 				const match = bytes.match(/^---\s*\n([\s\S]*?)\n---(?:\n|$)/);
 				const name = match?.[1].match(/^name:\s*["']?([^"'\n]+)["']?\s*$/m)?.[1]?.trim();
 				if (!match || name !== skillName) return false;
+			}
+			if (filePath !== undefined) {
+				let valid = bytes.trim().length > 0;
+				if (valid && jsonFile) {
+					try {
+						JSON.parse(bytes);
+					} catch {
+						valid = false;
+					}
+				}
+				// Problem: a rejected edit would stay on disk. Example: a model turns settings.json into text that
+				// does not parse and the tool reading it breaks. Solution: put the old bytes back, same atomic path.
+				if (!valid && lastBefore !== undefined) {
+					const temp = join(dirname(path), `.pihouse-${options.proposalId}-${process.pid}.restore`);
+					writeFileSync(temp, lastBefore, { flag: "wx", mode: 0o600 });
+					renameSync(temp, path);
+				}
+				if (!valid) return false;
 			}
 			return (await options.extraValidate?.(bytes)) ?? true;
 		},
