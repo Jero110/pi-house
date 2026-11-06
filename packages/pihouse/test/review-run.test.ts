@@ -1,6 +1,15 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readdirSync,
+	readFileSync,
+	realpathSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -8,6 +17,8 @@ import type { Transcript, TranscriptMessage } from "agent-transcripts";
 import { COMPACT_SECTIONS } from "../src/workflow/compact-contract.ts";
 import { evidenceFingerprint, persistEvidence } from "../src/workflow/evidence-store.ts";
 import { openMemory } from "../src/workflow/memory.ts";
+import { createProposalTarget } from "../src/workflow/proposal-target.ts";
+import { applyProposal, approveProposal, getProposal, listProposals } from "../src/workflow/proposals.ts";
 import type { WorkflowEvidence } from "../src/workflow/report.ts";
 import { REVIEW_INPUT_MAX_CHARS, REVIEW_SECTIONS } from "../src/workflow/review-contract.ts";
 import { planReview, type ReviewResult, runReview } from "../src/workflow/review-run.ts";
@@ -500,6 +511,50 @@ test("more compacts than the input bound leave the rest for the next review", as
 		for (const id of result.deferred) assert.equal(stageOf(f.store.db, id), "compacted");
 		for (const id of result.covered) assert.equal(stageOf(f.store.db, id), "reviewed");
 	} finally {
+		f.close();
+	}
+});
+
+test("smoke: capture, compact, review, approve a file proposal; transcripts go, compacts stay", async () => {
+	const f = fixture();
+	// macOS temp folders sit behind symlinks, which `file:` rightly refuses.
+	const dir = mkdtempSync(join(realpathSync(tmpdir()), "vault-smoke-"));
+	try {
+		const file = join(dir, "notes.md");
+		writeFileSync(file, "old\n");
+		f.capture("run-a");
+		f.capture("run-b");
+		const { worker } = fakeWorker(f, {
+			proposals: [
+				{
+					...proposalFor(["run-a.r1", "run-b.r1"]),
+					kind: "edit-file",
+					target: `file:${file}`,
+					before: "old\n",
+					after: "new\n",
+				},
+			],
+		});
+		const result = await runReview(options(f, worker));
+		assert.equal(result.status, "reviewed", JSON.stringify(result));
+		assert.deepEqual(transcriptsOf(f, "run-a"), []);
+		assert.ok(existsSync(join(f.root, "workflow", "compact", "run-b.r1.md")));
+		const [listed] = listProposals(f.store.db);
+		assert.ok(listed, "the review created a proposal");
+		const proposal = getProposal(f.store.db, listed.id);
+		approveProposal(f.store.db, proposal.id, proposal.version);
+		const target = createProposalTarget({
+			repoRoot: f.root,
+			storeRoot: join(f.root, "store"),
+			target: `file:${file}`,
+			proposalId: proposal.id,
+			home: dir,
+		});
+		const applied = await applyProposal(f.store.db, proposal.id, target);
+		assert.equal(applied.state, "applied");
+		assert.equal(readFileSync(file, "utf8"), "new\n");
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
 		f.close();
 	}
 });
