@@ -1,63 +1,44 @@
-// /workflow digest and /workflow self-learning, wired to the agent-link hub and pi's model registry. The session that
-// asks gets code-computed status lines and artifact paths: no digest text and no model turn. Every model call happens
-// in a child agent this module spawns through the hub, one per job.
+// /workflow review, /workflow proposals <id> and the compact tool behind /workflow ask, wired to the agent-link hub and
+// pi's model registry. The session that asks gets code-computed status lines and paths: no review text and no model
+// turn. Every model call happens in a child agent this module starts through the hub, one per job. Spec:
+// docs/specs/self-learning/vault-review.md, "Commands".
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { type HubClient, identityFromEnv } from "agent-link-core";
-import {
-	type AgentRequest,
-	type AgentResponse,
-	DEFAULT_MAX_OUTPUT_CHARS,
-	runSelfLearning,
-	type SelfLearningResult,
-} from "./learning-review.ts";
-import {
-	activateLearningStore,
-	executeDigest,
-	produceDigestCandidates,
-	type RuntimeOptions,
-} from "./learning-runtime.ts";
-import { type IntakeResult, ingestReview } from "./proposal-intake.ts";
+import { compactRevisions } from "./compact-run.ts";
+import { isQuiescent } from "./jobs.ts";
+import { activateLearningStore } from "./learning-runtime.ts";
+import { getProposal, listProposals, resolveProposalId, shortVersion } from "./proposals.ts";
+import { type ReviewPlan, type ReviewResult, runReview } from "./review-run.ts";
+import { uncompactedForProject } from "./run-stages.ts";
 import { runtimePorts } from "./runtime-ports.ts";
 import { type OperationalStore, openOperationalStore } from "./storage.ts";
-import { vaultPaths } from "./vault-paths.ts";
+import { unifiedDiff } from "./unified-diff.ts";
 import { nativeWorkerAdapter, type WorkerJob, type WorkerResult } from "./worker-adapter.ts";
 
 /** The model every learning child runs, as pi's `provider/model-id`. Overridden by this environment variable only. */
 export const LEARNING_MODEL_ENV = "PIHOUSE_LEARNING_MODEL";
-const DEFAULT_LEARNING_MODEL = "openai-codex/gpt-6-luna";
+const DEFAULT_LEARNING_MODEL = "claude-bridge/claude-sonnet-5-5";
 
 /**
- * Bounds on the work one invocation starts. Problem: a single command could launch one child per run in the store,
- * each a model call. Example: forty eligible runs and a command that digests them all at once. Solution: two digest
- * jobs per invocation, a ten-minute cap per child, and a lease that outlives that cap; the rest wait for the next call.
+ * Bounds on the time one child may take. Problem: a child that never answers would hold the command and its lease
+ * forever. Solution: a ten-minute cap per child and a lease that outlives it.
  */
-const DIGEST_JOBS_PER_INVOCATION = 2;
 const WORKER_TIMEOUT_MS = 600_000;
 const LEASE_MS = WORKER_TIMEOUT_MS + 60_000;
 
-/**
- * The scan's output, as learning-review validates it. Problem: the child sees only this text, so a shape that differs
- * from validateScan is rejected after the child has already run. Example: "supporters" written as "runs". Solution:
- * the same field names and rules, written out for the child; validateScan stays the authority.
- */
-const SCAN_CONTRACT = [
-	'Write one JSON object: {"schemaVersion":1,"groups":[...]}. Each group is {"id": a short unique string, "claim": one sentence of at most 500 characters, "scope": {"kind":"global"} or {"kind":"project","project":"<name>"}, "supporters": [digest revision ids that support the claim, at least one], "opposers": [digest revision ids that contradict it], "priorProposals": [proposal ids from the manifest that it concerns]}.',
-	'Use only the revision ids and proposal ids listed in the manifest. Group paraphrases of one suggestion into one group; a supporter and an opposer are never the same id. A project scope needs every supporter from that project. Emit {"schemaVersion":1,"groups":[]} when nothing repeats. No prose.',
-].join("\n");
-
 const NO_HUB =
-	"/workflow digest and /workflow self-learning need the agent-link hub: run them from a pihouse session started through pih. Nothing was started.";
+	"/workflow review and the compact tool need the agent-link hub: run them from a pihouse session started through pih. Nothing was started.";
 
 export interface LearningDeps {
-	/** The workflow memory folder: the store, its operational database, its digests and its batches. */
+	/** The vault root (the workflow memory folder): the store, the conversations, the compacts and the reviews. */
 	memory: string;
 	/** The agent-link journal folder (`<agent-link home>/sessions`). */
 	journalDir: string;
 	/** The environment the session runs with: the agent-link identity and the learning model setting. */
 	env: NodeJS.ProcessEnv;
-	/** The folder the session works in; children start there. */
+	/** The folder the session works in; children start in the vault, not here. */
 	cwd: string;
 	/** The pane backend from pihouse's config; undefined when pihouse was never set up. */
 	backend: "cmux" | "tmux" | undefined;
@@ -65,9 +46,16 @@ export interface LearningDeps {
 	modelAvailable: (model: string) => boolean;
 	/** Progress while the work runs; the caller shows it with ctx.ui.notify. */
 	progress: (text: string) => void;
-	/** Test seams: the hub client, the store's runtime ports and the clock and waits of the worker adapter. */
+	/**
+	 * Asks the user to go ahead, with the plan's counts. Absent when there is no dialog and no `--yes`: the command then
+	 * reports the counts and starts nothing (the two-call fallback).
+	 */
+	confirm?: (plan: ReviewPlan) => boolean | Promise<boolean>;
+	/** Test seams: the hub client, a ready-made child, the run checks and the clock and waits of the worker adapter. */
 	client?: HubClient;
-	ports?: Pick<RuntimeOptions, "operationalState" | "currentFingerprint">;
+	worker?: (job: WorkerJob) => Promise<WorkerResult>;
+	isActive?: (runId: string) => boolean;
+	currentFingerprint?: (runId: string) => string | undefined;
 	now?: () => number;
 	pollMs?: number;
 	timeoutMs?: number;
@@ -96,8 +84,9 @@ type Ready = { ok: true; model: string; worker: (job: WorkerJob) => Promise<Work
  * Example: a model that does not resolve found only after a worker opened its pane. Solution: all checks run first.
  */
 function gate(deps: LearningDeps): Ready | LearningOutcome {
-	if (!identityFromEnv(deps.env)) return { level: "warning", text: NO_HUB };
 	const model = learningModel(deps.env);
+	if (deps.worker) return { ok: true, model, worker: deps.worker };
+	if (!identityFromEnv(deps.env)) return { level: "warning", text: NO_HUB };
 	if (!deps.modelAvailable(model))
 		return {
 			level: "warning",
@@ -123,11 +112,7 @@ function gate(deps: LearningDeps): Ready | LearningOutcome {
 	return worker ? { ok: true, model, worker } : { level: "warning", text: NO_HUB };
 }
 
-/**
- * Runs `work` on the activated store's operational database, closed afterwards.
- * Problem: the digest and the review both need the database, and each opened it on its own. Example: a self-learning
- * run that digests first and then reviews would hold two handles to the same file. Solution: one handle for both.
- */
+/** Runs `work` on the activated store's operational database, closed afterwards. */
 async function withStore<T>(deps: LearningDeps, work: (store: OperationalStore) => Promise<T>): Promise<T> {
 	activateLearningStore(deps.memory);
 	const store = openOperationalStore(join(deps.memory, "memory.sqlite"), { fts: false, legacy: true });
@@ -138,230 +123,237 @@ async function withStore<T>(deps: LearningDeps, work: (store: OperationalStore) 
 	}
 }
 
-function runtimeOf(deps: LearningDeps, store: OperationalStore): RuntimeOptions {
-	const ports = deps.ports ?? runtimePorts({ storeDir: deps.memory, journalDir: deps.journalDir });
-	return { storeDir: deps.memory, db: store.db, ownedRoot: deps.memory, ...ports };
-}
-
-interface DigestSummary {
-	generated: string[];
-	cleaned: number;
-	cleanupPending: number;
-	failed: number;
-	deferred: string[];
-	notStarted: number;
+interface RunChecks {
+	isActive: (runId: string) => boolean;
+	currentFingerprint: (runId: string) => string | undefined;
 }
 
 /**
- * The digest step: produce the eligible candidates, run one isolated child each, commit, then clean up.
- * Problem: a failed or deferred run must not stop the others, and a retry must not repeat the model call.
- * Example: run A's child fails, run B digests; run A is retried by the next invocation only.
- * Solution: the runtime's per-job results are counted here by code; nothing is re-run inside this call.
+ * What the journal says about the runs. Problem: the deletion gate needs the live fingerprint of a run, and the ports
+ * of the retired digest flow take a revision id, not a run id. Example: `run-a` has revisions r1 and r2; asking the
+ * port for "run-a" would answer nothing and block every deletion. Solution: ask for the run's newest revision.
  */
-async function digestStep(deps: LearningDeps, ready: Ready, options: RuntimeOptions): Promise<DigestSummary> {
-	const summary: DigestSummary = {
-		generated: [],
-		cleaned: 0,
-		cleanupPending: 0,
-		failed: 0,
-		deferred: [],
-		notStarted: 0,
+function checksOf(deps: LearningDeps, db: DatabaseSync): RunChecks {
+	const ports = runtimePorts({ storeDir: deps.memory, journalDir: deps.journalDir });
+	const newest = (runId: string): string | undefined => {
+		const row = db
+			.prepare("SELECT id FROM revisions WHERE run_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1")
+			.get(runId);
+		return typeof row?.id === "string" ? row.id : undefined;
 	};
-	const produced = produceDigestCandidates(options);
-	summary.deferred.push(...produced.deferred.map((entry) => entry.reason));
-	const cleanupRevisions = new Set(
-		options.db
-			.prepare("SELECT revision_id FROM jobs WHERE state IN ('generated', 'cleanup-failed')")
-			.all()
-			.map((row) => String(row.revision_id)),
-	);
-
-	const digestRoot = vaultPaths(deps.memory).digestsDir;
-	const total = Math.min(produced.candidates.length, DIGEST_JOBS_PER_INVOCATION);
-	let started = 0;
-	const results = await executeDigest(
-		{
-			...options,
-			digestRoot,
-			outputPath: (candidate) => join(digestRoot, ".attempts", `${candidate.revision}.md`),
-			// Problem: a worker launched from the user's project may access project files by its normal cwd permissions.
-			// Solution: start it in the pihouse memory store; this separates working directories, not a security sandbox.
-			cwd: deps.memory,
-			invocation: randomUUID(),
-			now: deps.now ?? Date.now,
-			leaseMs: LEASE_MS,
-			maxJobs: DIGEST_JOBS_PER_INVOCATION,
-			worker: async (job) => {
-				started++;
-				deps.progress(`Digest ${started} of ${total}: ${job.revision} with ${ready.model}.`);
-				return ready.worker(job);
-			},
-		},
-		produced.candidates,
-	);
-	const digestResults = results.filter((result) => !cleanupRevisions.has(result.revision));
-	summary.notStarted = Math.max(0, produced.candidates.length - digestResults.length);
-	for (const result of results) {
-		if (cleanupRevisions.has(result.revision)) {
-			if (result.status === "cleaned") summary.cleaned++;
-			else summary.cleanupPending++;
-			continue;
-		}
-		if (result.path) summary.generated.push(result.path);
-		if (result.status === "cleaned") summary.cleaned++;
-		else if (result.path) summary.cleanupPending++;
-		else if (result.status === "deferred")
-			summary.deferred.push("source changed or run became active during the digest");
-		else summary.failed++;
-	}
-	return summary;
+	return {
+		isActive: deps.isActive ?? ((runId) => !isQuiescent(ports.operationalState(runId))),
+		currentFingerprint:
+			deps.currentFingerprint ??
+			((runId) => {
+				const revision = newest(runId);
+				return revision === undefined ? undefined : ports.currentFingerprint(revision);
+			}),
+	};
 }
 
-function countBy(values: string[]): [string, number][] {
-	const counts = new Map<string, number>();
-	for (const value of values) counts.set(value, (counts.get(value) ?? 0) + 1);
-	return [...counts.entries()];
+const plural = (n: number, word: string): string => `${n} ${word}${n === 1 ? "" : "s"}`;
+
+/**
+ * The shortest prefix that tells `id` from every other id, at least 8 characters. `approve` accepts it.
+ * Problem: the review's ids all start with "proposal-", so 8 characters ("proposal") match every one of them.
+ * Example: two proposals listed as "proposal" and "proposal" cannot be approved by their listed id. Solution: keep six
+ * characters of the hash as well.
+ */
+export function idPrefix(ids: readonly string[], id: string): string {
+	const least = id.startsWith("proposal-") ? "proposal-".length + 6 : 8;
+	for (let length = Math.min(least, id.length); length < id.length; length++) {
+		const prefix = id.slice(0, length);
+		if (ids.filter((other) => other.startsWith(prefix)).length === 1) return prefix;
+	}
+	return id;
+}
+
+const oneLine = (text: string, max: number): string => {
+	const flat = text.replace(/\s+/g, " ").trim();
+	return flat.length > max ? `${flat.slice(0, max - 3)}...` : flat;
+};
+
+/** The payload fields the intake adds to a proposal. */
+function extras(
+	db: DatabaseSync,
+	id: string,
+): { kind: string; scope: string; uncertainty: string; validation: string } {
+	const row = db.prepare("SELECT payload FROM proposals WHERE id = ?").get(id);
+	const value: unknown = typeof row?.payload === "string" ? JSON.parse(row.payload) : {};
+	const text = (key: string): string => {
+		const field = typeof value === "object" && value !== null ? Reflect.get(value, key) : undefined;
+		return typeof field === "string" ? field : "";
+	};
+	return { kind: text("kind"), scope: text("scope"), uncertainty: text("uncertainty"), validation: text("validation") };
+}
+
+/** The path a proposal changes: the file itself for `file:`, else the target as the proposal names it. */
+const pathOf = (target: string): string => (target.startsWith("file:") ? target.slice(5) : target);
+
+/**
+ * The numbered list that ends a review: the open proposals, each with its id prefix, short version, target path and a
+ * one-line reason.
+ * Problem: the review's proposals carry no stored reason, only what is uncertain about them. Example: a proposal
+ * supported by two runs with "two runs only" as its uncertainty. Solution: the reason line is its kind, its supporting
+ * runs and that uncertainty, all from the stored proposal; nothing is invented.
+ */
+function proposalLines(db: DatabaseSync): string[] {
+	const open = listProposals(db, { states: ["open"], limit: 100 });
+	const ids = (db.prepare("SELECT id FROM proposals").all() as { id: string }[]).map((row) => row.id);
+	return open.map((row, index) => {
+		const info = extras(db, row.id);
+		const why = [info.kind, plural(row.supportingRuns, "run")].filter(Boolean).join(", ");
+		const doubt = info.uncertainty ? `: ${oneLine(info.uncertainty, 100)}` : "";
+		return `${index + 1}. ${idPrefix(ids, row.id)}  v${row.version}  ${pathOf(row.target)}  ${why}${doubt}`;
+	});
+}
+
+function reviewedText(result: Extract<ReviewResult, { status: "reviewed" }>, db: DatabaseSync): string {
+	const cleaned = result.cleanup.filter((c) => c.status === "cleaned").length;
+	const blocked = result.cleanup.filter((c) => c.status === "blocked");
+	const lines = [
+		`Reviewed ${plural(result.covered.length, "run")} (${result.compacted} compacted now). Review: ${result.reviewPath}`,
+		`Proposals: ${result.intake.created} created, ${result.intake.merged} merged, ${result.intake.suppressed} suppressed. Nothing is applied by this command.`,
+		`Conversations deleted: ${cleaned} of ${result.cleanup.length}; the compacts stay.`,
+	];
+	if (blocked.length > 0)
+		lines.push(`Kept for the next review: ${blocked.map((b) => `${b.id} (${b.reason})`).join("; ")}.`);
+	if (result.deferred.length > 0)
+		lines.push(`Waiting for the next review (the input was full): ${result.deferred.length}.`);
+	if (result.stale.length > 0) lines.push(`Changed while the review ran, still pending: ${result.stale.join(", ")}.`);
+	const proposals = proposalLines(db);
+	if (proposals.length > 0)
+		lines.push(
+			"Open proposals:",
+			...proposals,
+			"See one with /workflow proposals <id>; approve with /workflow approve <id> <version>, or /workflow reject <id> [reason].",
+		);
+	else lines.push("No open proposals.");
+	return lines.join("\n");
 }
 
 /**
- * The status the session sees. Problem: a long list of digest paths, reasons and counts is easy to misread as a
- * summary the model wrote. Example: a reader who takes "deferred" for a failure. Solution: one count line, then the
- * paths, then each deferral reason once with its count.
+ * `/workflow review`: count what is pending, ask once, compact what lacks a compact, review everything together and
+ * list the proposals. Declining, or having nothing pending, starts no agent and writes nothing.
  */
-function digestLines(summary: DigestSummary): string[] {
-	const lines = [
-		`Digest: ${summary.generated.length} generated, ${summary.cleaned} cleaned, ${summary.cleanupPending} cleanup pending, ${summary.failed} failed, ${summary.deferred.length} deferred, ${summary.notStarted} not started.`,
-	];
-	for (const path of summary.generated) lines.push(`  ${path}`);
-	for (const [reason, count] of countBy(summary.deferred)) lines.push(`  deferred: ${reason} (${count})`);
-	if (summary.notStarted > 0) lines.push("  Not started runs wait for the next /workflow digest.");
-	return lines;
-}
-
-/** `/workflow digest`: digest the eligible run revisions, one isolated child each, and report the counts. */
-export async function digestCommand(deps: LearningDeps): Promise<LearningOutcome> {
+export async function reviewCommand(deps: LearningDeps): Promise<LearningOutcome> {
 	const ready = gate(deps);
 	if ("level" in ready) return ready;
 	return withStore(deps, async (store) => {
-		const summary = await digestStep(deps, ready, runtimeOf(deps, store));
-		return { level: summary.failed > 0 ? "warning" : "info", text: digestLines(summary).join("\n") };
+		const checks = checksOf(deps, store.db);
+		const result = await runReview({
+			root: deps.memory,
+			db: store.db,
+			cwd: deps.memory,
+			worker: ready.worker,
+			isActive: checks.isActive,
+			currentFingerprint: checks.currentFingerprint,
+			now: () => new Date((deps.now ?? Date.now)()),
+			invocation: randomUUID(),
+			leaseMs: LEASE_MS,
+			confirm: async (plan) => {
+				if (!deps.confirm) return false;
+				const go = await deps.confirm(plan);
+				if (go) deps.progress(`Reviewing ${plural(plan.pending, "run")} with ${ready.model}.`);
+				return go;
+			},
+		});
+		if (result.status === "nothing-pending")
+			return { level: "info", text: "Nothing to review: no saved run is waiting. /workflow log saves this session." };
+		if (result.status === "declined") {
+			const counts = `${plural(result.plan.pending, "saved run")} waiting (${result.plan.missing} still need a compact; each costs one model call, plus one for the review).`;
+			return {
+				level: "info",
+				text: deps.confirm
+					? `${counts} Review cancelled. Nothing was started.`
+					: `${counts} Run /workflow review --yes to start. Nothing was started.`,
+			};
+		}
+		if (result.status === "failed")
+			return {
+				level: "warning",
+				text: `Review stopped at the ${result.step} step: ${result.reason}. Nothing was marked reviewed and no conversation was deleted; the compacts made so far stay. Run /workflow review again to resume.`,
+			};
+		return { level: "info", text: reviewedText(result, store.db) };
 	});
 }
 
 /**
- * The run's lineage, from its newest revision's metrics. Problem: a fork without a recorded lineage would count as an
- * independent run. Example: a worker forked from another run whose parent is no longer retained. Solution: no lineage,
- * no support; the run is excluded and the review says so.
+ * `/workflow proposals <id>`: one proposal in full, with the path it changes and a unified diff of before into after.
+ * No model turn.
  */
-function lineageOf(db: DatabaseSync, runId: string): string | undefined {
-	const row = db
-		.prepare(
-			"SELECT m.value FROM metrics m JOIN revisions r ON r.id = m.revision_id WHERE r.run_id = ? AND m.kind = 'run.lineage' ORDER BY r.created_at DESC, r.rowid DESC LIMIT 1",
-		)
-		.get(runId);
-	if (!row) return undefined;
-	try {
-		const value: unknown = JSON.parse(String(row.value));
-		const lineage: unknown = typeof value === "object" && value !== null ? Reflect.get(value, "lineage") : undefined;
-		return typeof lineage === "string" && lineage ? lineage : undefined;
-	} catch {
-		return undefined;
-	}
+export function proposalDetail(db: DatabaseSync, prefix: string): LearningOutcome {
+	const found = resolveProposalId(db, prefix);
+	if (found.status === "none")
+		return { level: "warning", text: `No proposal matches "${prefix}". /workflow proposals lists them.` };
+	if (found.status === "ambiguous")
+		return { level: "warning", text: `"${prefix}" matches ${found.matches.join(", ")}. Use a longer prefix.` };
+	const proposal = getProposal(db, found.proposal.id);
+	const info = extras(db, proposal.id);
+	const path = pathOf(proposal.target);
+	const diff = unifiedDiff(proposal.before, proposal.after, path, path);
+	const lines = [
+		`Proposal ${proposal.id}: ${proposal.state}, version ${shortVersion(proposal.version)}`,
+		`Path: ${path}`,
+		`Kind: ${info.kind || "-"}; scope: ${info.scope || "-"}; supported by ${plural(new Set(proposal.evidence).size, "run")}: ${proposal.evidence.join(", ") || "-"}`,
+	];
+	if (info.uncertainty) lines.push(`Uncertain: ${info.uncertainty}`);
+	if (info.validation) lines.push(`How to check: ${info.validation}`);
+	if (proposal.reason) lines.push(`Reason on record: ${proposal.reason}`);
+	lines.push("", diff || "(before and after are the same text)", "");
+	if (proposal.state === "open")
+		lines.push(
+			`Approve: /workflow approve ${proposal.id} ${shortVersion(proposal.version)} · Reject: /workflow reject ${proposal.id} [reason]`,
+		);
+	return { level: "info", text: lines.join("\n") };
+}
+
+export interface CompactToolResult extends LearningOutcome {
+	compacted: number;
+	failed: number;
+	skipped: number;
 }
 
 /**
- * The review port: each scan and review is one child that reads the manifest and writes the stage's artifact.
- * Problem: the child could read anything the hub allows, including raw transcripts the digests already replaced.
- * Example: a review that opens a run folder to check a claim. Solution: its read dirs are the batch and the digests
- * only; the run folders are not among them.
+ * The `workflow_compact` tool: compact every uncompacted run of one project, so `/workflow ask` can read them.
+ * Problem: ask would answer from raw conversations, or from nothing, when the runs are not compacted yet. Example: a
+ * project with three saved runs and no review. Solution: the same compact children as the review, marked `ask`. This
+ * never deletes a conversation and never marks a revision reviewed, so a later review still covers every run.
  */
-function agentPort(deps: LearningDeps, ready: Ready, digestRoot: string, reviewRoot: string) {
-	return async (request: AgentRequest): Promise<AgentResponse> => {
-		const label = request.stage === "scan" ? "Scan" : "Review";
-		deps.progress(`${label} of batch ${request.batchId} with ${ready.model}.`);
-		const outcome = await ready.worker({
-			stage: request.stage,
-			id: `${request.stage}-${request.batchId}`,
-			revision: request.batchId,
-			inputPath: request.manifestPath,
-			outputPath: request.outputPath,
-			// Workers run from pihouse's store, never the user's project; this is not a sandbox.
-			cwd: deps.memory,
-			maxOutputBytes: DEFAULT_MAX_OUTPUT_CHARS,
-			inputs: request.scanSummaryPath ? [request.scanSummaryPath] : [],
-			contract: request.stage === "scan" ? SCAN_CONTRACT : request.outputContract,
-			readDirs: [reviewRoot, digestRoot],
-		});
-		if (outcome.status === "success") return { status: "success", artifactPath: outcome.outputPath };
-		return { status: outcome.status === "cancelled" ? "cancelled" : "failure" };
-	};
-}
-
-function selfLearningOutcome(
-	digest: DigestSummary,
-	learned: SelfLearningResult,
-	intake: IntakeResult | undefined,
-): LearningOutcome {
-	const failed = learned.status === "scan-failed" || learned.status === "review-failed" || learned.status === "blocked";
-	const stage = learned.status === "scan-failed" ? "scan" : "review";
-	const lines: string[] = [];
-	if (learned.status === "blocked") lines.push(`Self-learning blocked: ${learned.reason}. Nothing was applied.`);
-	else if (failed)
-		lines.push(
-			`Self-learning stopped at the ${stage}: ${learned.reason}. Nothing was applied; batch ${learned.batchId} stays open and the next /workflow self-learning resumes it.`,
-		);
-	else if (learned.status === "nothing-to-review")
-		lines.push("Self-learning: nothing to review; no digest is waiting.");
-	else lines.push(`Self-learning batch ${learned.batchId}: reviewed ${learned.selected} run(s).`);
-	lines.push(...digestLines(digest));
-	if (learned.groups.length > 0) {
-		const contradicted = learned.groups.filter((group) => group.contradicted).length;
-		const rejected = learned.groups.filter((group) => group.priorRejected).length;
-		lines.push(
-			`Groups: ${learned.groups.length}, contradicted: ${contradicted}, against a rejected proposal: ${rejected}.`,
-		);
-	}
-	if (intake?.status === "ingested")
-		lines.push(
-			`Proposals: ${intake.created} created, ${intake.merged} merged, ${intake.suppressed} suppressed. List them with /workflow proposals; approve one with /workflow approve <id>. Nothing is applied by this command.`,
-		);
-	if (learned.excluded.length > 0)
-		for (const [reason, count] of countBy(learned.excluded.map((entry) => entry.reason)))
-			lines.push(`Excluded: ${reason} (${count}).`);
-	if (learned.overflow.length > 0) lines.push(`Waiting for a later batch: ${learned.overflow.length}.`);
-	if (learned.reviewPath) lines.push(`Review: ${learned.reviewPath}`);
-	if (learned.summaryPath) lines.push(`Summary: ${learned.summaryPath}`);
-	return { level: failed ? "warning" : "info", text: lines.join("\n") };
-}
-
-/**
- * `/workflow self-learning`: digest what is missing, then scan and review one batch in separate children. The
- * invocation authorizes the review only; it applies nothing.
- */
-export async function selfLearningCommand(deps: LearningDeps): Promise<LearningOutcome> {
+export async function compactProjectCommand(deps: LearningDeps, project: string): Promise<CompactToolResult> {
+	const none = (text: string, level: "info" | "warning"): CompactToolResult => ({
+		level,
+		text,
+		compacted: 0,
+		failed: 0,
+		skipped: 0,
+	});
 	const ready = gate(deps);
-	if ("level" in ready) return ready;
+	if ("level" in ready) return none(ready.text, ready.level);
 	return withStore(deps, async (store) => {
-		const options = runtimeOf(deps, store);
-		const digest = await digestStep(deps, ready, options);
-		const digestRoot = vaultPaths(deps.memory).digestsDir;
-		const reviewRoot = vaultPaths(deps.memory).batchesDir;
-		let intake: IntakeResult | undefined;
-		const learned = await runSelfLearning(store.db, {
+		const checks = checksOf(deps, store.db);
+		const revisions = uncompactedForProject(store.db, project, { root: deps.memory, isActive: checks.isActive });
+		if (revisions.length === 0)
+			return none("Nothing to compact: every saved run of this project has a compact.", "info");
+		deps.progress(`Compacting ${plural(revisions.length, "run")} with ${ready.model}.`);
+		const outcomes = await compactRevisions({
+			root: deps.memory,
+			db: store.db,
+			revisions,
+			compactedBy: "ask",
+			worker: ready.worker,
+			cwd: deps.memory,
+			isActive: checks.isActive,
+			now: () => new Date((deps.now ?? Date.now)()),
 			invocation: randomUUID(),
-			now: deps.now ?? Date.now,
 			leaseMs: LEASE_MS,
-			reviewRoot,
-			lineageOf: (runId) => lineageOf(store.db, runId),
-			// The digest step above prepared every eligible revision, so no digest job is left for the review.
-			missing: [],
-			digestAdapter: async () => ({ status: "failure" }),
-			agent: agentPort(deps, ready, digestRoot, reviewRoot),
-			intake: (reviewId, text) => {
-				intake = ingestReview(store.db, reviewId, text);
-				return intake;
-			},
 		});
-		return selfLearningOutcome(digest, learned, intake);
+		const count = (statuses: string[]) => outcomes.filter((o) => statuses.includes(o.status)).length;
+		const compacted = count(["compacted"]);
+		const failed = count(["failed", "cancelled"]);
+		const skipped = outcomes.length - compacted - failed;
+		const text = `Compacted ${plural(compacted, "run")} of this project; ${failed} failed, ${skipped} skipped (active, deferred or already done). No conversation was deleted and nothing was marked reviewed.`;
+		return { level: failed > 0 ? "warning" : "info", text, compacted, failed, skipped };
 	});
 }

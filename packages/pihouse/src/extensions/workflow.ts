@@ -1,11 +1,13 @@
-// /workflow log, ask and the proposals: pihouse looking at its own workflow.
+// /workflow log, review, ask and the proposals: pihouse looking at its own workflow.
 //
-// log: flags the current session's run and captures it into the workflow memory now. Planner and executor sessions
-//   are flagged by name and captured by default, after each answer and again when the session closes (see
-//   workflow/capture.ts). `save` and `report` are retired.
-// ask: gives the model the architecture, the skills catalog and what is installed here, then the question.
-// proposals, approve, reject: the proposal store (see proposalCommand). No model turn.
-// `/workflow review` (model-written recommendations) was removed; the per-conversation report.md is code-computed.
+// log: flags the current session's run and captures it into the vault now. Planner and executor sessions are flagged
+//   by name and captured by default, after each answer and again when the session closes (see workflow/capture.ts).
+// review: asks once, compacts what has no compact, reviews the new compacts together with the latest review, and lists
+//   the proposals (see workflow/learning-commands.ts). The children run through the agent-link hub.
+// ask: gives the model the architecture, the skills catalog and the compacts, reviews, ideas and sources that match the
+//   question. When this project has uncompacted runs it also tells the model to offer the `workflow_compact` tool.
+// proposals [id], approve, reject: the proposal store (see proposalCommand). No model turn.
+// `digest`, `self-learning`, `report` and `save` are retired and only say what replaces them.
 import { createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
@@ -13,6 +15,7 @@ import type { DatabaseSync } from "node:sqlite";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { SessionRecord } from "agent-link-core";
 import { agentLinkHome, hubPaths, readJournal } from "agent-link-core";
+import { Type } from "typebox";
 import { pihousePaths, REPO_ROOT, SKILLS_DIR } from "../paths.ts";
 import { readConfig } from "../setup.ts";
 import { buildAskContext } from "../workflow/ask-context.ts";
@@ -27,11 +30,13 @@ import {
 	projectOf,
 	readFlags,
 } from "../workflow/capture.ts";
+import { isQuiescent } from "../workflow/jobs.ts";
 import {
-	digestCommand,
+	compactProjectCommand,
+	idPrefix,
 	type LearningDeps,
-	type LearningOutcome,
-	selfLearningCommand,
+	proposalDetail,
+	reviewCommand,
 } from "../workflow/learning-commands.ts";
 import { LIMITS, type MemoryStore, openMemory } from "../workflow/memory.ts";
 import { ACTIVE_MARKER } from "../workflow/migration.ts";
@@ -48,6 +53,7 @@ import {
 	type ScopedTarget,
 	shortVersion,
 } from "../workflow/proposals.ts";
+import { runtimePorts } from "../workflow/runtime-ports.ts";
 import { fetchSource, type SourceResult } from "../workflow/sources.ts";
 import { openOperationalStore } from "../workflow/storage.ts";
 import { vaultPaths, vaultRel } from "../workflow/vault-paths.ts";
@@ -62,12 +68,11 @@ export const MESSAGE_TYPE = "pihouse-workflow";
  */
 export const WORKFLOW_COMMANDS = [
 	{ usage: "log [reason]", completions: ["log "] },
-	{ usage: "digest (separate model agent; model quota)", completions: ["digest"] },
-	{ usage: "self-learning (digest, scan and review agents; model quota)", completions: ["self-learning"] },
-	{ usage: "ask <question>", completions: ["ask "] },
-	{ usage: "proposals", completions: ["proposals"] },
+	{ usage: "review [--yes] (compacts and reviews saved runs; model quota)", completions: ["review"] },
+	{ usage: "proposals [id]", completions: ["proposals"] },
 	{ usage: "approve <id> [version]", completions: ["approve "] },
 	{ usage: "reject <id> [reason]", completions: ["reject "] },
+	{ usage: "ask <question>", completions: ["ask "] },
 ] as const;
 
 export const USAGE = `usage: ${WORKFLOW_COMMANDS.map((c) => `/workflow ${c.usage}`).join(" | ")}`;
@@ -78,14 +83,16 @@ export const USAGE = `usage: ${WORKFLOW_COMMANDS.map((c) => `/workflow ${c.usage
  * as a new request. Example: `/keeper summarize` must not start a digest that no longer exists. Solution: a concise
  * warning that names the replacement.
  */
-const REVIEW_REMOVED =
-	"/workflow review was removed. Use /workflow report [--last] for what a run did. Use /workflow self-learning to learn from runs.";
 const SAVE_RETIRED =
 	"/workflow save was retired. Use /workflow log [reason] to capture this session; nothing was captured now.";
 const REPORT_RETIRED =
-	"/workflow report was retired. Each captured conversation keeps its code-computed report.md under conversations/ in the workflow memory; nothing was written now.";
+	"/workflow report was retired. Each saved conversation keeps its code-computed report.md under conversations/ in the vault; /workflow review and /workflow ask are the ways to look back. Nothing was written now.";
+const DIGEST_RETIRED =
+	"/workflow digest was retired. /workflow review compacts and reviews your saved runs in one step; nothing was started.";
+const SELF_LEARNING_RETIRED =
+	"/workflow self-learning was retired. /workflow review compacts and reviews your saved runs in one step; nothing was started.";
 const KEEPER_RETIRED =
-	"The keeper was retired. Use /workflow proposals, /workflow approve <id> and /workflow reject <id> [reason]; /workflow report shows what a run did.";
+	"The keeper was retired. Use /workflow proposals [id], /workflow approve <id> and /workflow reject <id> [reason]; /workflow review looks back at saved runs.";
 
 export const ARCHITECTURE = `## How pihouse works
 
@@ -100,7 +107,8 @@ export const ARCHITECTURE = `## How pihouse works
   asking only through ask_user_question; the user picks the build skills; grilling stress-tests the idea. On approval the
   planner launches an executor (a pihouse agent in its own pane) that runs the plan end to end with no questions to the user,
   dispatching tasks to workers on the harness and model the plan names. Post-build and Extras skills are manual.
-- /workflow report reads a run back from the journal and transcripts: tokens, time per message, skills per agent.`;
+- /workflow log saves a run, /workflow review compacts the saved runs and reviews them into proposals, /workflow ask
+  answers from the compacts, reviews, ideas and sources, and /workflow proposals, approve and reject decide the changes.`;
 
 /**
  * The newest report in `dir`, by when it was written.
@@ -137,6 +145,8 @@ export interface AskDeps {
 	fetchSource?: (input: string) => Promise<SourceResult>;
 	/** The folder the question is asked from, for the project tag of saved sources. Default: process.cwd(). */
 	cwd?: string;
+	/** Whether a run still has live agents; such a run is not offered for compacting. Default: the agent-link journal. */
+	isActive?: (runId: string) => boolean;
 }
 
 const MAX_SOURCES = 3;
@@ -212,8 +222,8 @@ const FALLBACK_AGENT =
 	"offer to launch a cheap agent with agent-link spawn (an opencode or haiku worker) to read it and report the text back.";
 
 /**
- * The context /workflow ask gives the model: how pihouse works, this machine, the catalog, the workflow memory, the
- * index and the digests that match the question; never a transcript. Async because a link in the question is fetched.
+ * The context /workflow ask gives the model: how pihouse works, this machine, the catalog, and the compacts, reviews,
+ * ideas and sources that match the question; never a transcript. Async because a link in the question is fetched.
  */
 export async function askContext(
 	question: string,
@@ -225,11 +235,15 @@ export async function askContext(
 	const store = openMemory(deps.memoryDir ?? paths.memory);
 	store.adoptIdeas();
 	const sources = sourcesIn(question);
+	const where = projectOf(deps.cwd ?? process.cwd());
+	const ports = runtimePorts({ storeDir: store.dir, journalDir: hubPaths(agentLinkHome(env)).sessions });
 	const sourcesText = sources.length ? await sourcesSection(store, sources, deps, deps.fetchSource ?? fetchSource) : "";
 	return [
 		buildAskContext({
 			memoryDir: store.dir,
-			project: projectOf(deps.cwd ?? process.cwd()).projectSlug,
+			project: where.projectSlug,
+			projectPath: where.project,
+			isActive: deps.isActive ?? ((runId) => !isQuiescent(ports.operationalState(runId))),
 			question,
 			repoRoot: REPO_ROOT,
 			skillsDir: SKILLS_DIR,
@@ -465,10 +479,11 @@ async function approve(
 function listText(db: DatabaseSync): string {
 	const rows = listProposals(db, { limit: PROPOSAL_LIST_LIMIT });
 	if (rows.length === 0) return "No proposals yet.";
+	const allIds = (db.prepare("SELECT id FROM proposals").all() as { id: string }[]).map((row) => row.id);
 	const lines = rows.map((row) => {
 		const legacy = getProposal(db, row.id).before === "" ? " (legacy hypothesis: no verified before-state)" : "";
 		const runs = `${row.supportingRuns} run${row.supportingRuns === 1 ? "" : "s"}`;
-		return `${row.id.slice(0, 8)}  ${row.kind ?? "-"}  ${row.scope ?? "-"}  ${row.target}  ${row.state}${legacy}  version ${row.version}  ${runs}  next: ${row.nextAction}`;
+		return `${idPrefix(allIds, row.id)}  ${row.kind ?? "-"}  ${row.scope ?? "-"}  ${row.target}  ${row.state}${legacy}  version ${row.version}  ${runs}  next: ${row.nextAction}`;
 	});
 	if (rows.length === PROPOSAL_LIST_LIMIT) lines.push(`The first ${PROPOSAL_LIST_LIMIT} proposals are shown.`);
 	return ["Proposals: id, kind, scope, target, state, version, supporting runs, next action", ...lines].join("\n");
@@ -491,7 +506,8 @@ export async function proposalCommand(
 		return { level: "warning", text: NOT_ACTIVE };
 	const store = openOperationalStore(dbPath, { fts: false, legacy: true });
 	try {
-		if (command === "proposals") return { level: "info", text: listText(store.db) };
+		if (command === "proposals")
+			return args[0] ? proposalDetail(store.db, args[0]) : { level: "info", text: listText(store.db) };
 		const [prefix = "", ...rest] = args;
 		if (!prefix) return { level: "warning", text: PROPOSAL_USAGE[command] };
 		if (command === "approve" && rest.length > 1) return { level: "warning", text: PROPOSAL_USAGE.approve };
@@ -517,21 +533,17 @@ export async function proposalCommand(
  * Problem: the registry knows models that have no key, and a child started for one stalls in its pane. Example: a
  * provider that was never signed in. Solution: the same check the status bar's model uses, before anything starts.
  */
-function modelAvailable(ctx: ExtensionCommandContext, model: string): boolean {
+function modelAvailable(ctx: ExtensionContext, model: string): boolean {
 	const slash = model.indexOf("/");
 	if (slash <= 0) return false;
 	const found = ctx.modelRegistry.find(model.slice(0, slash), model.slice(slash + 1));
 	return found !== undefined && ctx.modelRegistry.hasConfiguredAuth(found);
 }
 
-/** `/workflow digest` and `/workflow self-learning`: the learning runtime with the session's hub, pane backend and models. */
-async function learning(
-	ctx: ExtensionCommandContext,
-	name: string,
-	run: (deps: LearningDeps) => Promise<LearningOutcome>,
-): Promise<void> {
+/** The learning dependencies of a session: its hub, pane backend and models. The tool and the command build them the same way. */
+function learningDeps(ctx: ExtensionContext, extra: Partial<LearningDeps> = {}): LearningDeps {
 	const paths = pihousePaths();
-	const deps: LearningDeps = {
+	return {
 		memory: paths.memory,
 		journalDir: hubPaths(agentLinkHome()).sessions,
 		env: process.env,
@@ -539,12 +551,32 @@ async function learning(
 		backend: readConfig(paths)?.backend,
 		modelAvailable: (model) => modelAvailable(ctx, model),
 		progress: (text) => ctx.ui.notify(text, "info"),
+		...extra,
 	};
+}
+
+/**
+ * `/workflow review [--yes]`: the count, one confirmation, then the review.
+ * Problem: a command may run where pi has no dialog (print mode, RPC), and a review that waits for a click there hangs.
+ * Example: `pih -p "/workflow review"`. Solution: with a dialog, ask in it; without one, report the count and start
+ * nothing, and `--yes` on a second call is the confirmation. `--yes` also skips the dialog.
+ */
+async function review(args: string[], ctx: ExtensionCommandContext): Promise<void> {
+	const yes = args.includes("--yes");
+	const confirm: LearningDeps["confirm"] = yes
+		? () => true
+		: ctx.hasUI
+			? (plan) =>
+					ctx.ui.confirm(
+						"Review saved runs?",
+						`${plan.pending} saved run${plan.pending === 1 ? "" : "s"} waiting; ${plan.missing} need a compact first. Each compact and the review cost one model call. Reviewed conversations are deleted afterwards; their compacts stay.`,
+					)
+			: undefined;
 	try {
-		const result = await run(deps);
+		const result = await reviewCommand(learningDeps(ctx, { confirm }));
 		ctx.ui.notify(result.text, result.level);
 	} catch (error) {
-		ctx.ui.notify(`/workflow ${name}: ${messageOf(error)}`, "warning");
+		ctx.ui.notify(`/workflow review: ${messageOf(error)}`, "warning");
 	}
 }
 
@@ -596,7 +628,7 @@ export default function workflow(pi: ExtensionAPI): void {
 	pi.on("session_shutdown", (_event, ctx) => captureIfFlagged(ctx));
 	pi.registerCommand("workflow", {
 		description:
-			"log [reason]: capture this session · digest (launches a separate model agent; costs model quota) · self-learning (launches digest, scan and review agents; costs model quota) · ask <question> · proposals · approve <id> [version] · reject <id> [reason]",
+			"log [reason]: capture this session · review [--yes]: compact and review saved runs (model quota) · proposals [id] · approve <id> [version] · reject <id> [reason] · ask <question>",
 		getArgumentCompletions: (prefix) =>
 			WORKFLOW_COMMANDS.flatMap((c) => [...c.completions])
 				.filter((c) => c.startsWith(prefix))
@@ -604,12 +636,12 @@ export default function workflow(pi: ExtensionAPI): void {
 		handler: async (raw, ctx) => {
 			const [sub, ...rest] = raw.trim().split(/\s+/);
 			if (sub === "report") return ctx.ui.notify(REPORT_RETIRED, "warning");
-			if (sub === "review") return ctx.ui.notify(REVIEW_REMOVED, "warning");
 			if (sub === "save") return ctx.ui.notify(SAVE_RETIRED, "warning");
+			if (sub === "digest") return ctx.ui.notify(DIGEST_RETIRED, "warning");
+			if (sub === "self-learning") return ctx.ui.notify(SELF_LEARNING_RETIRED, "warning");
 			if (sub === "log") return log(pi, rest.join(" ").trim(), ctx);
+			if (sub === "review") return review(rest, ctx);
 			if (sub === "proposals" || sub === "approve" || sub === "reject") return runProposalCommand(sub, rest, ctx);
-			if (sub === "digest") return learning(ctx, sub, digestCommand);
-			if (sub === "self-learning") return learning(ctx, sub, selfLearningCommand);
 			if (sub === "ask" && rest.join(" ").trim()) {
 				pi.sendMessage(
 					{ customType: MESSAGE_TYPE, content: await askContext(rest.join(" ").trim()), display: false },
@@ -618,6 +650,24 @@ export default function workflow(pi: ExtensionAPI): void {
 				return;
 			}
 			ctx.ui.notify(USAGE, "warning");
+		},
+	});
+	// The tool /workflow ask's context tells the model to call after the user says yes. Project-scoped: it compacts the
+	// runs of the folder the session works in, marked `ask`, and never deletes a conversation or marks a review.
+	pi.registerTool({
+		name: "workflow_compact",
+		label: "Compact saved runs",
+		description:
+			"Compacts every uncompacted saved run of the current project so /workflow ask can draw on them. One model call per run. Never deletes a conversation and never marks a run reviewed. Call it only after the user said yes to the offer in the /workflow ask context; it takes no arguments.",
+		promptSnippet:
+			"workflow_compact: compact this project's saved runs (only after the user agreed during /workflow ask)",
+		parameters: Type.Object({}),
+		async execute(_id, _params, _signal, _onUpdate, ctx) {
+			const result = await compactProjectCommand(learningDeps(ctx), projectOf(ctx.cwd).project);
+			return {
+				content: [{ type: "text", text: result.text }],
+				details: { compacted: result.compacted, failed: result.failed, skipped: result.skipped },
+			};
 		},
 	});
 	// The keeper's command is gone with its extension; this stub only says so, so `/keeper` cannot reach a model.

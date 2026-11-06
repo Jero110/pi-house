@@ -7,7 +7,7 @@ import { runRoute } from "./route.ts";
 import { setup, teardown } from "./setup.ts";
 
 export const KEEPER_RETIRED =
-	"pih keeper was retired. Use /workflow proposals, /workflow approve <id> and /workflow reject <id> [reason] in a pihouse session; /workflow report shows what a run did.";
+	"pih keeper was retired. Use /workflow proposals, /workflow approve <id> and /workflow reject <id> [reason] in a pihouse session; /workflow review looks back at saved runs.";
 
 export const USAGE = `usage: pih [pi options] [message]       start pihouse (all pi options work)
        pih setup --backend cmux|tmux [--claude-bridge] [--books-env-file <path>] [--no-books]

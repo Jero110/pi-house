@@ -36,10 +36,13 @@ function writeSkill(repoRoot: string, content: string): string {
 
 function fakePi() {
 	const commands = new Map<string, { handler: (raw: string, ctx: ExtensionCommandContext) => Promise<void> | void }>();
+	const tools = new Map<string, { execute: (...args: unknown[]) => Promise<unknown> }>();
 	const sent: unknown[] = [];
 	const users: unknown[] = [];
 	const pi = {
 		on: () => {},
+		registerTool: (spec: { name: string; execute: (...args: unknown[]) => Promise<unknown> }) =>
+			tools.set(spec.name, spec),
 		registerCommand: (
 			name: string,
 			spec: { handler: (raw: string, ctx: ExtensionCommandContext) => Promise<void> | void },
@@ -49,7 +52,7 @@ function fakePi() {
 		getSessionName: () => undefined,
 		setSessionName: () => {},
 	} as unknown as ExtensionAPI;
-	return { pi, commands, sent, users };
+	return { pi, commands, tools, sent, users };
 }
 
 test("without an activated store the proposal commands say so, change nothing and migrate nothing", async () => {
@@ -324,7 +327,7 @@ function withoutHubIdentity(t: { after: (fn: () => void) => void }): void {
 	});
 }
 
-test("help and completion list exactly the commands in the table, and nothing removed", () => {
+test("help and completion list exactly the final commands, and nothing retired", () => {
 	const { pi, commands } = fakePi();
 	workflow(pi);
 	const spec = commands.get("workflow") as
@@ -335,16 +338,33 @@ test("help and completion list exactly the commands in the table, and nothing re
 		values,
 		WORKFLOW_COMMANDS.flatMap((c) => [...c.completions]),
 	);
+	assert.deepEqual(
+		values.map((v) => v.trim()),
+		["log", "review", "proposals", "approve", "reject", "ask"],
+	);
 	for (const c of WORKFLOW_COMMANDS) assert.ok(USAGE.includes(`/workflow ${c.usage}`), `usage lists ${c.usage}`);
 	const shown = `${USAGE} ${String(spec?.description)} ${values.join(" ")}`;
-	assert.ok(values.includes("digest"), "digest is offered");
-	assert.ok(values.includes("self-learning"), "self-learning is offered");
-	assert.match(String(spec?.description), /separate model agent.*model quota/);
-	assert.doesNotMatch(shown, /\/workflow review(?:\s|$)/, "the removed command is not offered");
-	assert.doesNotMatch(shown, /keeper/, "the retired keeper is not offered");
+	assert.match(String(spec?.description), /review.*model quota/);
+	assert.doesNotMatch(shown, /\b(digest|self-learning|report|save|keeper)\b/, "no retired command is offered");
 });
 
-test("removed invocations start nothing and say what to use instead; digest without the hub starts nothing", async (t) => {
+test("/workflow with no argument prints the usage line with exactly the final commands", async () => {
+	const { pi, commands, sent, users } = fakePi();
+	const notes: { text: string; level: string }[] = [];
+	const ctx = {
+		ui: { notify: (text: string, level: string) => notes.push({ text, level }) },
+	} as unknown as ExtensionCommandContext;
+	workflow(pi);
+	await commands.get("workflow")?.handler("", ctx);
+	assert.deepEqual(notes, [{ text: USAGE, level: "warning" }]);
+	assert.match(
+		USAGE,
+		/^usage: \/workflow log \[reason\] \| \/workflow review .* \| \/workflow proposals \[id\] \| \/workflow approve <id> \[version\] \| \/workflow reject <id> \[reason\] \| \/workflow ask <question>$/,
+	);
+	assert.equal(sent.length + users.length, 0);
+});
+
+test("the retired commands return guidance and start no model turn; review without the hub starts nothing", async (t) => {
 	const home = mkdtempSync(join(tmpdir(), "workflow-removed-"));
 	const previous = process.env.PIHOUSE_HOME;
 	process.env.PIHOUSE_HOME = home;
@@ -360,30 +380,77 @@ test("removed invocations start nothing and say what to use instead; digest with
 		ui: { notify: (text: string, level: string) => notes.push({ text, level }) },
 		sessionManager: { getSessionId: () => "s", getSessionFile: () => undefined },
 		cwd: home,
+		hasUI: false,
 	} as unknown as ExtensionCommandContext;
 	workflow(pi);
 	const handler = commands.get("workflow")?.handler;
 	const keeper = commands.get("keeper")?.handler;
 	assert.ok(handler && keeper);
 
-	await handler("review --last", ctx);
-	await handler("digest", ctx);
-	await handler("self-learning", ctx);
+	for (const word of ["digest", "self-learning", "report --last", "save"]) await handler(word, ctx);
+	await handler("review", ctx);
+	await handler("review --yes", ctx);
 	await keeper("summarize", ctx);
-	await keeper("", ctx);
 
-	assert.deepEqual(
-		notes.map((n) => n.level),
-		["warning", "warning", "warning", "warning", "warning"],
-	);
-	assert.match(notes[0]?.text ?? "", /\/workflow review was removed.*\/workflow report/);
-	assert.match(notes[1]?.text ?? "", /need the agent-link hub.*Nothing was started/);
-	assert.match(notes[2]?.text ?? "", /need the agent-link hub.*Nothing was started/);
-	assert.match(notes[3]?.text ?? "", /The keeper was retired.*\/workflow proposals/);
-	assert.match(notes[4]?.text ?? "", /The keeper was retired/);
+	assert.ok(notes.every((n) => n.level === "warning"));
+	assert.match(notes[0]?.text ?? "", /\/workflow digest was retired.*\/workflow review/);
+	assert.match(notes[1]?.text ?? "", /\/workflow self-learning was retired.*\/workflow review/);
+	assert.match(notes[2]?.text ?? "", /\/workflow report was retired.*\/workflow review.*\/workflow ask/);
+	assert.match(notes[3]?.text ?? "", /\/workflow save was retired.*\/workflow log/);
+	assert.match(notes[4]?.text ?? "", /need the agent-link hub.*Nothing was started/);
+	assert.match(notes[5]?.text ?? "", /need the agent-link hub.*Nothing was started/);
+	assert.match(notes[6]?.text ?? "", /The keeper was retired.*\/workflow proposals/);
+	assert.doesNotMatch(notes[6]?.text ?? "", /workflow report/);
 	assert.equal(sent.length, 0, "no sendMessage");
 	assert.equal(users.length, 0, "no sendUserMessage");
 	assert.equal(existsSync(join(home, "reports")), false, "no report is written");
+});
+
+test("the workflow_compact tool is registered and does nothing without the hub", async (t) => {
+	const home = mkdtempSync(join(tmpdir(), "workflow-tool-"));
+	const previous = process.env.PIHOUSE_HOME;
+	process.env.PIHOUSE_HOME = home;
+	withoutHubIdentity(t);
+	t.after(() => {
+		if (previous === undefined) delete process.env.PIHOUSE_HOME;
+		else process.env.PIHOUSE_HOME = previous;
+		rmSync(home, { recursive: true, force: true });
+	});
+	const { pi, tools } = fakePi();
+	workflow(pi);
+	const tool = tools.get("workflow_compact");
+	assert.ok(tool);
+	const ctx = { cwd: home, ui: { notify: () => {} }, modelRegistry: {} } as unknown as ExtensionCommandContext;
+	const result = (await tool.execute("id", {}, undefined, undefined, ctx)) as {
+		content: { text: string }[];
+		details: { compacted: number };
+	};
+	assert.match(result.content[0]?.text ?? "", /need the agent-link hub.*Nothing was started/);
+	assert.equal(result.details.compacted, 0);
+});
+
+test("proposals <id> shows one proposal with its path and a diff; an unknown id warns", async () => {
+	const f = fixture();
+	try {
+		const db = openStore(f.memory);
+		createProposal(db.db, {
+			id: "p-one",
+			target: "skill:sample",
+			before: "one\ntwo\n",
+			after: "one\nTWO\n",
+			evidence: ["r1"],
+		});
+		db.close();
+		const shown = await proposalCommand("proposals", ["p-one"], { memory: f.memory, repoRoot: f.repoRoot });
+		assert.equal(shown.level, "info");
+		assert.match(shown.text, /Path: skill:sample/);
+		assert.match(shown.text, /^-two$/m);
+		assert.match(shown.text, /^\+TWO$/m);
+		const missing = await proposalCommand("proposals", ["zzz"], { memory: f.memory, repoRoot: f.repoRoot });
+		assert.equal(missing.level, "warning");
+	} finally {
+		f.cleanup();
+	}
 });
 
 test("approve on an interrupted application recovers it to failed and leaves the target alone", async () => {

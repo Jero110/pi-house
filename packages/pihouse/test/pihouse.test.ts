@@ -1139,7 +1139,8 @@ test("pih keeper is retired: it names the replacements, exits non-zero and start
 	const text = stderr.join("");
 	assert.match(text, /pih keeper was retired/);
 	assert.match(text, /\/workflow proposals/);
-	assert.match(text, /\/workflow report/);
+	assert.match(text, /\/workflow review/);
+	assert.doesNotMatch(text, /\/workflow report/);
 });
 
 test("the retired keeper is not loaded, not in the catalog, has no skill folder and is not in the README", () => {

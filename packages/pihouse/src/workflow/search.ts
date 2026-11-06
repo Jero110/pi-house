@@ -24,6 +24,15 @@ export interface SearchScope {
 	project: string;
 	trusts: string[];
 	includeGlobal?: boolean;
+	/** Only these kinds. Absent: every retrievable kind. `/workflow ask` passes compacts, reviews, ideas and sources. */
+	kinds?: string[];
+	/**
+	 * Match a record that has any of the question's words, best match first, instead of all of them.
+	 * Problem: "what happened with the zebra layout?" needs a record holding "what", "happened", "with", "the", "zebra"
+	 * and "layout" at once, which no record has. Solution: for a question, any significant word (3 characters or more)
+	 * may match and bm25 puts the records with the most of them first.
+	 */
+	anyWord?: boolean;
 }
 
 export interface SearchHit {
@@ -373,23 +382,33 @@ export function searchDocuments(store: OperationalStore, query: string, scope: S
 	if (!store.fts.available) throw new Error(store.fts.diagnostic ?? "SQLite FTS5 unavailable");
 	if (!scope.project || scope.trusts.length === 0 || !Number.isFinite(limit)) return [];
 	// Treat user input as text, not FTS syntax. An unmatched quote is invalid rather than a database error.
-	if (query.length > 512 || (query.match(/"/g)?.length ?? 0) % 2 !== 0) return [];
-	const parts = query.match(/"[^"]*"|[\p{L}\p{N}_]+/gu);
-	if (!parts || parts.length > 32) return [];
+	// A question for `ask` is free text: quotes mean nothing there, and a long one keeps its first words.
+	const text = scope.anyWord ? query.replace(/"/g, " ").slice(0, 512) : query;
+	if (text.length > 512 || (text.match(/"/g)?.length ?? 0) % 2 !== 0) return [];
+	const parts = text.match(/"[^"]*"|[\p{L}\p{N}_]+/gu);
+	if (!parts || (!scope.anyWord && parts.length > 32)) return [];
 	const terms = parts.map((part) => part.match(/[\p{L}\p{N}_]+/gu)?.join(" ") ?? "");
 	if (terms.some((term) => !term)) return [];
-	const expression = terms.map((term) => `"${term}"`).join(" AND ");
+	const words = scope.anyWord
+		? [...new Set(terms.flatMap((term) => term.split(" ")).filter((w) => w.length >= 3))].slice(0, 16)
+		: [];
+	if (scope.anyWord && words.length === 0) return [];
+	const expression = scope.anyWord
+		? words.map((word) => `"${word}"`).join(" OR ")
+		: terms.map((term) => `"${term}"`).join(" AND ");
 	const count = Math.max(0, Math.min(6, Math.floor(limit)));
 	if (count === 0) return [];
+	if (scope.kinds && scope.kinds.length === 0) return [];
 	const placeholders = scope.trusts.map(() => "?").join(",");
+	const kindFilter = scope.kinds ? `AND d.kind IN (${scope.kinds.map(() => "?").join(",")})` : "";
 	const rows = store.db
 		.prepare(`SELECT d.id,d.kind,d.project,d.status,d.trust,d.date,d.provenance,
 		snippet(search_fts, -1, '', '', ' … ', 32) AS extract
 		FROM search_fts JOIN search_documents d ON d.id = search_fts.id
 		WHERE search_fts MATCH ? AND d.status = 'active' AND d.kind != 'transcript'
-		AND (d.project = ? OR (? = 1 AND d.project = 'global')) AND d.trust IN (${placeholders})
+		AND (d.project = ? OR (? = 1 AND d.project = 'global')) AND d.trust IN (${placeholders}) ${kindFilter}
 		ORDER BY bm25(search_fts, 0, 3, 2, 1), d.id LIMIT ?`)
-		.all(expression, scope.project, scope.includeGlobal ? 1 : 0, ...scope.trusts, count);
+		.all(expression, scope.project, scope.includeGlobal ? 1 : 0, ...scope.trusts, ...(scope.kinds ?? []), count);
 	let remaining = 6000;
 	return rows.map((row) => {
 		const extract = String(row.extract).slice(0, Math.min(1000, remaining));

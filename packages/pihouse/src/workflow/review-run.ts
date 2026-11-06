@@ -130,6 +130,22 @@ function liveFingerprint(options: ReviewOptions, runId: string): string | undefi
 	return typeof row?.source_hash === "string" ? row.source_hash : undefined;
 }
 
+/**
+ * The source cursors the run was captured with, from its package.
+ * Problem: a conversation deleted after its review leaves the next capture of the same run without a cursor, so the
+ * capture is deferred for good ("cleaned revision retains no verifiable source cursor"). Example: the planner session
+ * keeps working after `/workflow review`; its new messages could never be captured. Solution: the receipt keeps the
+ * cursors of the package that was reviewed, as the digest flow's receipt did.
+ */
+function cursorsOf(root: string, runId: string): unknown {
+	try {
+		const value: unknown = JSON.parse(readFileSync(vaultPaths(root).runJson(runId), "utf8"));
+		return typeof value === "object" && value !== null ? Reflect.get(value, "cursor") : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
 function removeIfExists(path: string): void {
 	try {
 		unlinkSync(path);
@@ -323,6 +339,7 @@ export async function runReview(options: ReviewOptions): Promise<ReviewResult> {
 					revisionId: revision.revisionId,
 					currentFingerprint: liveFingerprint(options, revision.runId) ?? "",
 					quiescent: !options.isActive?.(revision.runId),
+					cursors: cursorsOf(root, revision.runId),
 				}),
 			);
 		}
