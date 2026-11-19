@@ -2,6 +2,7 @@
 // pihouse: the pihouse agent. `pih setup --backend cmux|tmux` is what install.sh runs once the code is in place.
 import { homedir } from "node:os";
 import { shellQuote } from "agent-link-core";
+import { fleetMain } from "./fleet.ts";
 import { runInTerminal, runPihouse } from "./launcher.ts";
 import { PIHOUSE_VERSION, pihousePaths } from "./paths.ts";
 import { runRoute } from "./route.ts";
@@ -11,6 +12,7 @@ export const KEEPER_RETIRED =
 	"pih keeper was retired. Use /workflow proposals, /workflow approve <id> and /workflow reject <id> [reason] in a pihouse session; /workflow review looks back at saved runs.";
 
 export const USAGE = `usage: pih [pi options] [message]       start pihouse (all pi options work)
+       pih fleet serve|pair|open <config.json>  serve the private chat UI, issue a code or open it on this Mac
        pih --tmux-session <name>        start or reattach to a named pihouse session on this host
        pih --remote <[user@]host> <name> [project-dir]
                                         start or reattach on an SSH host (relative paths use its home)
@@ -43,6 +45,7 @@ export async function main(argv: readonly string[], env: NodeJS.ProcessEnv = pro
 		out(USAGE);
 		return 0;
 	}
+	if (cmd === "fleet") return fleetMain(rest);
 	if (cmd === "--remote") {
 		const [host, name, project = "."] = rest;
 		if (

@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="dark">
+  <meta name="referrer" content="no-referrer">
+  <title>Fleet chat · pi-house</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <div id="shell">
+    <div id="sidebar-slot">
+      <aside id="sidebar" aria-label="Chat navigation">
+        <div class="identity">
+          <svg class="logo" viewBox="0 0 32 32" fill="none" aria-hidden="true"><path d="m4 15 12-10 12 10M9 18h14m-11 0v8m7-8v6q0 2 3 2"/></svg>
+          <span>pi-house</span>
+          <button id="close-nav" class="icon-button" type="button" aria-label="Close chats">×</button>
+        </div>
+        <button id="new-chat" type="button"><span aria-hidden="true">+</span>New chat</button>
+        <h2 class="section-label">Recent chats</h2>
+        <nav id="recents" aria-label="Recent chats"></nav>
+        <div class="sidebar-foot"><span class="host-icon" aria-hidden="true"></span><span id="sidebar-host">Connecting…</span></div>
+      </aside>
+    </div>
+    <main>
+      <header class="topbar">
+        <button id="open-nav" class="icon-button" type="button" aria-label="Show recent chats" aria-haspopup="dialog"><span class="menu-icon" aria-hidden="true"></span></button>
+        <span class="page-name">Fleet chat</span>
+        <button id="open-artifacts" type="button" aria-haspopup="dialog" hidden>Artifacts <span id="artifact-count"></span></button>
+        <span id="header-host">Connecting…</span>
+      </header>
+      <p id="connection" class="notice" role="status" hidden></p>
+      <!-- biome-ignore lint/a11y/noNoninteractiveTabindex: Keyboard users can focus and scroll the transcript without moving the composer. -->
+      <section id="scroll-area" tabindex="0" aria-label="Conversation">
+        <div id="welcome">
+          <span class="terminal-mark" aria-hidden="true">›<i></i></span>
+          <h1>Start a conversation.</h1>
+          <p>Describe what you want to work on.</p>
+        </div>
+        <section id="conversation" hidden aria-labelledby="chat-title">
+          <div class="conversation-head"><h1 id="chat-title">Conversation</h1><div class="chat-meta"><span id="chat-state" role="status"></span><span id="updated-time"></span></div></div>
+          <div id="messages"></div>
+          <section id="live-activity" hidden aria-labelledby="live-title"><h2 id="live-title">Current activity</h2><ul id="live-list"></ul></section>
+          <details id="activity" hidden><summary>Execution history <span id="event-count"></span></summary><ol id="event-list"></ol></details>
+        </section>
+      </section>
+      <div class="composer-wrap">
+        <div class="composer-inner">
+          <p id="error" class="notice" role="alert" hidden></p>
+          <form id="composer">
+            <label class="visually-hidden" for="message">Message</label>
+            <textarea id="message" rows="2" maxlength="16000" placeholder="Write a message…"></textarea>
+            <div class="composer-tools">
+              <details id="routing"><summary>Options</summary><div class="routing-panel">
+                <label class="select-field"><span>Host</span><select id="host" disabled><option>Connecting…</option></select></label>
+              <label class="select-field"><span>Project</span><select id="project" disabled></select></label>
+              <label class="select-field"><span>Agent</span><select id="agent" disabled></select></label>
+              </div></details>
+              <button id="send" type="submit" aria-label="Send message" title="Send message" disabled><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 19V5m-6 6 6-6 6 6"/></svg></button>
+            </div>
+          </form>
+          <p class="composer-foot"><span id="composer-status" role="status">Connecting…</span><span class="key-tip">Enter to send <span aria-hidden="true">·</span> Shift + Enter for a new line</span></p>
+        </div>
+      </div>
+    </main>
+  </div>
+  <dialog id="nav-dialog" aria-label="Chats"></dialog>
+  <dialog id="artifacts-dialog" aria-labelledby="artifacts-title">
+    <div class="drawer-head"><h2 id="artifacts-title">Artifacts</h2><form method="dialog"><button class="icon-button" id="close-artifacts" type="submit" aria-label="Close artifacts">×</button></form></div>
+    <fieldset id="artifact-list" aria-label="Artifact files"></fieldset>
+    <section id="artifact-preview" aria-labelledby="preview-title" hidden>
+      <div class="preview-head"><h3 id="preview-title">Preview</h3><a id="download-artifact" href="/" download>Download</a></div>
+      <div id="preview-body" aria-live="polite"></div>
+    </section>
+  </dialog>
+</body>
+</html>

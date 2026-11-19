@@ -136,6 +136,8 @@ The first call starts pi-house in the current project. To leave the task running
 
 Give each project on a host its own session name. Each Mac runs its own hub and uses its own checkouts and logins. SSH carries terminal input and output. The host must stay awake to keep working, and a reboot ends its tmux sessions.
 
+For a browser chat with named agents, persistent turns and artifact previews, see [Fleet chat on macOS](docs/fleet.md).
+
 ## How it is built
 
 All diagrams use the same legend: blue = code/policy, purple = LLM processing, green = stored data, yellow = human action.
