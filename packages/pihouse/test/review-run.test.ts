@@ -558,3 +558,33 @@ test("smoke: capture, compact, review, approve a file proposal; transcripts go, 
 		f.close();
 	}
 });
+
+test("review turns a short executor edit into a versioned proposal for the full installed skill", async (t) => {
+	const f = fixture();
+	t.after(f.close);
+	const skill = readFileSync(new URL("../../../skills/build/executor/SKILL.md", import.meta.url), "utf8");
+	assert.ok(skill.length > 12_000, "the installed skill does not fit in a review proposal twice");
+	f.capture("executor-run");
+	const anchor = "Run the validation yourself in its checkout";
+	const replacement = "Independently run the exact validation in the worker checkout";
+	const { worker, calls } = fakeWorker(f, {
+		proposals: [
+			{
+				...proposalFor(["executor-run.r1"]),
+				kind: "edit-skill",
+				target: "skill:executor",
+				replace: true,
+				before: anchor,
+				after: replacement,
+			},
+		],
+	});
+	const result = await runReview({ ...options(f, worker), executorSkill: () => skill });
+	assert.equal(result.status, "reviewed", JSON.stringify(result));
+	assert.match(calls.review[0].contract ?? "", /executor-skill\.md/);
+	const [listed] = listProposals(f.store.db);
+	assert.ok(listed);
+	const proposal = getProposal(f.store.db, listed.id);
+	assert.equal(proposal.before, skill);
+	assert.equal(proposal.after, skill.replace(anchor, replacement));
+});

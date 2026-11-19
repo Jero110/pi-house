@@ -64,7 +64,7 @@ export interface ReviewIdentity {
 }
 
 /** The output contract handed to the worker verbatim. */
-export function reviewContractText(identity: ReviewIdentity): string {
+export function reviewContractText(identity: ReviewIdentity, executorSnapshot?: string): string {
 	return [
 		`Write exactly one JSON object as the whole output: no Markdown fence, no text around it, at most ${REVIEW_CHILD_MAX_CHARS} characters.`,
 		JSON.stringify(
@@ -94,6 +94,12 @@ export function reviewContractText(identity: ReviewIdentity): string {
 			2,
 		),
 		"Copy reviewId, covered and previousReview exactly. Every section is a non-empty string and has no ``` in it.",
+		...(executorSnapshot
+			? [
+					`For a supported executor change, read the skill snapshot at ${executorSnapshot}. Use kind "edit-skill", target "skill:executor" and add "replace": true.`,
+					"For that proposal only, before is one exact, unique excerpt from the snapshot and after is its replacement. Keep both short.",
+				]
+			: []),
 		`The rendered review, sections and proposals together, must not exceed ${REVIEW_MAX_CHARS} characters; shorter is better.`,
 	].join("\n");
 }

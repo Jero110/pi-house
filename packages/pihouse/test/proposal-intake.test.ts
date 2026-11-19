@@ -226,3 +226,23 @@ test("intake accepts a file target and refuses unsafe ones with a reason and no 
 		rmSync(dir, { recursive: true, force: true });
 	}
 });
+
+test("executor fragments must identify one literal occurrence in the supplied snapshot", (t) => {
+	const dir = mkdtempSync(join(tmpdir(), "proposal-executor-fragment-"));
+	const store = openOperationalStore(join(dir, "db.sqlite"), { fts: false });
+	t.after(() => {
+		store.close();
+		rmSync(dir, { recursive: true, force: true });
+	});
+	const change = { ...entry([]), target: "skill:executor", kind: "edit-skill", replace: true };
+	for (const [id, executorSkill] of [
+		["missing", undefined],
+		["ambiguous", "old and old"],
+		["stale", "baseline"],
+	] as const) {
+		const failed = ingestReview(store.db, id, review([change]), { executorSkill });
+		assert.equal(failed.status, "failed");
+		assert.match(failed.status === "failed" ? failed.reason : "", /one exact match/);
+	}
+	assert.deepEqual(listProposals(store.db), []);
+});

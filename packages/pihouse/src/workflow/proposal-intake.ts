@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
+import { EXECUTOR_TARGET } from "./executor-evaluation.ts";
 import { checkFileTarget } from "./proposal-target.ts";
 import { createProposal, mergeEvidence, type Proposal } from "./proposals.ts";
 
@@ -18,6 +19,7 @@ export interface IntakeEntry {
 	uncertainty: string;
 	validation: string;
 	reopen?: string;
+	replace?: true;
 }
 export type IntakeResult =
 	| { status: "ingested"; created: number; merged: number; suppressed: number }
@@ -65,6 +67,11 @@ function parseReview(text: string): IntakeEntry[] {
 		)
 			throw new Error("invalid reopen explanation");
 		if (!value.target || value.before === value.after) throw new Error("empty target or unchanged proposal");
+		if (
+			value.replace !== undefined &&
+			(value.replace !== true || value.target !== EXECUTOR_TARGET || value.kind !== "edit-skill")
+		)
+			throw new Error("replacement fragments require an executor skill edit");
 		return value as unknown as IntakeEntry;
 	});
 }
@@ -75,7 +82,23 @@ function changeHash(before: string, after: string): string {
 		.digest("hex");
 }
 
-function resolveEntry(db: DatabaseSync, entry: IntakeEntry, home?: string) {
+function resolveEntry(
+	db: DatabaseSync,
+	entry: IntakeEntry,
+	{ home, executorSkill }: { home?: string; executorSkill?: string },
+) {
+	if (entry.replace) {
+		// The full executor skill exceeds the review's output budget. Resolve one literal edit against the bytes
+		// the reviewer saw, so evaluation and approval still use the same complete before and after.
+		const start = executorSkill?.indexOf(entry.before) ?? -1;
+		if (!executorSkill || !entry.before.trim() || start < 0 || executorSkill.includes(entry.before, start + 1))
+			throw new Error("executor replacement needs one exact match in the supplied skill snapshot");
+		entry = {
+			...entry,
+			before: executorSkill,
+			after: executorSkill.slice(0, start) + entry.after + executorSkill.slice(start + entry.before.length),
+		};
+	}
 	// Problem: a hostile or mistaken path would sit in the queue until someone approves it. Example: `file:~/.ssh/config`
 	// or a relative path. Solution: refuse the whole review at intake with the reason; nothing is written.
 	if (entry.target.startsWith("file:")) {
@@ -110,7 +133,7 @@ export function ingestReview(
 	db: DatabaseSync,
 	reviewId: string,
 	review: string,
-	options: { home?: string } = {},
+	options: { home?: string; executorSkill?: string } = {},
 ): IntakeResult {
 	let entries: IntakeEntry[];
 	try {
@@ -124,7 +147,7 @@ export function ingestReview(
 	if (prior) return JSON.parse(String(prior.payload)) as IntakeResult;
 	let resolved: ReturnType<typeof resolveEntry>[];
 	try {
-		resolved = entries.map((entry) => resolveEntry(db, entry, options.home));
+		resolved = entries.map((entry) => resolveEntry(db, entry, options));
 	} catch (error) {
 		return fail(db, reviewId, String(error));
 	}

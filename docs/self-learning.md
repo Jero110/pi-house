@@ -18,9 +18,18 @@ This is the operational guide to the implemented workflow. The contract for the 
 | `/workflow review [--yes]` | Compacts and reviews the saved runs, writes the review, ingests proposals and deletes the covered full conversations. Uses model quota. With a dialog it asks you to confirm the count; without one it prints the count and starts nothing until you run it again with `--yes`. |
 | `/workflow ask <question>` | Answers from compacts, reviews, ideas and consulted sources. When saved runs of the current project have no compact, the model asks once whether to compact them. Never deletes anything and never marks a run reviewed. |
 | `/workflow proposals [id]` | Without an id, lists proposals. With one, shows it in full with the absolute path and a diff. |
+| `/workflow evaluate <id> <version>` | Runs the executor proposal pilot with the current authenticated model. Shows the result beside the proposal diff. |
 | `/workflow approve <id> [version]` / `reject <id> [reason]` | Approves and applies the version shown by `proposals`, passed as its version prefix (at least 4 hex characters). Without a version, approves only a proposal never revised since creation and names that version; a revised proposal refuses. Re-running approve on an approved proposal needs no version. Records rejection. |
 
 `/workflow report`, `save`, `digest` and `self-learning` are retired, as are `/keeper` and `pih keeper`: each prints replacement guidance, starts nothing and has no alias. Reviewing and compacting need a pihouse session with agent-link available; without the hub they say so and start nothing. They run on `claude-bridge/claude-sonnet-5-5`; `PIHOUSE_LEARNING_MODEL` overrides it.
+
+## Executor proposal pilot
+
+The review worker can propose a short executor edit against a read-only snapshot of the installed skill. Intake expands the edit into two full versions for the proposal and verifies that the quoted text occurs exactly once. This keeps executor edits within the review's output budget.
+
+Open an executor skill proposal with `/workflow proposals <id>`, then run the evaluation command shown beside its diff. The pilot compares the two skill versions on four worker validation fixtures. Each version gets a fresh model context for each fixture and the same two simulated tools. The fixtures cover successful checks and checks that fail despite a worker's PASS. The evaluator checks whether the executor ran the requested validation and whether it recorded the correct result after seeing the exit code.
+
+The evaluation consumes model quota for eight simulated rollouts and requires a fixed model selected in the current session. The completed result records per-fixture checks and reported token usage in a receipt tied to the exact proposal version. Reopening a completed evaluation reads that receipt. Once an evaluation starts, approval waits for a completed report for that version. An interrupted comparison can be retried. Approval stays manual and uses the displayed version. A known regression blocks approval, and revisions to a previously evaluated proposal need fresh evidence. The pilot is opt-in for proposals with no prior evaluation.
 
 ## Vault layout
 
