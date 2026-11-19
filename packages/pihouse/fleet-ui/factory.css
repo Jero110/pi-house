@@ -30,6 +30,9 @@
 	background: #080b09ac;
 }
 .factory-head {
+	position: sticky;
+	top: 0;
+	z-index: 1;
 	display: flex;
 	align-items: center;
 	justify-content: space-between;
@@ -191,11 +194,15 @@
 	gap: 7px;
 }
 #factory-validation,
-#factory-production,
 #factory-history {
 	margin-top: 20px;
 	padding-top: 14px;
 	border-top: 1px solid var(--line);
+}
+#factory-production {
+	margin: 0 0 18px;
+	padding-bottom: 16px;
+	border-bottom: 1px solid var(--line);
 }
 #factory-validation h4,
 #factory-production h4,

@@ -14,6 +14,10 @@
 	<div class="factory-work">
 		<p id="factory-status" role="status" aria-live="polite"></p>
 		<h3 id="factory-heading">New workflow</h3>
+		<form id="factory-production" hidden><h4 id="factory-run-label">Run published workflow</h4>
+			<label for="factory-input">Run input</label><textarea id="factory-input" required maxlength="6000" rows="3"></textarea>
+			<button class="factory-primary" id="factory-run" type="submit">Run workflow</button><span id="factory-output"></span>
+		</form>
 		<form id="factory-editor"><fieldset id="factory-fields"><legend class="visually-hidden">Workflow draft</legend>
 			<label for="factory-name">Name</label><input id="factory-name" required maxlength="100" autocomplete="off">
 			<label for="factory-agent">Agent</label><select id="factory-agent" required></select>
@@ -26,10 +30,7 @@
 			<div class="factory-actions"><button id="factory-evaluate" type="button">Evaluate saved draft</button><button id="factory-publish" type="button">Publish</button><button id="factory-reload" type="button" hidden>Reload saved draft</button></div>
 			<div id="factory-results"></div>
 		</section>
-		<form id="factory-production" hidden><h4 id="factory-run-label">Run published workflow</h4>
-			<label for="factory-input">Run input</label><textarea id="factory-input" required maxlength="6000" rows="3"></textarea>
-			<button class="factory-primary" id="factory-run" type="submit">Run workflow</button><span id="factory-output"></span>
-		</form>
+
 		<details id="factory-history" hidden><summary>Version and run history</summary><div id="factory-records"></div></details>
 	</div>
 </div>`;
@@ -252,11 +253,13 @@
 			try {
 				const next = await getDetail();
 				if (version !== page || !dialog.open || pendingAction) return;
-				const oldHead = detail.head;
-				detail = next;
-				if (next.head !== oldHead && !dirty) editor();
-				records();
-				syncButtons();
+				if (JSON.stringify(next) !== JSON.stringify(detail)) {
+					const oldHead = detail.head;
+					detail = next;
+					if (next.head !== oldHead && !dirty) editor();
+					records();
+					syncButtons();
+				}
 			} catch {
 				if (version === page) inform("Could not refresh the evaluation. Retrying.");
 			}
