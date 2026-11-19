@@ -4,6 +4,7 @@ import { createServer, request } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import type { FleetJob } from "../src/fleet-jobs.ts";
 import { fleetHandler, issuePairCode } from "../src/fleet-web.ts";
 
 test("only the paired browser on the configured HTTPS tailnet identity can reach chat routes", async (t) => {
@@ -11,12 +12,33 @@ test("only the paired browser on the configured HTTPS tailnet identity can reach
 	const origin = "https://mini.tail-example.ts.net";
 	const login = "owner@example.org";
 	const config = { host: "Mini", origin, login, stateDir, projects: { demo: "/unused" }, peers: [] };
+	const archived: FleetJob = {
+		id: "1a166b70-31b3-4780-9a21-bdfc24d708ce",
+		project: "demo",
+		agent: "codex",
+		status: "completed",
+		title: "Canary",
+		updatedAt: 1,
+		messages: [],
+	};
+	const unsupported = (): never => {
+		throw Error("unexpected request");
+	};
+	const jobs = {
+		list: () => [],
+		get: () => undefined,
+		artifact: unsupported,
+		create: unsupported,
+		reply: unsupported,
+		memorySource: () => ({ list: () => [archived], get: (id: string) => (id === archived.id ? archived : undefined) }),
+		memoryProfile: () => "balanced" as const,
+		memoryFacts: () => [],
+		memoryRelations: () => [],
+	};
 	const server = createServer(
 		fleetHandler(
 			config,
-			() => {
-				throw new Error("No jobs needed in this test");
-			},
+			() => jobs,
 			async (req) => req.headers["x-test-peer"] === login,
 		),
 	);
@@ -51,6 +73,7 @@ test("only the paired browser on the configured HTTPS tailnet identity can reach
 	assert.equal((await send("/", { "x-test-peer": "tagged" })).status, 403);
 	assert.equal((await send("/", { host: "elsewhere.invalid" })).status, 403);
 	assert.equal((await send("/api/config")).status, 401);
+	assert.equal((await send("/api/graph?project=demo")).status, 401);
 	const pair = new URLSearchParams({ code: issuePairCode(stateDir) }).toString();
 	const form = { origin, "content-type": "application/x-www-form-urlencoded" };
 	assert.equal((await send("/pair", { ...form, origin: "https://elsewhere.invalid" }, pair)).status, 403);
@@ -62,6 +85,13 @@ test("only the paired browser on the configured HTTPS tailnet identity can reach
 	assert.equal((await send("/pair", form, pair)).status, 403);
 	const cookie = paired.cookie.split(";")[0];
 	assert.equal((await send("/api/config", { cookie })).status, 200);
+	assert.equal((await send("/api/memory?project=another&q=canary", { cookie })).status, 404);
+	assert.equal(
+		JSON.parse((await send("/api/memory?project=demo&q=canary", { cookie })).body).hits[0].chatId,
+		archived.id,
+	);
+	assert.equal(JSON.parse((await send("/api/graph?project=demo", { cookie })).body).threads[0].id, archived.id);
+	assert.equal(JSON.parse((await send(`/api/chats/${archived.id}`, { cookie })).body).archived, true);
 	assert.equal((await send("/api/config", { cookie, "x-test-peer": "else@example.org" })).status, 403);
 	assert.equal(
 		(

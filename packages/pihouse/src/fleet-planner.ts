@@ -1,10 +1,12 @@
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import { shellQuote } from "agent-link-core";
 
 export interface FleetPlanner {
+	handle?: string;
 	label: string;
 	host: string;
 	identityFile: string;
@@ -12,8 +14,14 @@ export interface FleetPlanner {
 	node: string;
 	entry: string;
 }
-export function validatePlanner(v: FleetPlanner): boolean {
-	if (!v || typeof v.label !== "string" || !v.label.trim() || typeof v.host !== "string") return false;
+const handle = /^[\p{L}\p{N}][\p{L}\p{N}_-]*$/u;
+
+export function validatePlanner(value: unknown): value is FleetPlanner {
+	if (!value || typeof value !== "object") return false;
+	const v = value as Partial<FleetPlanner>;
+	if (typeof v.label !== "string" || !v.label.trim() || /[\r\n\t\0]/.test(v.label) || typeof v.host !== "string")
+		return false;
+	if (v.handle !== undefined && (typeof v.handle !== "string" || !handle.test(v.handle))) return false;
 	const parts = v.host.split("@");
 	if (parts.length !== 2 || !/^[A-Za-z0-9_][A-Za-z0-9._-]*$/.test(parts[0])) return false;
 	const dns = /^[A-Za-z0-9][A-Za-z0-9.-]*\.ts\.net$/.test(parts[1]);
@@ -31,6 +39,73 @@ export function validatePlanner(v: FleetPlanner): boolean {
 			(p) => typeof p === "string" && isAbsolute(p) && !/[\r\n\0]/.test(p),
 		)
 	);
+}
+
+function plannerHandle(peer: FleetPlanner) {
+	return (
+		peer.handle ??
+		peer.label.match(/\bM[1-9]\d*\b/i)?.[0] ??
+		peer.label
+			.trim()
+			.replace(/[^\p{L}\p{N}]+/gu, "-")
+			.replace(/^-|-$/g, "")
+	);
+}
+
+export function validatePlanners(value: unknown): value is FleetPlanner[] {
+	if (!Array.isArray(value)) return false;
+	const handles = new Set<string>();
+	const hosts = new Set<string>();
+	const labels = new Set<string>();
+	for (const peer of value) {
+		if (!validatePlanner(peer)) return false;
+		const name = plannerHandle(peer).normalize("NFC").toLowerCase();
+		const host = peer.host.split("@")[1].toLowerCase();
+		const label = peer.label.trim().normalize("NFC").toLowerCase();
+		if (!name || handles.has(name) || hosts.has(host) || labels.has(label)) return false;
+		handles.add(name);
+		hosts.add(host);
+		labels.add(label);
+	}
+	return true;
+}
+
+export class FleetPlannerAddressError extends Error {
+	override name = "FleetPlannerAddressError";
+}
+
+export function fleetPlannerAddress(input: string): string | undefined {
+	return /^\s*@([\p{L}\p{N}][\p{L}\p{N}_-]*)(?=$|[\s,.:;!?])/u.exec(input)?.[1];
+}
+
+export function selectFleetPlanner(
+	jobId: string,
+	peers: readonly FleetPlanner[],
+	input = "",
+): FleetPlanner | undefined {
+	const address = fleetPlannerAddress(input);
+	if (address) {
+		const named = peers.find(
+			(peer) => plannerHandle(peer).normalize("NFC").toLowerCase() === address.normalize("NFC").toLowerCase(),
+		);
+		if (named) return named;
+		const available = peers.map((peer) => `@${plannerHandle(peer)}`).join(", ");
+		throw new FleetPlannerAddressError(
+			`Unknown planner @${address}. ${available ? `Configured planners: ${available}.` : "No planning Mac is configured."}`,
+		);
+	}
+	// Rendezvous hashing keeps the assignment stable across config reordering. Adding a Mac
+	// only changes the threads on which its score beats the previous winner.
+	let best: FleetPlanner | undefined;
+	let high = "";
+	for (const peer of peers) {
+		const score = createHash("sha256").update(jobId).update("\0").update(peer.host.toLowerCase()).digest("hex");
+		if (score > high) {
+			high = score;
+			best = peer;
+		}
+	}
+	return best;
 }
 
 async function transfer(

@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { createFleetJobs } from "./fleet-jobs.ts";
+import { startSlackSocket } from "./fleet-slack-socket.ts";
 import { serveFleet } from "./fleet-tailnet.ts";
 import { issuePairCode, readFleetConfig } from "./fleet-web.ts";
 
@@ -22,14 +23,32 @@ export async function fleetMain(args: readonly string[]): Promise<number> {
 		}
 		const jobs = createFleetJobs({
 			stateDir: c.stateDir,
+			origin: c.origin,
+			memoryRepo: c.memoryRepo,
 			projects: c.projects,
 			host: c.host,
 			planner: c.planner,
+			planners: c.planners,
 			turnTimeoutMs: c.turnTimeoutMs,
 		});
+		const stop = new AbortController();
+		const slack = c.slack
+			? startSlackSocket(
+					c.slack,
+					{ stateDir: c.stateDir, origin: c.origin, host: c.host, signal: stop.signal },
+					jobs,
+				).catch((error: unknown) => {
+					if (!stop.signal.aborted)
+						process.stderr.write(
+							`Slack integration unavailable: ${error instanceof Error ? error.message : "startup failed"}\n`,
+						);
+				})
+			: undefined;
 		try {
 			await serveFleet(c, jobs);
 		} finally {
+			stop.abort();
+			await (await slack)?.close();
 			jobs.close();
 		}
 		return 0;

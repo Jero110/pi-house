@@ -1,19 +1,45 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	lstatSync,
+	mkdirSync,
+	readFileSync,
+	realpathSync,
+	renameSync,
+	unlinkSync,
+	writeFileSync,
+} from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { isAbsolute, join, resolve } from "node:path";
 import { type createFleetJobs, FleetJobError } from "./fleet-jobs.ts";
+import { fleetProjectGraph, searchFleetMemory } from "./fleet-memory.ts";
+import { type FleetPlanner, validatePlanner, validatePlanners } from "./fleet-planner.ts";
+import { matchingFacts, matchingRelations } from "./fleet-recall.ts";
+import { type SlackConfig, validateSlackConfig } from "./fleet-slack-socket.ts";
 
-import { type FleetPlanner, validatePlanner } from "./fleet-planner.ts";
-
-type Jobs = ReturnType<typeof createFleetJobs>;
+type Jobs = Pick<
+	ReturnType<typeof createFleetJobs>,
+	| "list"
+	| "get"
+	| "artifact"
+	| "create"
+	| "reply"
+	| "memoryProfile"
+	| "memoryFacts"
+	| "memoryRelations"
+	| "memorySource"
+>;
 export interface FleetConfig {
 	origin: string;
 	login: string;
 	host: string;
 	stateDir: string;
 	turnTimeoutMs?: number;
+	memoryRepo?: string;
+	coordinatorOrigin?: string;
+	slack?: SlackConfig;
 	planner?: FleetPlanner;
+	planners?: FleetPlanner[];
 	projects: Record<string, string>;
 	peers: { label: string; url: string }[];
 }
@@ -45,12 +71,32 @@ export function readFleetConfig(path: string): FleetConfig {
 		!Object.keys(c.projects).length ||
 		!Object.entries(c.projects).every(([k, v]) => /^[\w-]{1,64}$/.test(k) && typeof v === "string" && isAbsolute(v)) ||
 		(c.planner !== undefined && !validatePlanner(c.planner)) ||
+		(c.planners !== undefined && (c.planner !== undefined || !validatePlanners(c.planners))) ||
 		!Array.isArray(c.peers) ||
 		!c.peers.every(
 			(v: { label?: unknown; url?: unknown } | null) => v && typeof v.label === "string" && tailnetOrigin(v.url),
 		)
 	) {
 		throw new Error("Invalid fleet configuration. See docs/fleet.md.");
+	}
+	if (c.memoryRepo !== undefined && (typeof c.memoryRepo !== "string" || !isAbsolute(c.memoryRepo)))
+		throw Error("Invalid memory repository path.");
+	if (
+		c.coordinatorOrigin !== undefined &&
+		(!tailnetOrigin(c.coordinatorOrigin) || c.coordinatorOrigin === c.origin || c.slack)
+	)
+		throw Error("Use one coordinator for Slack and memory.");
+	if (c.slack !== undefined) {
+		c.slack = validateSlackConfig(c.slack);
+		if (!Object.hasOwn(c.projects, c.slack.project)) throw Error("Slack project is not configured.");
+		const tokenPath = existsSync(c.slack.tokensFile) ? realpathSync(c.slack.tokensFile) : c.slack.tokensFile;
+		if (
+			Object.values(c.projects).some((p) => {
+				const root = realpathSync(String(p));
+				return tokenPath === root || tokenPath.startsWith(`${root}/`);
+			})
+		)
+			throw Error("Slack credentials must reside outside project checkouts.");
 	}
 	ensurePrivateDir(c.stateDir);
 	return c;
@@ -154,6 +200,12 @@ export function fleetHandler(c: FleetConfig, jobs: () => Jobs, authorized: (req:
 		const method = req.method;
 		const path = req.url ?? "";
 		const get = method === "GET";
+		if (get && path === "/" && c.coordinatorOrigin) {
+			res.writeHead(307, { Location: `${c.coordinatorOrigin}/` }).end();
+			return;
+		}
+		if (c.coordinatorOrigin && path.startsWith("/api/") && (!get || /^\/api\/(memory|graph)(?:\?|$)/.test(path)))
+			throw new WebError(409, `Open the coordinator for project memory and new turns: ${c.coordinatorOrigin}`);
 		if (!get && method !== "POST") throw new WebError(405, "Method not allowed");
 		if (!get && (h.origin !== c.origin || (h["sec-fetch-site"] && h["sec-fetch-site"] !== "same-origin")))
 			throw new WebError(403, "Origin denied");
@@ -186,6 +238,24 @@ export function fleetHandler(c: FleetConfig, jobs: () => Jobs, authorized: (req:
 		const json = (status: number, value: unknown) => send(res, status, "application/json", JSON.stringify(value));
 		if (get && path === "/api/config")
 			return json(200, { host: c.host, projects: Object.keys(c.projects), agents, peers: c.peers });
+		const requested = new URL(path, "http://localhost");
+		if (get && (requested.pathname === "/api/memory" || requested.pathname === "/api/graph")) {
+			const project = requested.searchParams.get("project") ?? "",
+				query = requested.searchParams.get("q") ?? "";
+			if (!Object.hasOwn(c.projects, project)) throw new WebError(404, "Unknown project");
+			if (query.length > 512) throw new WebError(400, "Memory query is too long");
+			const j = jobs(),
+				source = j.memorySource(project),
+				facts = j.memoryFacts(project),
+				relations = j.memoryRelations(project);
+			if (requested.pathname === "/api/graph")
+				return json(200, { ...fleetProjectGraph(source, project, c.host), facts, relations });
+			return json(200, {
+				...searchFleetMemory(source, project, query, j.memoryProfile(project)),
+				facts: matchingFacts(facts, query),
+				relations: matchingRelations(relations, query),
+			});
+		}
 		if (get && path === "/api/chats") return json(200, jobs().list());
 		const attachment = path.match(/^\/api\/chats\/([a-f0-9-]{36})\/artifacts\/([a-f0-9-]{36})(\?preview=1)?$/);
 		if (get && attachment) {
@@ -211,7 +281,13 @@ export function fleetHandler(c: FleetConfig, jobs: () => Jobs, authorized: (req:
 		const match = path.match(/^\/api\/chats\/([a-f0-9-]{36})(\/messages)?$/);
 		if (get && match && !match[2]) {
 			const chat = jobs().get(match[1]);
-			if (!chat) throw new WebError(404, "Chat not found");
+			if (!chat) {
+				for (const key of Object.keys(c.projects)) {
+					const archived = jobs().memorySource(key).get(match[1]);
+					if (archived) return json(200, { ...archived, archived: true });
+				}
+				throw new WebError(404, "Chat not found");
+			}
 			return json(200, chat);
 		}
 		if (!get && (path === "/api/chats" || match?.[2])) {

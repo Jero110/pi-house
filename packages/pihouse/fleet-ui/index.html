@@ -19,6 +19,7 @@
           <button id="close-nav" class="icon-button" type="button" aria-label="Close chats">×</button>
         </div>
         <button id="new-chat" type="button"><span aria-hidden="true">+</span>New chat</button>
+        <button id="open-memory" type="button" aria-haspopup="dialog" disabled>Project memory</button>
         <h2 class="section-label">Recent chats</h2>
         <nav id="recents" aria-label="Recent chats"></nav>
         <div class="sidebar-foot"><span class="host-icon" aria-hidden="true"></span><span id="sidebar-host">Connecting…</span></div>
@@ -49,6 +50,7 @@
       <div class="composer-wrap">
         <div class="composer-inner">
           <p id="error" class="notice" role="alert" hidden></p>
+          <div id="archive-note" hidden><span>Archived conversation · Read only</span><button id="new-from-archive" type="button">New chat</button></div>
           <form id="composer">
             <label class="visually-hidden" for="message">Message</label>
             <textarea id="message" rows="2" maxlength="16000" placeholder="Write a message…"></textarea>
@@ -67,6 +69,24 @@
     </main>
   </div>
   <dialog id="nav-dialog" aria-label="Chats"></dialog>
+  <dialog id="memory-dialog" aria-labelledby="memory-title">
+    <div class="drawer-head"><h2 id="memory-title">Project memory</h2><form method="dialog"><button id="close-memory" class="icon-button" type="submit" aria-label="Close project memory">×</button></form></div>
+    <div class="memory-content">
+      <form id="memory-search"><label for="memory-project">Project</label><select id="memory-project"></select>
+        <label class="visually-hidden" for="memory-query">Search project memory</label><input type="search" id="memory-query" placeholder="Search conversations and artifact names" maxlength="512"><button type="submit">Search</button>
+      </form>
+      <details id="memory-controls"><summary>Memory controls</summary>
+        <div class="memory-actions"><label class="visually-hidden" for="memory-command">Command</label>
+          <select id="memory-command"><option value="save">Save a fact</option><option value="link">Link entities</option><option value="feedback">Record search feedback</option><option value="status">Check learning status</option><option value="tune">Evaluate search profiles</option><option value="revert">Revert search profile</option></select>
+          <button id="prepare-command" type="button">Prepare in chat</button></div>
+        <p id="command-hint">Enter a fact as key = value, then send it in the composer.</p>
+        <p id="command-error" role="status" hidden></p>
+      </details>
+      <div class="memory-heading"><h3 id="memory-view-title">Project graph</h3><button id="show-graph" type="button" hidden>Show graph</button></div>
+      <p id="memory-status" role="status"></p>
+      <div id="memory-view"></div>
+    </div>
+  </dialog>
   <dialog id="artifacts-dialog" aria-labelledby="artifacts-title">
     <div class="drawer-head"><h2 id="artifacts-title">Artifacts</h2><form method="dialog"><button class="icon-button" id="close-artifacts" type="submit" aria-label="Close artifacts">×</button></form></div>
     <fieldset id="artifact-list" aria-label="Artifact files"></fieldset>

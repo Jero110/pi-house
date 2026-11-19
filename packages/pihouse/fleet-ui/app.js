@@ -21,6 +21,8 @@ let timer;
 let listFingerprint;
 let messageFingerprint;
 let connectionFailed = false;
+let memoryRequest = 0;
+let sourcePending = true;
 let eventFingerprint;
 let artifactFingerprint;
 let liveFingerprint;
@@ -46,6 +48,7 @@ function drawEvents(events = []) {
 	byId("event-list").replaceChildren(
 		...events.map((event) => {
 			const row = element("li");
+			row.dataset.machine = event.text.split(" · ")[0];
 			const header = element("div", undefined, "event-head");
 			const label = event.type.replaceAll("_", " ").replace(/^./, (c) => c.toUpperCase());
 			header.append(
@@ -104,11 +107,17 @@ async function previewArtifact(file) {
 		button.setAttribute("aria-pressed", String(button.dataset.file === file.id));
 	const path = `/api/chats/${encodeURIComponent(chat.id)}/artifacts/${encodeURIComponent(file.id)}`;
 	const link = byId("download-artifact");
-	link.href = path;
-	link.download = file.name;
+
 	byId("artifact-preview").hidden = false;
 	byId("preview-title").textContent = file.name;
 	const body = byId("preview-body");
+	link.hidden = file.available === false || (chat.archived === true && file.available !== true);
+	if (link.hidden) {
+		body.textContent = "The archive retains this file’s name and size. Its contents are unavailable.";
+		return;
+	}
+	link.href = path;
+	link.download = file.name;
 	const url = `${path}?preview=1`;
 	if (file.type === "image") {
 		const img = element("img");
@@ -205,9 +214,12 @@ function controls() {
 	byId("agent").disabled = !!(lock || selected);
 	byId("host").disabled = sending || !hostOrigins.size;
 	byId("new-chat").disabled = sending;
-	const available = !lock && byId("project").value && byId("agent").value;
+	const archived = chat?.archived === true;
+	byId("archive-note").hidden = !archived;
+	byId("composer").hidden = archived;
+	const available = !archived && !lock && byId("project").value && byId("agent").value;
 	const input = byId("message");
-	input.disabled = sending;
+	input.disabled = sending || archived;
 	byId("send").disabled = !!(!available || busy() || !input.value.trim());
 	let status = "Ready to send";
 	if (!config) status = "Connecting…";
@@ -251,6 +263,8 @@ function applyConfig(value) {
 	const hosts = byId("host");
 	hosts.replaceChildren(new Option(value.host, ""));
 	byId("sidebar-host").textContent = value.host;
+	byId("memory-project").replaceChildren(...value.projects.map((name) => new Option(name, name)));
+	byId("open-memory").disabled = !value.projects.length;
 	byId("header-host").textContent = value.host;
 	for (const peer of value.peers || []) {
 		let url;
@@ -350,6 +364,25 @@ function richParagraph(text, files) {
 	return paragraph;
 }
 
+function memoryParagraph(text) {
+	const p = element("p");
+	for (const [index, line] of text.split("\n").entries()) {
+		if (index) p.append("\n");
+		const local = line.startsWith(`${location.origin}/#chat=`) ? line.slice(location.origin.length) : line;
+		if (local.startsWith("/#chat=")) {
+			const params = new URLSearchParams(local.slice(2));
+			const id = params.get("chat");
+			const artifact = params.get("artifact");
+			if (id && /^[a-zA-Z0-9_-]{1,100}$/.test(id)) {
+				p.append(sourceLink("Open source", id, artifact ? { artifact } : {}));
+				continue;
+			}
+		}
+		p.append(line);
+	}
+	return p;
+}
+
 function messageBlock(message) {
 	const reportedRole = message.kind === "error" ? "error" : message.role;
 	const role = ["user", "assistant", "system", "error"].includes(reportedRole) ? reportedRole : "system";
@@ -369,6 +402,10 @@ function messageBlock(message) {
 	const time = timestamp(message.at);
 	if (time) header.append(time);
 	article.append(header);
+	if (message.kind === "memory") {
+		article.append(memoryParagraph(message.text));
+		return article;
+	}
 	if (role !== "assistant") {
 		article.append(element("p", message.text));
 		return article;
@@ -399,7 +436,7 @@ function drawChat(value) {
 	const title = value.title || "Untitled chat";
 	byId("chat-title").textContent = title;
 	document.title = `${title} · pi-house`;
-	const status = states[value.status] || value.status;
+	const status = [value.archived ? "Archived" : "", states[value.status] || value.status].filter(Boolean).join(" · ");
 	if (byId("chat-state").textContent !== status) byId("chat-state").textContent = status;
 	byId("chat-state").dataset.state = value.status;
 	const time = timestamp(value.updatedAt);
@@ -419,7 +456,139 @@ function drawChat(value) {
 		messageFingerprint = fingerprint;
 		if (atEnd) area.scrollTop = area.scrollHeight;
 	}
+	openSourceContext();
 	controls();
+}
+
+function openSourceContext() {
+	if (!sourcePending || !chat) return;
+	sourcePending = false;
+	const params = new URLSearchParams(location.hash.slice(1));
+	const file = chat.artifacts?.find((entry) => entry.id === params.get("artifact"));
+	if (file) openArtifacts([file]);
+	const machine = params.get("machine");
+	if (machine && !byId("activity").hidden) {
+		byId("activity").open = true;
+		const row = Array.from(byId("event-list").children).find((event) => event.dataset.machine === machine);
+		(row || byId("activity")).scrollIntoView({ block: "center" });
+	}
+}
+
+function sourceLink(label, id, extras = {}) {
+	const link = element("a", label);
+	link.href = `#${new URLSearchParams({ chat: id, ...extras })}`;
+	if (extras.artifact) link.dataset.edge = "artifact";
+	if (extras.machine) link.dataset.edge = "machine";
+	link.addEventListener("click", (event) => {
+		if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+		if (byId("memory-dialog").open) byId("memory-dialog").close();
+		if (location.hash === link.hash) {
+			sourcePending = true;
+			openSourceContext();
+		}
+	});
+	return link;
+}
+
+function drawGraph(data) {
+	const root = element("div", undefined, "graph-root");
+	root.append(element("strong", data.project, "project-node"));
+	const tree = element("div", undefined, "graph-branches");
+	for (const [index, thread] of data.threads.entries()) {
+		const branch = element("details", undefined, "graph-branch");
+		branch.open = index === 0;
+		branch.append(element("summary", thread.title));
+		const edges = element("div", undefined, "graph-edges");
+		edges.append(sourceLink("Open conversation", thread.id));
+		for (const machine of thread.machines) edges.append(sourceLink(machine, thread.id, { machine }));
+		for (const artifact of thread.artifacts)
+			edges.append(sourceLink(artifact.name, thread.id, { artifact: artifact.id }));
+		branch.append(edges);
+		tree.append(branch);
+	}
+	root.append(tree);
+	return root;
+}
+
+function confirmedFacts(facts) {
+	const section = element("section", undefined, "confirmed-facts");
+	section.append(element("h4", "Confirmed project facts"));
+	const list = element("dl");
+	for (const fact of facts) {
+		list.append(element("dt", fact.key));
+		const value = element("dd", fact.value);
+		const citation = sourceLink(`Source · revision ${fact.version}`, fact.chatId);
+		value.append(citation);
+		list.append(value);
+	}
+	section.append(list);
+	return section;
+}
+
+function confirmedRelations(relations) {
+	const section = element("section", undefined, "confirmed-facts confirmed-relations");
+	section.append(element("h4", "Confirmed relationships"));
+	const list = element("ul");
+	for (const relation of relations) {
+		const row = element("li");
+		const chain = element("div", undefined, "relation-chain");
+		chain.append(
+			element("strong", relation.subject),
+			element("span", `→ ${relation.predicate} →`, "relation-label"),
+			element("strong", relation.object),
+		);
+		row.append(chain, sourceLink(`Source · revision ${relation.version}`, relation.chatId));
+		list.append(row);
+	}
+	section.append(list);
+	return section;
+}
+
+async function loadMemory() {
+	const request = ++memoryRequest;
+	const project = byId("memory-project").value;
+	const query = byId("memory-query").value.trim();
+	const params = new URLSearchParams({ project });
+	if (query) params.set("q", query);
+	byId("memory-view-title").textContent = query ? "Search results" : "Project graph";
+	byId("show-graph").hidden = !query;
+	byId("memory-status").textContent = "Loading…";
+	byId("memory-view").replaceChildren();
+	try {
+		const result = await api(`/api/${query ? "memory" : "graph"}?${params}`);
+		if (request !== memoryRequest) return;
+		const view = byId("memory-view");
+		const facts = result.facts || [];
+		const relations = result.relations || [];
+		if (facts.length) view.append(confirmedFacts(facts));
+		if (relations.length) view.append(confirmedRelations(relations));
+		if (!query) {
+			const count = result.threads.length;
+			byId("memory-status").textContent = count
+				? `${count} conversation${count === 1 ? "" : "s"} · Machines and artifacts`
+				: "No recorded conversations in this project.";
+			if (count) view.append(drawGraph(result));
+			return;
+		}
+		const hits = result.hits;
+		const counts = [];
+		if (relations.length) counts.push(`${relations.length} relationship${relations.length === 1 ? "" : "s"}`);
+		if (facts.length) counts.push(`${facts.length} confirmed fact${facts.length === 1 ? "" : "s"}`);
+		if (hits.length) counts.push(`${hits.length} matching conversation${hits.length === 1 ? "" : "s"}`);
+		byId("memory-status").textContent = counts.join(" · ") || "No matching evidence in this project.";
+		for (const hit of hits) {
+			const row = element("article", undefined, "memory-hit");
+			row.append(
+				sourceLink(hit.title, hit.chatId, hit.artifactId ? { artifact: hit.artifactId } : {}),
+				element("small", hit.source),
+				element("p", hit.excerpt),
+			);
+			view.append(row);
+		}
+	} catch (error) {
+		if (request === memoryRequest)
+			byId("memory-status").textContent = error.status ? error.message : "Could not load project memory. Try again.";
+	}
 }
 
 function closeNav() {
@@ -565,6 +734,12 @@ byId("message").addEventListener("keydown", (event) => {
 		if (!byId("send").disabled) byId("composer").requestSubmit();
 	}
 });
+byId("new-from-archive").addEventListener("click", () => {
+	const project = chat?.project;
+	navigate("");
+	if (config.projects.includes(project)) byId("project").value = project;
+	byId("message").focus();
+});
 byId("new-chat").addEventListener("click", () => navigate(""));
 byId("host").addEventListener("change", (event) => {
 	const origin = event.target.value;
@@ -576,6 +751,74 @@ byId("open-nav").addEventListener("click", () => {
 	dialog.append(byId("sidebar"));
 	dialog.showModal();
 	byId("close-nav").focus();
+});
+const memoryHints = {
+	link: "Replace the subject, relation and object in the prepared command, then send it to confirm the relationship.",
+	save: "Enter a fact as key = value, then send it in the composer.",
+	feedback: "Open the conversation that answers your question. Add the original search question after the command.",
+	status: "View the active search profile and the project's feedback count.",
+	tune: "Evaluate search profiles using this project's recorded feedback.",
+	revert: "Restore the previous search profile for this project.",
+};
+byId("memory-command").addEventListener("change", () => {
+	byId("command-hint").textContent = memoryHints[byId("memory-command").value];
+	notice("command-error");
+});
+byId("prepare-command").addEventListener("click", () => {
+	const project = byId("memory-project").value;
+	const command = byId("memory-command").value;
+	const matchingChat = !!chat && !chat.archived && chat.project === project;
+	if (command === "feedback" && !matchingChat) {
+		notice("command-error", "Open the conversation that contains the correct answer, then prepare feedback there.");
+		return;
+	}
+	const current = !selected || matchingChat;
+	if (sending || (current ? byId("message").value : drafts.get(""))?.trim()) {
+		notice("command-error", "Finish the existing message draft before preparing a memory command.");
+		return;
+	}
+	byId("memory-dialog").close();
+	if (!current) navigate("");
+	if (!selected) byId("project").value = project;
+	const input = byId("message");
+	input.value =
+		command === "link"
+			? "memory link SUBJECT | RELATION | OBJECT"
+			: `memory ${command}${["save", "feedback"].includes(command) ? " " : ""}`;
+	controls();
+	input.focus();
+	if (command === "link") input.setSelectionRange("memory link ".length, "memory link SUBJECT".length);
+	else input.setSelectionRange(input.value.length, input.value.length);
+});
+byId("open-memory").addEventListener("click", () => {
+	closeNav();
+	byId("memory-controls").open = false;
+	notice("command-error");
+	byId("memory-project").value = config.projects.includes(byId("project").value)
+		? byId("project").value
+		: config.projects[0];
+	byId("memory-query").value = "";
+	byId("memory-dialog").showModal();
+	byId("memory-query").focus();
+	void loadMemory();
+});
+byId("memory-dialog").addEventListener("close", () => {
+	memoryRequest++;
+	if (
+		matchMedia("(max-width:720px)").matches &&
+		document.activeElement !== byId("message") &&
+		!document.querySelector("dialog[open]")
+	)
+		byId("open-nav").focus();
+});
+byId("memory-project").addEventListener("change", loadMemory);
+byId("memory-search").addEventListener("submit", (event) => {
+	event.preventDefault();
+	void loadMemory();
+});
+byId("show-graph").addEventListener("click", () => {
+	byId("memory-query").value = "";
+	void loadMemory();
 });
 byId("open-artifacts").addEventListener("click", () => openArtifacts());
 byId("artifacts-dialog").addEventListener("keydown", (event) => {
@@ -604,11 +847,12 @@ matchMedia("(max-width:720px)").addEventListener("change", (event) => {
 	if (!event.matches) closeNav();
 });
 window.addEventListener("hashchange", () => {
+	sourcePending = true;
 	const id = chatFromAddress();
 	if (id !== selected) {
 		displaySelection(id);
 		void refresh();
-	}
+	} else openSourceContext();
 });
 window.addEventListener("online", refresh);
 document.addEventListener("visibilitychange", () => {

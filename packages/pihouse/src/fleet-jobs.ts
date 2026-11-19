@@ -8,8 +8,13 @@ import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { type ArtifactSummary, createArtifactStore } from "./fleet-artifacts.ts";
-
-import type { FleetPlanner } from "./fleet-planner.ts";
+import {
+	type FleetPlanner,
+	FleetPlannerAddressError,
+	fleetPlannerAddress,
+	selectFleetPlanner,
+} from "./fleet-planner.ts";
+import { createFleetRecall, isFleetMemoryCommand } from "./fleet-recall.ts";
 
 type ExecutionEvent = { type: "queued" | "started" | "finished" | "failed" | "interrupted"; text: string; at: number };
 export type FleetAgent = "pi" | "codex" | "claude";
@@ -19,7 +24,8 @@ type Message = {
 	text: string;
 	at?: number;
 	actor?: string;
-	kind?: "error" | "plan";
+	kind?: "error" | "plan" | "memory";
+	privateContext?: boolean;
 };
 export type FleetJobSummary = {
 	id: string;
@@ -30,6 +36,7 @@ export type FleetJobSummary = {
 	title: string;
 };
 export type FleetJob = FleetJobSummary & {
+	sourceHost?: string;
 	messages: Message[];
 	events?: ExecutionEvent[];
 	artifacts?: ArtifactSummary[];
@@ -66,10 +73,11 @@ function gitEnv() {
 	};
 }
 
-function allowedProjects(config: Record<string, string>, state: string) {
+function allowedProjects(config: Record<string, string>, state: string, memoryRepo: string) {
 	const home = homedir();
 	const protectedPaths = [
 		state,
+		memoryRepo,
 		...[".pihouse", ".codex", ".claude", ".pi", ".config", ".ssh", ".gnupg", ".aws", ".local/share", "Library"].map(
 			(p) => canonicalPath(join(home, p)),
 		),
@@ -117,10 +125,13 @@ function userMessage(input: string): Message {
 	return { role: "user", text: input.trim(), at: Date.now() };
 }
 
-function context(messages: Message[]) {
+function context(messages: Message[], facts: string) {
 	const parts: string[] = [];
 	let remaining = 48 * 1024;
-	for (const m of messages.toReversed()) {
+	for (let i = messages.length - 1; i >= 0; i--) {
+		const m = messages[i];
+		// Memory searches can contain snippets from unrelated chats. Only confirmed facts selected below travel to workers.
+		if (m.kind === "memory" || (m.role === "user" && messages[i + 1]?.kind === "memory")) continue;
 		const data = Buffer.from(m.text);
 		remaining -= m.role.length + 4;
 		if (remaining <= 0) break;
@@ -129,7 +140,7 @@ function context(messages: Message[]) {
 		remaining -= data.length;
 		if (remaining <= 0) break;
 	}
-	return `Continue this project conversation. Answer the latest user message. Earlier messages may be shortened.\n\n${parts.join("\n\n")}`;
+	return `Continue this project conversation. Answer the latest user message. Earlier messages may be shortened.\n\n${parts.join("\n\n")}${facts}`;
 }
 
 function stopTree(child?: ChildProcess): boolean {
@@ -192,7 +203,10 @@ export function createFleetJobs(
 		projects: Record<string, string>;
 		turnTimeoutMs?: number;
 		host?: string;
+		origin?: string;
+		memoryRepo?: string;
 		planner?: FleetPlanner;
+		planners?: FleetPlanner[];
 	},
 	sandboxPath = sandbox,
 	plannerPath = fileURLToPath(new URL("./fleet-planner.ts", import.meta.url)),
@@ -201,7 +215,8 @@ export function createFleetJobs(
 	if (!Number.isInteger(timeout) || timeout < 1 || timeout > 24 * 60 * 60_000)
 		throw new Error("Turn timeout must be between 1 ms and 24 hours.");
 	const state = canonicalPath(resolve(options.stateDir));
-	const projects = allowedProjects(options.projects, state);
+	const memoryRepo = canonicalPath(resolve(options.memoryRepo ?? join(state, "memory.git")));
+	const projects = allowedProjects(options.projects, state, memoryRepo);
 	const checkouts = join(state, "checkouts");
 	mkdirSync(checkouts, { mode: 0o700, recursive: true });
 	const dbPath = join(state, "jobs.sqlite");
@@ -209,7 +224,21 @@ export function createFleetJobs(
 	let closed = false;
 	let active: ChildProcess | undefined;
 	let scheduled = false;
+	let recall: ReturnType<typeof createFleetRecall> | undefined;
+	function memory() {
+		recall ??= createFleetRecall(memoryRepo, { list, get }, options.origin);
+		return recall;
+	}
 	let artifacts: ReturnType<typeof createArtifactStore>;
+	const planners = options.planners ?? (options.planner ? [options.planner] : []);
+	function selectedPlanner(id: string, text: string) {
+		try {
+			return selectFleetPlanner(id, planners, text);
+		} catch (error) {
+			if (error instanceof FleetPlannerAddressError) throw new FleetJobError(400, error.message);
+			throw error;
+		}
+	}
 	const primary = (job: FleetJob) => `${options.host ?? "Local Mac"} · ${job.agent}`;
 	function event(job: FleetJob, type: ExecutionEvent["type"], text: string) {
 		job.events ??= [];
@@ -224,6 +253,9 @@ export function createFleetJobs(
 		);
 		if (!db.prepare("SELECT name FROM pragma_table_info('jobs') WHERE name='events'").get())
 			db.exec("ALTER TABLE jobs ADD COLUMN events TEXT NOT NULL DEFAULT '[]'");
+		db.exec(
+			"CREATE TABLE IF NOT EXISTS external_turns(receipt TEXT PRIMARY KEY, chat TEXT NOT NULL REFERENCES jobs(id))",
+		);
 		artifacts = createArtifactStore(db);
 		interruptPending();
 	} catch (error) {
@@ -242,7 +274,7 @@ export function createFleetJobs(
 		};
 	}
 	function save(job: FleetJob) {
-		job.updatedAt = Date.now();
+		job.updatedAt = Math.max(Date.now(), job.updatedAt + 1);
 		db.prepare("UPDATE jobs SET updatedAt=?,status=?,messages=?,events=? WHERE id=?").run(
 			job.updatedAt,
 			job.status,
@@ -330,7 +362,13 @@ export function createFleetJobs(
 		const checkout = join(checkouts, job.id);
 		const source = projects.get(job.project);
 		if (!source) throw new TaskError("Project is no longer enabled.");
-		if (job.messages.length === 1) {
+		// Immediate memory answers never open a checkout. Clone on the first agent turn,
+		// including after a chat that previously contained only owner memory commands.
+		const prior = job.messages.slice(0, -1);
+		if (
+			!existsSync(checkout) &&
+			prior.every((m, index) => (index % 2 === 0 ? m.role === "user" : m.kind === "memory"))
+		) {
 			const staging = join(checkouts, `.${job.id}-init`);
 			try {
 				await run(
@@ -363,7 +401,17 @@ export function createFleetJobs(
 			throw new TaskError("Task checkout is unavailable.");
 		const before = artifacts.baseline(checkout);
 		const deadline = Date.now() + timeout;
-		const planner = options.planner;
+		const latest = job.messages.findLast((m) => m.role === "user");
+		let matched: string | undefined;
+		try {
+			if (latest && existsSync(memoryRepo)) matched = memory().context(job.project, latest.text);
+		} catch {
+			process.stderr.write("Fleet project memory is unavailable for this turn.\n");
+		}
+		const privateContext = Boolean(matched) || job.messages.some((m) => m.privateContext);
+		const facts = matched ? `\n\n${Buffer.from(matched).subarray(0, 8192).toString("utf8")}` : "";
+		const planner = selectedPlanner(job.id, latest?.text ?? "");
+		let plannerReceipt = "";
 		if (planner) {
 			const actor = `${planner.label} · Planner`;
 			event(job, "started", `${actor} · Preparing a plan.`);
@@ -373,7 +421,7 @@ export function createFleetJobs(
 					process.execPath,
 					[plannerPath, JSON.stringify(planner)],
 					checkout,
-					context(job.messages),
+					`Fleet execution: this planning turn was sent by ${options.host ?? "the primary Mac"} to ${planner.label}.\n${context(job.messages, facts)}`,
 					timeout,
 				);
 				if (closed) throw new TaskError("Fleet host closed.");
@@ -381,13 +429,17 @@ export function createFleetJobs(
 				job.messages.push({
 					role: "assistant",
 					kind: "plan",
+					privateContext,
 					actor,
 					text: Buffer.from(advice).subarray(0, 8192).toString("utf8"),
 					at: Date.now(),
 				});
+				plannerReceipt = ` The coordinator received a completed planning response from ${planner.label} for this turn.`;
 				event(job, "finished", `${actor} · Plan ready.`);
 			} catch (error) {
 				if (closed || error instanceof DeadlineError || error instanceof UnconfirmedExit) throw error;
+				if (fleetPlannerAddress(latest?.text ?? ""))
+					throw new TaskError(`${actor} is unavailable. The primary worker did not run.`);
 				event(job, "failed", `${actor} · Planner unavailable. Continuing on ${options.host ?? "the primary Mac"}.`);
 			}
 			save(job);
@@ -398,11 +450,12 @@ export function createFleetJobs(
 		event(job, "started", `${primary(job)} · Working in the task checkout.`);
 		save(job);
 		const prompt =
-			context(job.messages) +
+			`Fleet execution: this answer runs on ${primary(job)}.${plannerReceipt}\n` +
+			context(job.messages, facts) +
 			"\n\nPlace files requested for delivery directly under artifacts/ with simple filenames. Only new or changed files there will be attached to this chat.";
 		const answer = await run(process.execPath, [sandboxPath, job.agent], checkout, prompt, remaining);
 		if (!answer) throw new TaskError("Sandbox runner returned no assistant response.");
-		return { checkout, before, answer };
+		return { checkout, before, answer, privateContext };
 	}
 	async function pump() {
 		try {
@@ -419,7 +472,13 @@ export function createFleetJobs(
 					db.exec("BEGIN IMMEDIATE");
 					try {
 						const captured = artifacts.capture(job.id, result.checkout, result.before);
-						job.messages.push({ role: "assistant", actor: primary(job), text: result.answer, at: Date.now() });
+						job.messages.push({
+							role: "assistant",
+							actor: primary(job),
+							text: result.answer,
+							privateContext: result.privateContext,
+							at: Date.now(),
+						});
 						job.status = "completed";
 						event(
 							job,
@@ -431,6 +490,12 @@ export function createFleetJobs(
 					} catch (error) {
 						db.exec("ROLLBACK");
 						throw error;
+					}
+					try {
+						job.artifacts = artifacts.list(job.id);
+						memory().capture(job);
+					} catch {
+						process.stderr.write("Fleet could not archive the completed chat. Memory source backfill can retry.\n");
 					}
 				} catch (error) {
 					if (closed) break;
@@ -462,64 +527,124 @@ export function createFleetJobs(
 		const row = db.prepare("SELECT count(*) AS count FROM jobs WHERE status IN ('queued','running')").get();
 		if (Number(row?.count) >= 16) throw new FleetJobError(429, "Task queue is full.");
 	}
-	return {
-		list(): FleetJobSummary[] {
-			return db
-				.prepare("SELECT id,project,agent,status,updatedAt,title FROM jobs ORDER BY updatedAt DESC,rowid DESC")
-				.all() as unknown as FleetJobSummary[];
+	function list(): FleetJobSummary[] {
+		return db
+			.prepare("SELECT id,project,agent,status,updatedAt,title FROM jobs ORDER BY updatedAt DESC,rowid DESC")
+			.all() as unknown as FleetJobSummary[];
+	}
+	function prepareTurn(job: FleetJob, text: string) {
+		const answer = isFleetMemoryCommand(text) ? memory().reply(job.project, job.id, text) : undefined;
+		if (answer !== undefined) {
+			const actor = `${options.host ?? "Local Mac"} · Memory`;
+			job.status = "completed";
+			job.messages.push({ role: "assistant", actor, kind: "memory", text: answer, at: Date.now() });
+			event(job, "finished", `${actor} · Answered locally.`);
+			return;
+		}
+		selectedPlanner(job.id, text);
+		admit();
+		job.status = "queued";
+		event(job, "queued", `${primary(job)} · Turn queued.`);
+		queue();
+	}
+
+	function transaction<T>(fn: () => T): T {
+		if (db.isTransaction) return fn();
+		db.exec("BEGIN IMMEDIATE");
+		try {
+			const result = fn();
+			db.exec("COMMIT");
+			return result;
+		} catch (error) {
+			db.exec("ROLLBACK");
+			throw error;
+		}
+	}
+	const jobs = {
+		list,
+		memorySource(project: string) {
+			if (!projects.has(project)) throw new FleetJobError(404, "Unknown project.");
+			return memory().source(project);
+		},
+		memoryFacts(project: string) {
+			if (!projects.has(project)) throw new FleetJobError(404, "Unknown project.");
+			return memory().facts(project);
+		},
+		memoryRelations(project: string) {
+			if (!projects.has(project)) throw new FleetJobError(404, "Unknown project.");
+			return memory().relations(project);
+		},
+		memoryProfile(project: string) {
+			if (!projects.has(project)) throw new FleetJobError(404, "Unknown project.");
+			return memory().profile(project);
 		},
 		get,
 		artifact: artifacts.get,
 		create(project: string, agent: FleetAgent, input: string): FleetJob {
-			if (!projects.has(project)) throw new FleetJobError(404, "Unknown project.");
-			if (!["pi", "claude", "codex"].includes(agent)) throw new FleetJobError(400, "Unknown agent.");
-			const message = userMessage(input);
-			admit();
-			const row = db.prepare("SELECT count(*) AS count FROM jobs").get();
-			if (Number(row?.count) >= 256) throw new FleetJobError(503, "Host chat capacity reached.");
-			const job: FleetJob = {
-				id: randomUUID(),
-				project,
-				agent,
-				title: message.text.replace(/\s+/g, " ").slice(0, 100),
-				status: "queued",
-				updatedAt: Date.now(),
-				messages: [message],
-				events: [],
-				artifacts: [],
-			};
-			event(job, "queued", `${primary(job)} · Turn queued.`);
-			db.prepare(
-				"INSERT INTO jobs(id,project,agent,title,status,updatedAt,messages,events) VALUES (?,?,?,?,?,?,?,?)",
-			).run(
-				job.id,
-				project,
-				agent,
-				job.title,
-				job.status,
-				job.updatedAt,
-				JSON.stringify(job.messages),
-				JSON.stringify(job.events ?? []),
-			);
-			queue();
-			return job;
+			return transaction(() => {
+				if (!projects.has(project)) throw new FleetJobError(404, "Unknown project.");
+				if (!["pi", "claude", "codex"].includes(agent)) throw new FleetJobError(400, "Unknown agent.");
+				const message = userMessage(input);
+				const row = db.prepare("SELECT count(*) AS count FROM jobs").get();
+				if (Number(row?.count) >= 256) throw new FleetJobError(503, "Host chat capacity reached.");
+				const job: FleetJob = {
+					id: randomUUID(),
+					project,
+					agent,
+					title: message.text.replace(/\s+/g, " ").slice(0, 100),
+					status: "queued",
+					updatedAt: Date.now(),
+					messages: [message],
+					events: [],
+					artifacts: [],
+				};
+				prepareTurn(job, message.text);
+				db.prepare(
+					"INSERT INTO jobs(id,project,agent,title,status,updatedAt,messages,events) VALUES (?,?,?,?,?,?,?,?)",
+				).run(
+					job.id,
+					project,
+					agent,
+					job.title,
+					job.status,
+					job.updatedAt,
+					JSON.stringify(job.messages),
+					JSON.stringify(job.events ?? []),
+				);
+				return job;
+			});
 		},
 		reply(id: string, input: string): FleetJob {
-			const job = get(id);
-			if (!job) throw new FleetJobError(404, "Unknown chat.");
-			if (!projects.has(job.project)) throw new FleetJobError(404, "Unknown project.");
-			if (job.status === "interrupted") throw new FleetJobError(409, "Interrupted chat is closed to further writes.");
-			if (job.status === "queued" || job.status === "running") throw new FleetJobError(409, "Chat is busy.");
-			if (job.messages.filter((m) => m.role === "user").length >= maxTurns)
-				throw new FleetJobError(409, "Chat turn limit reached.");
-			const message = userMessage(input);
-			admit();
-			job.messages.push(message);
-			job.status = "queued";
-			event(job, "queued", `${primary(job)} · Turn queued.`);
-			save(job);
-			queue();
-			return job;
+			return transaction(() => {
+				const job = get(id);
+				if (!job) throw new FleetJobError(404, "Unknown chat.");
+				if (!projects.has(job.project)) throw new FleetJobError(404, "Unknown project.");
+				if (job.status === "interrupted") throw new FleetJobError(409, "Interrupted chat is closed to further writes.");
+				if (job.status === "queued" || job.status === "running") throw new FleetJobError(409, "Chat is busy.");
+				if (job.messages.filter((m) => m.role === "user").length >= maxTurns)
+					throw new FleetJobError(409, "Chat turn limit reached.");
+				const message = userMessage(input);
+				job.messages.push(message);
+				prepareTurn(job, message.text);
+				save(job);
+				return job;
+			});
+		},
+		submitExternalTurn(receipt: string, project: string, agent: FleetAgent, input: string, chat?: string): FleetJob {
+			if (isFleetMemoryCommand(input)) throw new FleetJobError(400, "Manage project memory in the private web chat.");
+			// A Slack delivery can be retried after the job committed but before its thread
+			// binding committed. Keep the submission receipt in the SAME transaction as the turn.
+			return transaction(() => {
+				const prior = db.prepare("SELECT chat FROM external_turns WHERE receipt=?").get(receipt);
+				const job = prior
+					? get(String(prior.chat))
+					: chat
+						? jobs.reply(chat, input)
+						: jobs.create(project, agent, input);
+				if (!job) throw new Error("Missing job for persisted submission.");
+				if (!prior) db.prepare("INSERT INTO external_turns(receipt,chat) VALUES(?,?)").run(receipt, job.id);
+				return job;
+			});
 		},
 		close() {
 			if (closed) return;
@@ -532,4 +657,5 @@ export function createFleetJobs(
 			}
 		},
 	};
+	return jobs;
 }

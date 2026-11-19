@@ -268,3 +268,89 @@ test("planner messages and primary responses share one durable chat with distinc
 	assert.equal(fallback.status, "completed");
 	assert.ok(fallback.events?.some((e) => e.type === "failed" && e.text.includes("Mac mini")));
 });
+
+test("owner memory commands answer locally and a later normal turn receives a fresh checkout", async (t) => {
+	const { options, runner } = fixture(t);
+	const jobs = createFleetJobs(options, runner);
+	t.after(() => jobs.close());
+	const first = jobs.create("demo", "codex", "/memory status");
+	assert.equal(first.status, "completed");
+	assert.equal(first.messages.at(-1)?.kind, "memory");
+	assert.equal(jobs.memoryProfile("demo"), "balanced");
+	const second = jobs.reply(first.id, "memory status");
+	assert.equal(second.status, "completed");
+	assert.equal(second.messages.at(-1)?.kind, "memory");
+	jobs.reply(first.id, "first question");
+	const final = await settled(jobs, first.id);
+	assert.equal(final.status, "completed", JSON.stringify(final.messages));
+	assert.match(final.messages.at(-1)?.text ?? "", /codex\|none\|committed/);
+});
+
+test("only matching owner-confirmed project facts reach the planner and worker", async (t) => {
+	const { options, project, root, runner } = fixture(t);
+	const script = `import fs from "node:fs";const p=fs.readFileSync(0,"utf8");console.log(p.includes("thursday-identity-marker")?"confirmed context":"no matching context");`;
+	const plannerScript = join(root, "plan.mjs");
+	writeFileSync(plannerScript, script);
+	writeFileSync(runner, script);
+	const planner = {
+		label: "Mini",
+		host: "peer",
+		identityFile: "/id",
+		entry: "/plan",
+		node: "/node",
+		knownHostsFile: "/known",
+	};
+	const jobs = createFleetJobs(
+		{ ...options, projects: { demo: project, other: project }, planner },
+		runner,
+		plannerScript,
+	);
+	t.after(() => jobs.close());
+	const memory = jobs.create("demo", "codex", "memory save launch date = thursday-identity-marker");
+	assert.equal(memory.status, "completed");
+	const one = jobs.create("demo", "codex", "What is the launch date?");
+	const matched = await settled(jobs, one.id);
+	assert.deepEqual(
+		matched.messages.slice(1).map((m) => m.text),
+		["confirmed context", "confirmed context"],
+	);
+	const other = jobs.create("other", "codex", "What is the launch date?");
+	const separate = await settled(jobs, other.id);
+	assert.deepEqual(
+		separate.messages.slice(1).map((m) => m.text),
+		["no matching context", "no matching context"],
+	);
+});
+
+test("rejects unknown planner addresses before admission and stops after an explicitly selected peer fails", async (t) => {
+	const { options, root, runner } = fixture(t);
+	const peer = (label: string) => ({
+		label,
+		host: "peer",
+		identityFile: "/id",
+		entry: "/plan",
+		node: "/node",
+		knownHostsFile: "/known",
+	});
+	const plan = join(root, "peer.mjs");
+	writeFileSync(
+		plan,
+		'const config=JSON.parse(process.argv[2]);if(config.label==="Mini")process.exit(1);console.log(config.label+" here");',
+	);
+	const jobs = createFleetJobs({ ...options, planners: [peer("Mini"), peer("Studio")] }, runner, plan);
+	t.after(() => jobs.close());
+	assert.throws(() => jobs.create("demo", "codex", "@unknown hello"), /unknown|address|planner/i);
+	assert.equal(jobs.list().length, 0);
+	const job = jobs.create("demo", "codex", "@Studio hello");
+	const done = await settled(jobs, job.id);
+	assert.equal(done.messages[1].actor, "Studio · Planner");
+	assert.equal(done.messages[1].text, "Studio here");
+	assert.throws(() => jobs.reply(job.id, "@unknown again"), /unknown|address|planner/i);
+	assert.equal(jobs.get(job.id)?.messages.length, 3);
+	jobs.reply(job.id, "@Mini hello");
+	const failed = await settled(jobs, job.id);
+	assert.equal(failed.status, "failed");
+	assert.equal(failed.messages.at(-1)?.kind, "error");
+	assert.match(failed.messages.at(-1)?.text ?? "", /Mini/);
+	assert.equal(failed.messages.filter((m) => m.actor?.endsWith("· codex")).length, 1);
+});
