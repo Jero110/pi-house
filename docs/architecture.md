@@ -33,7 +33,7 @@ flowchart TB
   K --> V[Code validates, computes Facts, writes the compact]
   V -->|invalid or stale| X[Nothing written; revision stays uncompacted]
   V -->|valid| M[(workflow/compact: permanent)]
-  M --> W{{One review agent: new compacts + latest review only}}
+  M --> W{{One review agent: new compacts + latest review}}
   W --> B[Code validates and writes the review]
   B --> L[(workflow/reviews: permanent)]
   B --> P[(Proposals)]
@@ -43,7 +43,9 @@ flowchart TB
   A --> I[Apply literally: backup, compare-and-swap, validation, receipt]
 ```
 
-Capture is code and runs no model. A **report** is code-computed Markdown for the human and is no input of compact or review; a **transcript** is the source conversation, kept as a temporary full copy; a **compact** is a validated summary of one revision (at most 6,000 characters) with code-computed Facts; a **review** is one file (at most 12,000 characters) that reads only the new compacts and the previous review and carries the previous essentials forward. Compact and review run in separate agents on the hub and need it. Deletion removes only pi-house-owned copies in `conversations/<run id>/transcripts/`, per run, after its review was written and ingested, the run is quiescent and its evidence fingerprint is unchanged; a compact made by `/workflow ask` never authorizes it. A review that fails halfway keeps every conversation. Nothing deletes native harness sessions, project files, compacts, reviews or migration backups. A proposal is not applied until a human approves its pinned version, and a `file:` proposal may name any existing regular file except credentials. There is no lock between two reviews, and a review input beyond 60,000 characters defers the newest compacts to the next review. See the [self-learning guide](self-learning.md) for the limits.
+Capture is code and runs no model. A **report** is code-computed Markdown for the human and is no input of compact or review; a **transcript** is the source conversation, kept as a temporary full copy; a **compact** is a validated summary of one revision (at most 6,000 characters) with code-computed Facts; a **review** is one file (at most 12,000 characters) that reads the new compacts and previous review and carries the previous essentials forward. Compact and review run in separate agents on the hub and need it. Deletion removes only pi-house-owned copies in `conversations/<run id>/transcripts/`, per run, after its review was written and ingested, the run is quiescent and its evidence fingerprint is unchanged; a compact made by `/workflow ask` never authorizes it. A review that fails halfway keeps every conversation. Nothing deletes native harness sessions, project files, compacts, reviews or migration backups. A proposal is not applied until a human approves its pinned version, and a `file:` proposal may name any existing regular file except credentials. There is no lock between two reviews, and a review input beyond 60,000 characters defers the newest compacts to the next review. See the [self-learning guide](self-learning.md) for the limits.
+
+On request, the executor pilot compares proposal versions before approval. It uses pi's model registry with fresh fixture contexts and computes checks from simulated tool calls. Completed results are stored as version-specific proposal receipts and shown beside the diff.
 
 ## Memory consultation
 

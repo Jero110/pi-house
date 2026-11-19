@@ -7,6 +7,7 @@ import { join } from "node:path";
 import test from "node:test";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import workflow, { proposalCommand, USAGE, WORKFLOW_COMMANDS } from "../src/extensions/workflow.ts";
+import type { ExecutorReplay } from "../src/workflow/executor-evaluation.ts";
 import { migrateLegacyStore } from "../src/workflow/migration.ts";
 import { approveProposal, createProposal, getProposal, mergeEvidence } from "../src/workflow/proposals.ts";
 import { openOperationalStore } from "../src/workflow/storage.ts";
@@ -23,12 +24,12 @@ function openStore(memory: string) {
 	return openOperationalStore(join(memory, "memory.sqlite"), { fts: false, legacy: true });
 }
 
-function writeSkill(repoRoot: string, content: string): string {
-	const dir = join(repoRoot, "skills", "build", "sample");
+function writeSkill(repoRoot: string, content: string, name = "sample"): string {
+	const dir = join(repoRoot, "skills", "build", name);
 	mkdirSync(dir, { recursive: true });
 	writeFileSync(
 		join(repoRoot, "skills", "catalog.json"),
-		JSON.stringify({ groups: [{ id: "build" }], skills: [{ name: "sample", group: "build" }] }),
+		JSON.stringify({ groups: [{ id: "build" }], skills: [{ name, group: "build" }] }),
 	);
 	writeFileSync(join(dir, "SKILL.md"), content);
 	return join(dir, "SKILL.md");
@@ -340,7 +341,7 @@ test("help and completion list exactly the final commands, and nothing retired",
 	);
 	assert.deepEqual(
 		values.map((v) => v.trim()),
-		["log", "review", "proposals", "approve", "reject", "ask"],
+		["log", "review", "proposals", "evaluate", "approve", "reject", "ask"],
 	);
 	for (const c of WORKFLOW_COMMANDS) assert.ok(USAGE.includes(`/workflow ${c.usage}`), `usage lists ${c.usage}`);
 	const shown = `${USAGE} ${String(spec?.description)} ${values.join(" ")}`;
@@ -359,7 +360,7 @@ test("/workflow with no argument prints the usage line with exactly the final co
 	assert.deepEqual(notes, [{ text: USAGE, level: "warning" }]);
 	assert.match(
 		USAGE,
-		/^usage: \/workflow log \[reason\] \| \/workflow review .* \| \/workflow proposals \[id\] \| \/workflow approve <id> \[version\] \| \/workflow reject <id> \[reason\] \| \/workflow ask <question>$/,
+		/^usage: \/workflow log \[reason\] \| \/workflow review .* \| \/workflow proposals \[id\] \| \/workflow evaluate <id> <version> .* \| \/workflow approve <id> \[version\] \| \/workflow reject <id> \[reason\] \| \/workflow ask <question>$/,
 	);
 	assert.equal(sent.length + users.length, 0);
 });
@@ -610,4 +611,159 @@ test("approve with a version that is not hex, or shorter than 4 digits, prints u
 	} finally {
 		f.cleanup();
 	}
+});
+
+function executorProposal(repoRoot: string, memory: string) {
+	const before = "---\nname: executor\n---\nCurrent executor.\n";
+	const after = "---\nname: executor\n---\nCandidate executor.\n";
+	const file = writeSkill(repoRoot, before, "executor");
+	const store = openStore(memory);
+	const proposal = createProposal(store.db, {
+		id: "executor-fix",
+		target: "skill:executor",
+		before,
+		after,
+		evidence: ["r1"],
+	});
+	store.close();
+	return { file, ...proposal };
+}
+
+test("evaluate compares the exact executor change, shows per-case evidence and pins approval", async (t) => {
+	const f = fixture();
+	t.after(f.cleanup);
+	const p = executorProposal(f.repoRoot, f.memory);
+	const calls: string[] = [];
+	const replay: ExecutorReplay = async (skill, task) => {
+		calls.push(task.id);
+		const status = task.exitCode === 0 || skill === p.before ? "pass" : "fail";
+		return {
+			tokens: skill === p.before ? 10 : 12,
+			events: [{ command: task.command }, { status, observedValidation: true }],
+		};
+	};
+	const deps = { ...f, executorEvaluation: { model: "fake/model", replay } };
+	const result = await proposalCommand("evaluate", [p.id, p.version], deps);
+	assert.equal(result.level, "info");
+	assert.match(result.text, /2 improved, 0 regressed, 2 unchanged/);
+	assert.match(result.text, /40 → 48 tokens/);
+	assert.equal(readFileSync(p.file, "utf8"), p.before);
+	assert.equal(calls.length, 8);
+	assert.equal(new Set(calls).size, 4);
+	assert.match((await proposalCommand("proposals", [p.id], f)).text, /Executor evaluation.*fake\/model/);
+	assert.match((await proposalCommand("evaluate", [p.id, p.version], deps)).text, /2 improved/);
+	assert.equal(calls.length, 8, "a completed version already has evidence");
+	assert.match((await proposalCommand("approve", [p.id], f)).text, /approve the evaluated version/i);
+	assert.equal((await proposalCommand("approve", [p.id, p.version], f)).level, "info");
+	assert.equal(readFileSync(p.file, "utf8"), p.after);
+});
+
+test("critical executor regressions block approval and a revised version needs fresh evidence", async (t) => {
+	const f = fixture();
+	t.after(f.cleanup);
+	const p = executorProposal(f.repoRoot, f.memory);
+	const replay: ExecutorReplay = async (skill, task) => ({
+		tokens: 10,
+		...(skill === p.after && task.id === "worker-pass-check-fails" ? { incomplete: true } : {}),
+		events:
+			skill === p.before || task.id === "worker-pass-check-fails"
+				? [{ command: task.command }, { status: task.exitCode === 0 ? "pass" : "fail", observedValidation: true }]
+				: [{ status: "pass", observedValidation: false }, { command: task.command }],
+	});
+	const evaluated = await proposalCommand("evaluate", [p.id, p.version], {
+		...f,
+		executorEvaluation: { model: "fake/model", replay },
+	});
+	assert.equal(evaluated.level, "warning");
+	assert.match(evaluated.text, /0 improved, 4 regressed, 0 unchanged/);
+	assert.match((await proposalCommand("approve", [p.id, p.version], f)).text, /critical regressions/i);
+	assert.equal(readFileSync(p.file, "utf8"), p.before);
+
+	const store = openStore(f.memory);
+	const revised = mergeEvidence(store.db, p.id, ["r2"], { kind: "merge", explanation: "A second run." });
+	store.close();
+	assert.doesNotMatch((await proposalCommand("proposals", [p.id], f)).text, /4 regressed/);
+	assert.match((await proposalCommand("approve", [p.id, revised.version], f)).text, /evaluate the current version/i);
+	assert.equal(readFileSync(p.file, "utf8"), p.before);
+});
+
+test("executor evaluation rejects stale inputs and never publishes a partial run", async (t) => {
+	const f = fixture();
+	t.after(f.cleanup);
+	const p = executorProposal(f.repoRoot, f.memory);
+	let calls = 0;
+	const replay: ExecutorReplay = async () => {
+		calls++;
+		throw new Error("Model request interrupted");
+	};
+	const deps = { ...f, executorEvaluation: { model: "fake/model", replay } };
+	const stale = await proposalCommand("evaluate", [p.id, "deadbeef"], deps);
+	assert.match(stale.text, /now version/);
+	assert.equal(calls, 0);
+	const interrupted = await proposalCommand("evaluate", [p.id, p.version], deps);
+	assert.match(interrupted.text, /Model request interrupted/);
+	assert.equal(calls, 1);
+	assert.doesNotMatch((await proposalCommand("proposals", [p.id], f)).text, /tokens/);
+	writeFileSync(p.file, `${p.before}Independent edit.\n`);
+	assert.match((await proposalCommand("evaluate", [p.id, p.version], deps)).text, /Target changed/);
+	assert.equal(calls, 1);
+});
+
+test("a proposal revised during evaluation does not inherit the in-flight result", async (t) => {
+	const f = fixture();
+	t.after(f.cleanup);
+	const p = executorProposal(f.repoRoot, f.memory);
+	const store = openStore(f.memory);
+	t.after(() => store.close());
+	let revised = p.version;
+	const replay: ExecutorReplay = async () => {
+		if (revised === p.version)
+			revised = mergeEvidence(store.db, p.id, ["r2"], { kind: "merge", explanation: "New evidence." }).version;
+		return { tokens: 2, events: [] };
+	};
+	const result = await proposalCommand("evaluate", [p.id, p.version], {
+		...f,
+		executorEvaluation: { model: "fake/model", replay },
+	});
+	assert.equal(result.level, "warning");
+	assert.match(result.text, /proposal changed during the evaluation/);
+	assert.equal(store.db.prepare("SELECT COUNT(*) AS n FROM receipts WHERE kind = 'executor-evaluation'").get()?.n, 0);
+	assert.equal(getProposal(store.db, p.id).version, revised);
+});
+
+test("an in-flight executor evaluation blocks approval and coalesces competing model runs", async (t) => {
+	const f = fixture();
+	t.after(f.cleanup);
+	const p = executorProposal(f.repoRoot, f.memory);
+	const started = Promise.withResolvers<void>();
+	const unblock = Promise.withResolvers<void>();
+	let calls = 0;
+	const replay: ExecutorReplay = async () => {
+		calls++;
+		started.resolve();
+		await unblock.promise;
+		return { tokens: 5, events: [] };
+	};
+	const deps = { ...f, executorEvaluation: { model: "fake/model", replay } };
+	const pending = proposalCommand("evaluate", [p.id, p.version], deps);
+	await started.promise;
+	try {
+		assert.match((await proposalCommand("approve", [p.id, p.version], f)).text, /Evaluate the current version/);
+		const duplicate = await proposalCommand("evaluate", [p.id, p.version], {
+			...f,
+			executorEvaluation: {
+				model: "fake/model",
+				replay: async () => {
+					throw new Error("Duplicate model call");
+				},
+			},
+		});
+		assert.match(duplicate.text, /already running/);
+		assert.equal(calls, 1);
+		assert.equal(readFileSync(p.file, "utf8"), p.before);
+	} finally {
+		unblock.resolve();
+		await pending;
+	}
+	assert.equal((await proposalCommand("approve", [p.id, p.version], f)).level, "info");
 });

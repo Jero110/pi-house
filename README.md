@@ -107,6 +107,7 @@ pih
 | `/workflow review [--yes]` | Shows how many saved runs are waiting, asks you to confirm (it uses model quota), makes a compact version of each, writes one review and proposes changes. Then it deletes the full conversations it covered; their compacts stay. |
 | `/workflow ask <question>` | Answers from your compacts, reviews, ideas and consulted sources by keyword. If saved runs of this project have no compact, it asks once whether to compact them. |
 | `/workflow proposals [id]` | Lists proposed changes, or shows one with the file path and its diff. |
+| `/workflow evaluate <id> <version>` | Compares an executor skill proposal with the current skill on simulated validation tasks. Uses model quota. |
 | `/workflow approve <id> [version]` | Approves a proposal and applies it, with a backup and a check. |
 | `/workflow reject <id> [reason]` | Rejects a proposal and records why. |
 | `/skill:<name>` | Runs a skill by hand, e.g. `/skill:ask-books <question>`. |

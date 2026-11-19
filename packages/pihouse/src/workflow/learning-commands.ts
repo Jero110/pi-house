@@ -7,6 +7,13 @@ import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { type HubClient, identityFromEnv } from "agent-link-core";
 import { compactRevisions } from "./compact-run.ts";
+import {
+	EXECUTOR_TARGET,
+	executorEvaluation,
+	executorEvaluationText,
+	hasExecutorRegressions,
+	hasPriorExecutorEvaluation,
+} from "./executor-evaluation.ts";
 import { isQuiescent } from "./jobs.ts";
 import { activateLearningStore } from "./learning-runtime.ts";
 import { getProposal, listProposals, resolveProposalId, shortVersion } from "./proposals.ts";
@@ -46,6 +53,7 @@ export interface LearningDeps {
 	modelAvailable: (model: string) => boolean;
 	/** Progress while the work runs; the caller shows it with ctx.ui.notify. */
 	progress: (text: string) => void;
+	executorSkill?: () => string | undefined;
 	/**
 	 * Asks the user to go ahead, with the plan's counts. Absent when there is no dialog and no `--yes`: the command then
 	 * reports the counts and starts nothing (the two-call fallback).
@@ -247,6 +255,7 @@ export async function reviewCommand(deps: LearningDeps): Promise<LearningOutcome
 			db: store.db,
 			cwd: deps.memory,
 			worker: ready.worker,
+			executorSkill: deps.executorSkill,
 			isActive: checks.isActive,
 			currentFingerprint: checks.currentFingerprint,
 			now: () => new Date((deps.now ?? Date.now)()),
@@ -302,10 +311,18 @@ export function proposalDetail(db: DatabaseSync, prefix: string): LearningOutcom
 	if (info.validation) lines.push(`How to check: ${info.validation}`);
 	if (proposal.reason) lines.push(`Reason on record: ${proposal.reason}`);
 	lines.push("", diff || "(before and after are the same text)", "");
-	if (proposal.state === "open")
-		lines.push(
-			`Approve: /workflow approve ${proposal.id} ${shortVersion(proposal.version)} · Reject: /workflow reject ${proposal.id} [reason]`,
-		);
+	const evaluation = executorEvaluation(db, proposal);
+	if (evaluation) lines.push(executorEvaluationText(proposal, evaluation), "");
+	if (proposal.state === "open") {
+		if (proposal.target === EXECUTOR_TARGET && proposal.before && !evaluation)
+			lines.push(`Evaluate: /workflow evaluate ${proposal.id} ${shortVersion(proposal.version)} (model quota)`);
+		if (evaluation && hasExecutorRegressions(evaluation))
+			lines.push("Approval blocked by critical executor regressions.");
+		else if (!evaluation && hasPriorExecutorEvaluation(db, proposal))
+			lines.push("Evaluate the current version before approving.");
+		else lines.push(`Approve: /workflow approve ${proposal.id} ${shortVersion(proposal.version)}`);
+		lines.push(`Reject: /workflow reject ${proposal.id} [reason]`);
+	}
 	return { level: "info", text: lines.join("\n") };
 }
 

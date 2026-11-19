@@ -7,6 +7,7 @@
 // ask: gives the model the architecture, the skills catalog and the compacts, reviews, ideas and sources that match the
 //   question. When this project has uncompacted runs it also tells the model to offer the `workflow_compact` tool.
 // proposals [id], approve, reject: the proposal store (see proposalCommand). No model turn.
+// evaluate: compares one executor proposal with the current model and simulated tools.
 // `digest`, `self-learning`, `report` and `save` are retired and only say what replaces them.
 import { createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
@@ -30,6 +31,20 @@ import {
 	projectOf,
 	readFlags,
 } from "../workflow/capture.ts";
+import {
+	claimExecutorEvaluation,
+	compareExecutor,
+	EXECUTOR_EVALUATION_ROLLOUTS,
+	EXECUTOR_TARGET,
+	type ExecutorReplay,
+	executorEvaluation,
+	executorEvaluationText,
+	hasExecutorRegressions,
+	hasPriorExecutorEvaluation,
+	recordExecutorEvaluation,
+	releaseExecutorEvaluation,
+} from "../workflow/executor-evaluation.ts";
+import { createExecutorReplay, VIRTUAL_MODEL_API } from "../workflow/executor-replay.ts";
 import { isQuiescent } from "../workflow/jobs.ts";
 import {
 	compactProjectCommand,
@@ -70,6 +85,7 @@ export const WORKFLOW_COMMANDS = [
 	{ usage: "log [reason]", completions: ["log "] },
 	{ usage: "review [--yes] (compacts and reviews saved runs; model quota)", completions: ["review"] },
 	{ usage: "proposals [id]", completions: ["proposals"] },
+	{ usage: "evaluate <id> <version> (executor pilot; model quota)", completions: ["evaluate "] },
 	{ usage: "approve <id> [version]", completions: ["approve "] },
 	{ usage: "reject <id> [reason]", completions: ["reject "] },
 	{ usage: "ask <question>", completions: ["ask "] },
@@ -343,13 +359,14 @@ function log(pi: ExtensionAPI, reason: string, ctx: ExtensionCommandContext): vo
 	ctx.ui.notify(outcome.text, outcome.level);
 }
 
-export type ProposalCommand = "proposals" | "approve" | "reject";
+export type ProposalCommand = "proposals" | "evaluate" | "approve" | "reject";
 
 export interface ProposalDeps {
 	/** The workflow memory folder; its memory.sqlite holds the proposals once the store is active. */
 	memory: string;
 	/** The checkout whose skills/ folder a skill proposal edits. */
 	repoRoot: string;
+	executorEvaluation?: { model: string; replay: ExecutorReplay; progress?: (text: string) => void };
 }
 
 export interface CommandResult {
@@ -362,6 +379,7 @@ const NO_REASON = "No reason given";
 const NOT_ACTIVE =
 	"The proposal store is not active yet, so nothing changed. These commands never migrate the workflow memory.";
 const PROPOSAL_USAGE: Record<Exclude<ProposalCommand, "proposals">, string> = {
+	evaluate: "usage: /workflow evaluate <id> <version>",
 	approve: "usage: /workflow approve <id> [version]",
 	reject: "usage: /workflow reject <id> [reason]",
 };
@@ -436,6 +454,28 @@ function revisedSummary(proposal: Proposal): string {
 	return `${runs} supporting run${runs === 1 ? "" : "s"}, revised ${revisions} time${revisions === 1 ? "" : "s"}`;
 }
 
+function approveOpenExecutor(db: DatabaseSync, proposal: Proposal, shown: string | undefined): string | undefined {
+	// Another session may start or publish an evaluation while approval is being processed.
+	db.exec("BEGIN IMMEDIATE");
+	try {
+		const current = shortVersion(proposal.version);
+		const evaluation = executorEvaluation(db, proposal);
+		let warning: string | undefined;
+		if (!evaluation && hasPriorExecutorEvaluation(db, proposal))
+			warning = `Evaluate the current version with /workflow evaluate ${proposal.id} ${current}.`;
+		else if (evaluation && hasExecutorRegressions(evaluation))
+			warning = `Version ${current} has critical regressions in the executor evaluation. Revise the change and evaluate it again.`;
+		else if (evaluation && shown === undefined)
+			warning = `Approve the evaluated version with /workflow approve ${proposal.id} ${current}.`;
+		if (!warning) approveProposal(db, proposal.id, proposal.version);
+		db.exec("COMMIT");
+		return warning;
+	} catch (error) {
+		db.exec("ROLLBACK");
+		throw error;
+	}
+}
+
 /**
  * Approves the displayed proposal, then applies it. An approved proposal is applied without a second approval; an
  * interrupted one (applying) is recovered to failed, so it is never applied twice.
@@ -470,9 +510,76 @@ async function approve(
 			text: `${proposal.id} has changed since it was created (version ${current}, ${revisedSummary(proposal)}). Nothing was approved. Review it, then run /workflow approve ${proposal.id} ${current}.`,
 		};
 	const approvedNow = proposal.state === "open";
-	if (approvedNow) approveProposal(db, proposal.id, proposal.version);
+	if (approvedNow) {
+		if (proposal.target === EXECUTOR_TARGET) {
+			const warning = approveOpenExecutor(db, proposal, shown);
+			if (warning) return { level: "warning", text: warning };
+		} else approveProposal(db, proposal.id, proposal.version);
+	}
 	const result = outcome(db, await applyProposal(db, proposal.id, target));
 	return approvedNow ? { ...result, text: `${result.text} Approved version ${current}.` } : result;
+}
+
+async function evaluate(
+	db: DatabaseSync,
+	proposal: Proposal,
+	shown: string,
+	deps: ProposalDeps,
+): Promise<CommandResult> {
+	if (proposal.target !== EXECUTOR_TARGET || proposal.state !== "open" || !proposal.before)
+		return {
+			level: "warning",
+			text: "Evaluation requires an open executor skill proposal with a verified before-state.",
+		};
+	if (!proposal.version.startsWith(shown.toLowerCase()))
+		return {
+			level: "warning",
+			text: `${proposal.id} is now version ${shortVersion(proposal.version)}. Review the current diff before evaluating.`,
+		};
+
+	const target = targetFor(proposal, deps);
+	if ((await target.read()) !== proposal.before)
+		return {
+			level: "warning",
+			text: "Target changed since the proposal was created. Review a fresh proposal before evaluating.",
+		};
+	let evaluation = executorEvaluation(db, proposal);
+	if (!evaluation) {
+		const runner = deps.executorEvaluation;
+		if (!runner)
+			return {
+				level: "warning",
+				text: "Select an authenticated, fixed model before evaluating the executor proposal.",
+			};
+		const lease = claimExecutorEvaluation(db, proposal);
+		if (lease === undefined) {
+			evaluation = executorEvaluation(db, proposal);
+			if (!evaluation)
+				return { level: "warning", text: "This evaluation is already running or the proposal has changed." };
+		} else {
+			try {
+				runner.progress?.(
+					`Evaluating version ${shortVersion(proposal.version)} with ${runner.model} (${EXECUTOR_EVALUATION_ROLLOUTS} simulated rollouts).`,
+				);
+				const compared = await compareExecutor(proposal, runner.model, runner.replay);
+				evaluation =
+					(await target.read()) === proposal.before
+						? recordExecutorEvaluation(db, proposal, compared, lease)
+						: undefined;
+				if (!evaluation)
+					return {
+						level: "warning",
+						text: "The target or proposal changed during the evaluation. Review the current proposal.",
+					};
+			} finally {
+				releaseExecutorEvaluation(db, proposal, lease);
+			}
+		}
+	}
+	return {
+		level: hasExecutorRegressions(evaluation) ? "warning" : "info",
+		text: executorEvaluationText(proposal, evaluation),
+	};
 }
 
 /** The bounded list: one line per proposal, with the same fields for every state. */
@@ -490,8 +597,7 @@ function listText(db: DatabaseSync): string {
 }
 
 /**
- * `/workflow proposals | approve <id> | reject <id> [reason]`: the proposal library over the activated store. No model
- * turn; it returns what to show and the handler notifies it.
+ * Commands over the activated proposal store. Only an explicit evaluation runs the model.
  * Problem: a proposal printed as applied before its receipt exists would tell the user a change landed that did not.
  * Example: a crash after the file write but before the receipt insert. Solution: "Applied" is printed only when the
  * state is applied and its receipt row exists; anything else says "Not applied" with the stored reason.
@@ -511,6 +617,8 @@ export async function proposalCommand(
 		const [prefix = "", ...rest] = args;
 		if (!prefix) return { level: "warning", text: PROPOSAL_USAGE[command] };
 		if (command === "approve" && rest.length > 1) return { level: "warning", text: PROPOSAL_USAGE.approve };
+		if (command === "evaluate" && (rest.length !== 1 || !VERSION_PREFIX.test(rest[0])))
+			return { level: "warning", text: PROPOSAL_USAGE.evaluate };
 		const found = resolveProposalId(store.db, prefix);
 		if (found.status === "none")
 			return { level: "warning", text: `No proposal matches "${prefix}". /workflow proposals lists them.` };
@@ -520,6 +628,7 @@ export async function proposalCommand(
 			const rejected = rejectProposal(store.db, found.proposal.id, rest.join(" ").trim() || NO_REASON);
 			return { level: "info", text: `Rejected ${rejected.id}: ${rejected.reason}.` };
 		}
+		if (command === "evaluate") return await evaluate(store.db, found.proposal, rest[0], deps);
 		return await approve(store.db, found.proposal, deps, rest[0]);
 	} catch (error) {
 		return { level: "warning", text: messageOf(error) };
@@ -573,7 +682,18 @@ async function review(args: string[], ctx: ExtensionCommandContext): Promise<voi
 					)
 			: undefined;
 	try {
-		const result = await reviewCommand(learningDeps(ctx, { confirm }));
+		const result = await reviewCommand(
+			learningDeps(ctx, {
+				confirm,
+				executorSkill: () => {
+					try {
+						return readFileSync(join(SKILLS_DIR, "build", "executor", "SKILL.md"), "utf8");
+					} catch {
+						return undefined;
+					}
+				},
+			}),
+		);
 		ctx.ui.notify(result.text, result.level);
 	} catch (error) {
 		ctx.ui.notify(`/workflow review: ${messageOf(error)}`, "warning");
@@ -586,7 +706,17 @@ async function runProposalCommand(
 	ctx: ExtensionCommandContext,
 ): Promise<void> {
 	try {
-		const result = await proposalCommand(command, args, { memory: pihousePaths().memory, repoRoot: REPO_ROOT });
+		const { memory } = pihousePaths();
+		const model = ctx.model;
+		const executorEvaluation =
+			command === "evaluate" && model && model.api !== VIRTUAL_MODEL_API && ctx.modelRegistry.hasConfiguredAuth(model)
+				? {
+						model: `${model.provider}/${model.id}`,
+						replay: createExecutorReplay({ modelRegistry: ctx.modelRegistry, model, thinkingLevel: ctx.thinkingLevel }),
+						progress: (text: string) => ctx.ui.notify(text, "info"),
+					}
+				: undefined;
+		const result = await proposalCommand(command, args, { memory, repoRoot: REPO_ROOT, executorEvaluation });
 		ctx.ui.notify(result.text, result.level);
 	} catch (error) {
 		ctx.ui.notify(`/workflow ${command}: ${messageOf(error)}`, "warning");
@@ -628,7 +758,7 @@ export default function workflow(pi: ExtensionAPI): void {
 	pi.on("session_shutdown", (_event, ctx) => captureIfFlagged(ctx));
 	pi.registerCommand("workflow", {
 		description:
-			"log [reason]: capture this session · review [--yes]: compact and review saved runs (model quota) · proposals [id] · approve <id> [version] · reject <id> [reason] · ask <question>",
+			"log [reason]: capture this session · review [--yes]: compact and review saved runs (model quota) · proposals [id] · evaluate <id> <version> (model quota) · approve <id> [version] · reject <id> [reason] · ask <question>",
 		getArgumentCompletions: (prefix) =>
 			WORKFLOW_COMMANDS.flatMap((c) => [...c.completions])
 				.filter((c) => c.startsWith(prefix))
@@ -641,7 +771,8 @@ export default function workflow(pi: ExtensionAPI): void {
 			if (sub === "self-learning") return ctx.ui.notify(SELF_LEARNING_RETIRED, "warning");
 			if (sub === "log") return log(pi, rest.join(" ").trim(), ctx);
 			if (sub === "review") return review(rest, ctx);
-			if (sub === "proposals" || sub === "approve" || sub === "reject") return runProposalCommand(sub, rest, ctx);
+			if (sub === "proposals" || sub === "evaluate" || sub === "approve" || sub === "reject")
+				return runProposalCommand(sub, rest, ctx);
 			if (sub === "ask" && rest.join(" ").trim()) {
 				pi.sendMessage(
 					{ customType: MESSAGE_TYPE, content: await askContext(rest.join(" ").trim()), display: false },
