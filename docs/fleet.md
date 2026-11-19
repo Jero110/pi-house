@@ -60,3 +60,5 @@ from="100.64.0.1",restrict,command="/absolute/path/to/node /absolute/path/to/pi-
 - The trust boundary includes the macOS user, installed native binaries, Tailscale and selected provider. A compromised Mac or administrator can control its service. The app sends the prompt and any project context selected by the agent to its provider under that account. Untrusted checkouts should not contain secrets.
 
 For workspace threads, see [Slack Socket Mode](fleet-slack.md). [Project memory](fleet-memory.md) covers the private Git repository, retrieval evaluations and topology for additional minis.
+
+The [workflow factory](fleet-factory.md) runs versioned project workflows through draft, evaluation and publication. See [fleet recovery](fleet-recovery.md) for consistent snapshots, standby pulls and offline restore.

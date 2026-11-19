@@ -25,6 +25,15 @@ test("only the paired browser on the configured HTTPS tailnet identity can reach
 		throw Error("unexpected request");
 	};
 	const jobs = {
+		factory: {
+			assess: () => {},
+			list: () => [],
+			get: () => undefined,
+			save: unsupported,
+			evaluate: unsupported,
+			publish: unsupported,
+			run: unsupported,
+		},
 		list: () => [],
 		get: () => undefined,
 		artifact: unsupported,
@@ -35,13 +44,14 @@ test("only the paired browser on the configured HTTPS tailnet identity can reach
 		memoryFacts: () => [],
 		memoryRelations: () => [],
 	};
-	const server = createServer(
+	const handler = () =>
 		fleetHandler(
 			config,
 			() => jobs,
 			async (req) => req.headers["x-test-peer"] === login,
-		),
-	);
+		);
+	let active = handler();
+	const server = createServer((req, res) => active(req, res));
 	const socketPath = join(stateDir, "web.sock");
 	await new Promise<void>((resolve) => server.listen(socketPath, resolve));
 	t.after(async () => {
@@ -74,7 +84,9 @@ test("only the paired browser on the configured HTTPS tailnet identity can reach
 	assert.equal((await send("/", { host: "elsewhere.invalid" })).status, 403);
 	assert.equal((await send("/api/config")).status, 401);
 	assert.equal((await send("/api/graph?project=demo")).status, 401);
+	assert.equal((await send("/api/factory?project=demo")).status, 401);
 	const pair = new URLSearchParams({ code: issuePairCode(stateDir) }).toString();
+	issuePairCode(stateDir); // Opening the desktop must not invalidate the phone code.
 	const form = { origin, "content-type": "application/x-www-form-urlencoded" };
 	assert.equal((await send("/pair", { ...form, origin: "https://elsewhere.invalid" }, pair)).status, 403);
 	const paired = await send("/pair", form, pair);
@@ -84,7 +96,11 @@ test("only the paired browser on the configured HTTPS tailnet identity can reach
 	assert.match(paired.cookie, /SameSite=Strict/);
 	assert.equal((await send("/pair", form, pair)).status, 403);
 	const cookie = paired.cookie.split(";")[0];
+	active = handler(); // Preserve a paired browser across coordinator restarts.
 	assert.equal((await send("/api/config", { cookie })).status, 200);
+	assert.equal((await send("/api/factory?project=demo", { cookie })).body, "[]");
+	assert.equal((await send("/api/factory?project=other", { cookie })).status, 404);
+	assert.equal((await send("/api/factory/run", { cookie, origin }, "{}")).status, 415);
 	assert.equal((await send("/api/memory?project=another&q=canary", { cookie })).status, 404);
 	assert.equal(
 		JSON.parse((await send("/api/memory?project=demo&q=canary", { cookie })).body).hits[0].chatId,

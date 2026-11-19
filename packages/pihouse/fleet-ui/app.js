@@ -755,9 +755,11 @@ byId("open-nav").addEventListener("click", () => {
 const memoryHints = {
 	link: "Replace the subject, relation and object in the prepared command, then send it to confirm the relationship.",
 	save: "Enter a fact as key = value, then send it in the composer.",
-	feedback: "Open the conversation that answers your question. Add the original search question after the command.",
+	feedback:
+		"Record the original question in the conversation that answers it. Feedback alone keeps the current profile.",
 	status: "View the active search profile and the project's feedback count.",
-	tune: "Evaluate search profiles using this project's recorded feedback.",
+	tune: "Run a comparison using fresh holdout questions once. The current profile stays active while you review the trial.",
+	promote: "Enter the eligible trial ID from the comparison to activate its proposed profile.",
 	revert: "Restore the previous search profile for this project.",
 };
 byId("memory-command").addEventListener("change", () => {
@@ -784,7 +786,7 @@ byId("prepare-command").addEventListener("click", () => {
 	input.value =
 		command === "link"
 			? "memory link SUBJECT | RELATION | OBJECT"
-			: `memory ${command}${["save", "feedback"].includes(command) ? " " : ""}`;
+			: `memory ${command}${["save", "feedback", "promote"].includes(command) ? " " : ""}`;
 	controls();
 	input.focus();
 	if (command === "link") input.setSelectionRange("memory link ".length, "memory link SUBJECT".length);

@@ -1,7 +1,7 @@
 // Inbound Slack retries must never launch a second turn. Bind the verified Slack
 // thread to one normal fleet chat and mirror only the replies of that chat.
 import { createHash, randomUUID } from "node:crypto";
-import { chmodSync, lstatSync, realpathSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, realpathSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { DatabaseSync, type SQLOutputValue } from "node:sqlite";
 import { type createFleetJobs, FleetJobError } from "./fleet-jobs.ts";
@@ -40,6 +40,24 @@ function literalParts(text: string, limit: number) {
 	return chunks;
 }
 
+const liveLedgers = new Map<string, DatabaseSync>();
+export function copySlackForRecovery(stateDir: string, target: string) {
+	const source = join(stateDir, "slack.sqlite");
+	const open = liveLedgers.get(source);
+	if (open) {
+		open.prepare("VACUUM INTO ?").run(target);
+		return;
+	}
+	if (!existsSync(source)) return;
+	if (!lstatSync(source).isFile()) throw new Error("Invalid Slack recovery source.");
+	const db = new DatabaseSync(source, { readOnly: true });
+	try {
+		db.prepare("VACUUM INTO ?").run(target);
+	} finally {
+		db.close();
+	}
+}
+
 export function createSlackBridge(config: Settings, jobs: Jobs, post: Post) {
 	const state = lstatSync(config.stateDir);
 	if (
@@ -71,6 +89,11 @@ export function createSlackBridge(config: Settings, jobs: Jobs, post: Post) {
 		throw error;
 	}
 
+	liveLedgers.set(path, db);
+	function closeLedger() {
+		liveLedgers.delete(path);
+		db.close();
+	}
 	function transaction(fn: () => void) {
 		db.exec("BEGIN IMMEDIATE");
 		try {
@@ -278,14 +301,14 @@ export function createSlackBridge(config: Settings, jobs: Jobs, post: Post) {
 			if (!flushing)
 				flushing = drain().finally(() => {
 					flushing = undefined;
-					if (closed) db.close();
+					if (closed) closeLedger();
 				});
 			return flushing;
 		},
 		close() {
 			if (closed) return;
 			closed = true;
-			if (!flushing) db.close();
+			if (!flushing) closeLedger();
 		},
 	};
 }

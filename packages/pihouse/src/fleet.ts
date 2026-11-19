@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { serveFleetBackup } from "./fleet-backup.ts";
 import { createFleetJobs } from "./fleet-jobs.ts";
 import { startSlackSocket } from "./fleet-slack-socket.ts";
 import { serveFleet } from "./fleet-tailnet.ts";
@@ -45,7 +46,12 @@ export async function fleetMain(args: readonly string[]): Promise<number> {
 				})
 			: undefined;
 		try {
-			await serveFleet(c, jobs);
+			const backup = await serveFleetBackup(c, jobs);
+			try {
+				await serveFleet(c, jobs);
+			} finally {
+				backup.close();
+			}
 		} finally {
 			stop.abort();
 			await (await slack)?.close();

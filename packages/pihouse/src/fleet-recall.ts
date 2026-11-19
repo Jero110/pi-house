@@ -1,10 +1,13 @@
-import {
-	type FleetMemoryProfile,
-	type FleetMemorySource,
-	fleetMemoryReply,
-	searchFleetMemory,
-} from "./fleet-memory.ts";
+import { type FleetMemorySource, fleetMemoryReply, fleetPassages } from "./fleet-memory.ts";
 import { createMemoryRepository } from "./fleet-memory-repo.ts";
+
+import {
+	addFeedback,
+	evaluateRecall,
+	feedbackStatus,
+	promoteRecall,
+	type RecallEvaluation,
+} from "./fleet-recall-eval.ts";
 
 type Fact = { key: string; value: string; chatId: string; version: number; retired?: boolean };
 export type FleetMemoryRelation = {
@@ -15,29 +18,9 @@ export type FleetMemoryRelation = {
 	version: number;
 	retired?: boolean;
 };
-type Comparison = { total: number; incumbent: number; candidate: number };
-type Example = { query: string; chatId: string; holdout: boolean };
-type Trial = {
-	previous: FleetMemoryProfile;
-	next: FleetMemoryProfile;
-	outcome: string;
-	examples: number;
-	at: number;
-	train: number;
-	heldout: number;
-	incumbent?: FleetMemoryProfile;
-	candidate?: FleetMemoryProfile;
-	training?: Comparison;
-	holdout?: Comparison;
-};
-interface State {
-	profile: FleetMemoryProfile;
+interface State extends RecallEvaluation {
 	facts: Fact[];
 	relations?: FleetMemoryRelation[];
-	examples: Example[];
-	trials: Trial[];
-	revision: number;
-	lastTrial: number;
 }
 const initial = (): State => ({
 	profile: "balanced",
@@ -138,48 +121,8 @@ export function createFleetRecall(path: string, live: FleetMemorySource, origin?
 	const getState = (project: string) => repo.readState<State>(project) ?? initial();
 	const facts = (project: string) => getState(project).facts.filter((f) => !f.retired);
 	const relations = (project: string) => (getState(project).relations ?? []).filter((r) => !r.retired);
-	function tune(state: State, project: string) {
-		if (state.revision === state.lastTrial) return "New feedback is required before another trial.";
-		const train = state.examples.filter((e) => !e.holdout),
-			heldout = state.examples.filter((e) => e.holdout);
-		if (train.length < 4 || heldout.length < 2)
-			return "Collect feedback across at least six independent threads before tuning.";
-		const source = repo.source(project);
-		const scores = (profile: FleetMemoryProfile, examples: Example[]) =>
-			examples.map((e) => Number(searchFleetMemory(source, project, e.query, profile).hits[0]?.chatId === e.chatId));
-		const sum = (s: number[]) => s.reduce((a, b) => a + b, 0);
-		const current = state.profile;
-		const baseTrain = sum(scores(current, train));
-		const candidates = (["balanced", "title", "evidence"] as const)
-			.filter((p) => p !== current)
-			.map((profile) => ({ profile, score: sum(scores(profile, train)) }))
-			.sort((a, b) => b.score - a.score);
-		const { profile: candidate, score: trainBest } = candidates[0];
-		const baseline = scores(current, heldout);
-		const result = scores(candidate, heldout);
-		const training = { total: train.length, incumbent: baseTrain, candidate: trainBest };
-		const holdout = { total: heldout.length, incumbent: sum(baseline), candidate: sum(result) };
-		const better =
-			trainBest > baseTrain && holdout.candidate > holdout.incumbent && result.every((v, i) => v >= baseline[i]);
-		if (better) state.profile = candidate;
-		const outcome = better ? "promoted" : "retained";
-		state.lastTrial = state.revision;
-		state.trials.push({
-			previous: current,
-			next: state.profile,
-			outcome,
-			examples: state.examples.length,
-			at: Date.now(),
-			train: Math.max(baseTrain, trainBest),
-			heldout: trainBest > baseTrain ? holdout.candidate : holdout.incumbent,
-			incumbent: current,
-			candidate,
-			training,
-			holdout,
-		});
-		return `Trial ${outcome} ${state.profile}. Held-out top results: ${current} ${holdout.incumbent}/${holdout.total}, ${candidate} ${holdout.candidate}/${holdout.total}.`;
-	}
 	return {
+		close: repo.close,
 		source: repo.source,
 		capture: repo.capture,
 		facts,
@@ -222,10 +165,11 @@ export function createFleetRecall(path: string, live: FleetMemorySource, origin?
 					s.facts.filter((f) => !f.retired).length +
 					" active facts · " +
 					(s.relations ?? []).filter((r) => !r.retired).length +
-					" active relations."
+					" active relations.\n" +
+					feedbackStatus(s)
 				);
 			}
-			if (["save", "forget", "link", "unlink", "feedback", "tune", "revert"].includes(verb))
+			if (["save", "forget", "link", "unlink", "feedback", "tune", "promote", "revert"].includes(verb))
 				return repo.updateState(project, initial, (state) => {
 					if (verb === "link" || verb === "unlink") return updateRelation(state, verb, rest, chatId);
 					if (verb === "save") {
@@ -254,7 +198,8 @@ export function createFleetRecall(path: string, live: FleetMemorySource, origin?
 						f.version++;
 						return `Retired ${f.key}.`;
 					}
-					if (verb === "tune") return tune(state, project);
+					if (verb === "tune") return evaluateRecall(state, project, chatId, () => repo.source(project));
+					if (verb === "promote") return promoteRecall(state, project, chatId, rest, () => repo.source(project));
 					if (verb === "revert") {
 						const last = state.trials.findLast((t) => t.outcome === "promoted" || t.outcome === "reverted");
 						if (last?.outcome !== "promoted") return "No active promotion to revert.";
@@ -273,7 +218,9 @@ export function createFleetRecall(path: string, live: FleetMemorySource, origin?
 					if (
 						!job ||
 						job.project !== project ||
-						!job.messages.some((m) => !isFleetMemoryCommand(m.text) && m.role !== "system" && m.kind !== "memory")
+						!fleetPassages(job).passages.some(
+							(p) => p.kind === "assistant" || p.kind === "message" || p.kind === "artifact",
+						)
 					)
 						return "Open the source chat and add feedback there.";
 					if (rest.length < 3 || rest.length > 256)
@@ -281,18 +228,10 @@ export function createFleetRecall(path: string, live: FleetMemorySource, origin?
 					const present = state.examples.find((e) => normalize(e.query) === normalize(rest));
 					if (present?.chatId === chatId) return "Feedback already recorded.";
 					if (present) return "That question already has a source. Use a distinct question.";
-					if (state.examples.length >= 96) return "Project evaluation set is full.";
-					const group = state.examples.find((e) => e.chatId === chatId);
-					const count = new Set(state.examples.map((e) => e.chatId)).size;
-					state.examples.push({ query: rest, chatId, holdout: group?.holdout ?? count % 3 === 2 });
-					state.revision++;
-					return (
-						"Feedback recorded. " +
-						(state.revision >= 6 && state.revision - state.lastTrial >= 3 ? tune(state, project) : "")
-					);
+					return addFeedback(state, chatId, rest);
 				});
 			if (!arg || verb === "help")
-				return "Project memory: search with memory QUERY; save KEY = VALUE; forget KEY; link or unlink SUBJECT | RELATION | OBJECT; feedback QUESTION (in its source chat); status; tune; revert.";
+				return "Project memory: search with memory QUERY; save KEY = VALUE; forget KEY; link or unlink SUBJECT | RELATION | OBJECT; feedback QUESTION (in its source chat); status; tune; promote TRIAL_ID; revert.";
 			const state = getState(project);
 			const cite = (label: string, entry: { version: number; chatId: string }) =>
 				`${label} (v${entry.version})\n${origin ?? ""}/#chat=${encodeURIComponent(entry.chatId)}`;

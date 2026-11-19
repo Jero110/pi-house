@@ -23,7 +23,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 
 type ArtifactType = "text" | "image" | "file";
-export type ArtifactSummary = { id: string; name: string; size: number; type: ArtifactType };
+export type ArtifactSummary = { id: string; name: string; size: number; type: ArtifactType; sha256?: string };
 export type FleetArtifact = { bytes: Buffer; name: string; mime: string; type: ArtifactType };
 type Entry = { name: string; hash: string; data?: string };
 type Baseline = Map<string, string> | undefined;
@@ -183,6 +183,15 @@ export function createArtifactStore(db: DatabaseSync) {
 	db.exec(
 		"CREATE TABLE IF NOT EXISTS fleet_artifacts(id TEXT PRIMARY KEY,chat TEXT NOT NULL,name TEXT NOT NULL,size INTEGER NOT NULL,type TEXT NOT NULL,mime TEXT NOT NULL,bytes BLOB NOT NULL); CREATE INDEX IF NOT EXISTS fleet_artifacts_chat ON fleet_artifacts(chat)",
 	);
+	if (!db.prepare("SELECT name FROM pragma_table_info('fleet_artifacts') WHERE name='sha256'").get())
+		db.exec("ALTER TABLE fleet_artifacts ADD COLUMN sha256 TEXT");
+	for (const row of db.prepare("SELECT id,bytes FROM fleet_artifacts WHERE sha256 IS NULL").iterate()) {
+		const hash = createHash("sha256")
+			.update(row.bytes as Uint8Array)
+			.digest("hex");
+		db.prepare("UPDATE fleet_artifacts SET sha256=? WHERE id=?").run(hash, row.id);
+	}
+
 	return {
 		baseline(checkout: string): Baseline {
 			const entries = scan(checkout, true);
@@ -205,17 +214,28 @@ export function createArtifactStore(db: DatabaseSync) {
 				Number(total?.total) + size > 256 * 1024 * 1024
 			)
 				return false;
-			const insert = db.prepare("INSERT INTO fleet_artifacts(id,chat,name,size,type,mime,bytes) VALUES(?,?,?,?,?,?,?)");
+			const insert = db.prepare(
+				"INSERT INTO fleet_artifacts(id,chat,name,size,type,mime,bytes,sha256) VALUES(?,?,?,?,?,?,?,?)",
+			);
 			const previewDeadline = Date.now() + 5000;
 			for (const { name, bytes } of blobs) {
 				const { type, mime } = classify(name, bytes, previewDeadline);
-				insert.run(randomUUID(), chat, name, bytes.length, type, mime, bytes);
+				insert.run(
+					randomUUID(),
+					chat,
+					name,
+					bytes.length,
+					type,
+					mime,
+					bytes,
+					createHash("sha256").update(bytes).digest("hex"),
+				);
 			}
 			return true;
 		},
 		list(chat: string): ArtifactSummary[] {
 			return db
-				.prepare("SELECT id,name,size,type FROM fleet_artifacts WHERE chat=? ORDER BY rowid")
+				.prepare("SELECT id,name,size,type,sha256 FROM fleet_artifacts WHERE chat=? ORDER BY rowid")
 				.all(chat) as unknown as ArtifactSummary[];
 		},
 		get(chat: string, id: string): FleetArtifact | undefined {

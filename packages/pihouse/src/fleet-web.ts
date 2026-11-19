@@ -3,6 +3,7 @@ import {
 	existsSync,
 	lstatSync,
 	mkdirSync,
+	readdirSync,
 	readFileSync,
 	realpathSync,
 	renameSync,
@@ -28,6 +29,7 @@ type Jobs = Pick<
 	| "memoryFacts"
 	| "memoryRelations"
 	| "memorySource"
+	| "factory"
 >;
 export interface FleetConfig {
 	origin: string;
@@ -115,19 +117,31 @@ const codeFile = (dir: string) => join(dir, "web-pair.json");
 export function issuePairCode(stateDir: string): string {
 	ensurePrivateDir(stateDir);
 	const code = randomBytes(24).toString("base64url");
-	const temp = join(stateDir, `.pair-${randomBytes(12).toString("hex")}`);
+	const codes = join(stateDir, "pair-codes");
+	ensurePrivateDir(codes);
+	for (const file of readdirSync(codes)) {
+		if (!/^[a-f0-9]{64}$/.test(file)) continue;
+		const p = join(codes, file);
+		try {
+			if (lstatSync(p).mtimeMs <= Date.now() - 300000) unlinkSync(p);
+		} catch {
+			/* Concurrent consumption is permitted. */
+		}
+	}
+	const temp = join(codes, `.new-${randomBytes(12).toString("hex")}`);
 	writeFileSync(temp, JSON.stringify({ hash: digest(code), expires: Date.now() + 300_000 }), {
 		mode: 0o600,
 		flag: "wx",
 	});
-	renameSync(temp, codeFile(stateDir));
+	renameSync(temp, join(codes, digest(code)));
 	return code;
 }
 
 function consumeCode(dir: string, code: string): boolean {
 	if (!/^[a-zA-Z0-9_-]{32}$/.test(code)) return false;
 	try {
-		const path = codeFile(dir);
+		const current = join(dir, "pair-codes", digest(code));
+		const path = existsSync(current) ? current : codeFile(dir);
 		const saved = JSON.parse(readFileSync(path, "utf8"));
 		if (!(saved.expires > Date.now()) || !timingSafeEqual(Buffer.from(saved.hash), Buffer.from(digest(code))))
 			return false;
@@ -150,6 +164,8 @@ const pairCss = `html{color-scheme:dark;background:#121513;color:#f4f3ec;font:16
 const assets = new Map([
 	["/", ["index.html", "text/html"]],
 	["/app.js", ["app.js", "text/javascript"]],
+	["/factory.js", ["factory.js", "text/javascript"]],
+	["/factory.css", ["factory.css", "text/css"]],
 	["/style.css", ["style.css", "text/css"]],
 ]);
 const agents = ["pi", "codex", "claude"] as const;
@@ -174,12 +190,40 @@ async function body(req: IncomingMessage): Promise<string> {
 	return Buffer.concat(chunks).toString("utf8");
 }
 
+async function readChatRequest(req: IncomingMessage): Promise<Record<string, unknown>> {
+	if (req.headers["x-pih-request"] !== "chat" || req.headers["content-type"]?.split(";")[0] !== "application/json")
+		throw new WebError(415, "Expected a same-origin chat request");
+	const raw = await body(req);
+	try {
+		const value = JSON.parse(raw);
+		if (value && typeof value === "object" && !Array.isArray(value)) return value;
+	} catch {
+		/* Invalid JSON and a wrong top-level type are client errors. */
+	}
+	throw new WebError(400, "Expected a JSON object");
+}
+
 function send(res: ServerResponse, status: number, type: string, content: string | Buffer): void {
 	res.writeHead(status, { "Content-Type": `${type}; charset=utf-8` }).end(content);
 }
 
 export function fleetHandler(c: FleetConfig, jobs: () => Jobs, authorized: (req: IncomingMessage) => Promise<boolean>) {
+	const sessionFile = join(c.stateDir, `web-sessions-${digest(JSON.stringify([c.origin, c.login]))}.json`);
 	const sessions = new Map<string, number>();
+	if (existsSync(sessionFile)) {
+		const st = lstatSync(sessionFile);
+		if (st.isFile() && st.uid === process.getuid?.() && !(st.mode & 0o077) && st.size < 16384) {
+			for (const [key, expiry] of Object.entries(JSON.parse(readFileSync(sessionFile, "utf8")))) {
+				if (
+					/^[a-f0-9]{64}$/.test(key) &&
+					typeof expiry === "number" &&
+					expiry > Date.now() &&
+					expiry <= Date.now() + 8 * 3600_000
+				)
+					sessions.set(key, expiry);
+			}
+		}
+	}
 	const host = new URL(c.origin).host;
 	async function handle(req: IncomingMessage, res: ServerResponse) {
 		// Authentication uses the actual TLS peer address; browser headers never assert identity.
@@ -204,7 +248,11 @@ export function fleetHandler(c: FleetConfig, jobs: () => Jobs, authorized: (req:
 			res.writeHead(307, { Location: `${c.coordinatorOrigin}/` }).end();
 			return;
 		}
-		if (c.coordinatorOrigin && path.startsWith("/api/") && (!get || /^\/api\/(memory|graph)(?:\?|$)/.test(path)))
+		if (
+			c.coordinatorOrigin &&
+			path.startsWith("/api/") &&
+			(!get || /^\/api\/(memory|graph|factory)(?:\?|$)/.test(path))
+		)
 			throw new WebError(409, `Open the coordinator for project memory and new turns: ${c.coordinatorOrigin}`);
 		if (!get && method !== "POST") throw new WebError(405, "Method not allowed");
 		if (!get && (h.origin !== c.origin || (h["sec-fetch-site"] && h["sec-fetch-site"] !== "same-origin")))
@@ -219,6 +267,9 @@ export function fleetHandler(c: FleetConfig, jobs: () => Jobs, authorized: (req:
 			for (const [k, expiry] of sessions) if (expiry <= Date.now()) sessions.delete(k);
 			if (sessions.size >= 32) sessions.delete(sessions.keys().next().value ?? "");
 			sessions.set(digest(token), Date.now() + 8 * 3600_000);
+			const pending = `${sessionFile}.${randomBytes(12).toString("hex")}`;
+			writeFileSync(pending, JSON.stringify(Object.fromEntries(sessions)), { mode: 0o600, flag: "wx" });
+			renameSync(pending, sessionFile);
 			res
 				.writeHead(303, {
 					Location: "/",
@@ -239,6 +290,39 @@ export function fleetHandler(c: FleetConfig, jobs: () => Jobs, authorized: (req:
 		if (get && path === "/api/config")
 			return json(200, { host: c.host, projects: Object.keys(c.projects), agents, peers: c.peers });
 		const requested = new URL(path, "http://localhost");
+		if (get && requested.pathname === "/api/factory") {
+			const project = requested.searchParams.get("project") ?? "",
+				id = requested.searchParams.get("id");
+			if (!Object.hasOwn(c.projects, project)) throw new WebError(404, "Unknown project");
+			const service = jobs().factory;
+			if (id === null) return json(200, service.list(project));
+			const result = service.get(project, id);
+			if (!result) throw new WebError(404, "Unknown workflow");
+			return json(200, result);
+		}
+		if (!get && /^\/api\/factory\/(?:save|evaluate|publish|run)$/.test(path)) {
+			const p = await readChatRequest(req);
+			if (typeof p.project !== "string" || !Object.hasOwn(c.projects, p.project))
+				throw new WebError(404, "Unknown project");
+			const service = jobs().factory;
+			if (path === "/api/factory/save") {
+				if (p.id != null && typeof p.id !== "string") throw new WebError(400, "Invalid workflow ID");
+				return json(200, service.save(p.project, p.id ?? null, p));
+			}
+			if (
+				typeof p.id !== "string" ||
+				typeof p.revision !== "number" ||
+				!Number.isSafeInteger(p.revision) ||
+				p.revision < 1
+			)
+				throw new WebError(400, "A workflow revision is required");
+			if (path === "/api/factory/publish") return json(200, service.publish(p.project, p.id, p.revision));
+			if (typeof p.requestId !== "string") throw new WebError(400, "A request ID is required");
+			if (path === "/api/factory/evaluate")
+				return json(202, service.evaluate(p.project, p.id, p.revision, p.requestId));
+			if (typeof p.input !== "string") throw new WebError(400, "Workflow input is required");
+			return json(202, service.run(p.project, p.id, p.revision, p.input, p.requestId));
+		}
 		if (get && (requested.pathname === "/api/memory" || requested.pathname === "/api/graph")) {
 			const project = requested.searchParams.get("project") ?? "",
 				query = requested.searchParams.get("q") ?? "";
@@ -291,15 +375,7 @@ export function fleetHandler(c: FleetConfig, jobs: () => Jobs, authorized: (req:
 			return json(200, chat);
 		}
 		if (!get && (path === "/api/chats" || match?.[2])) {
-			if (h["x-pih-request"] !== "chat" || h["content-type"]?.split(";")[0] !== "application/json")
-				throw new WebError(415, "Expected a same-origin chat request");
-			let payload: { message?: unknown; project?: unknown; agent?: unknown } | null;
-			try {
-				payload = JSON.parse(await body(req));
-			} catch (e) {
-				if (e instanceof WebError) throw e;
-				throw new WebError(400, "Invalid JSON");
-			}
+			const payload = await readChatRequest(req);
 			if (!payload || typeof payload.message !== "string" || !payload.message.trim() || payload.message.length > 16000)
 				throw new WebError(400, "Message must be between 1 and 16000 characters");
 			if (match) return json(202, jobs().reply(match[1], payload.message));

@@ -6,8 +6,8 @@ import { devNull, homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath, pathToFileURL } from "node:url";
-
 import { type ArtifactSummary, createArtifactStore } from "./fleet-artifacts.ts";
+import { createFleetFactory } from "./fleet-factory.ts";
 import {
 	type FleetPlanner,
 	FleetPlannerAddressError,
@@ -215,6 +215,7 @@ export function createFleetJobs(
 	if (!Number.isInteger(timeout) || timeout < 1 || timeout > 24 * 60 * 60_000)
 		throw new Error("Turn timeout must be between 1 ms and 24 hours.");
 	const state = canonicalPath(resolve(options.stateDir));
+	if (existsSync(join(state, "RESTORE-INCOMPLETE"))) throw new Error("Fleet restore is incomplete.");
 	const memoryRepo = canonicalPath(resolve(options.memoryRepo ?? join(state, "memory.git")));
 	const projects = allowedProjects(options.projects, state, memoryRepo);
 	const checkouts = join(state, "checkouts");
@@ -229,6 +230,7 @@ export function createFleetJobs(
 		recall ??= createFleetRecall(memoryRepo, { list, get }, options.origin);
 		return recall;
 	}
+	let assessCase: ((job: FleetJob) => void) | undefined;
 	let artifacts: ReturnType<typeof createArtifactStore>;
 	const planners = options.planners ?? (options.planner ? [options.planner] : []);
 	function selectedPlanner(id: string, text: string) {
@@ -251,6 +253,8 @@ export function createFleetJobs(
 		db.exec(
 			"PRAGMA locking_mode=EXCLUSIVE; BEGIN EXCLUSIVE; CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY, project TEXT NOT NULL, agent TEXT NOT NULL, status TEXT NOT NULL, updatedAt INTEGER NOT NULL, title TEXT NOT NULL, messages TEXT NOT NULL); COMMIT;",
 		);
+		if (!db.prepare("SELECT name FROM pragma_table_info('jobs') WHERE name='sourceHost'").get())
+			db.exec("ALTER TABLE jobs ADD COLUMN sourceHost TEXT");
 		if (!db.prepare("SELECT name FROM pragma_table_info('jobs') WHERE name='events'").get())
 			db.exec("ALTER TABLE jobs ADD COLUMN events TEXT NOT NULL DEFAULT '[]'");
 		db.exec(
@@ -268,6 +272,7 @@ export function createFleetJobs(
 		if (!row) return undefined;
 		return {
 			...(row as unknown as FleetJobSummary),
+			sourceHost: typeof row.sourceHost === "string" ? row.sourceHost : undefined,
 			messages: JSON.parse(String(row.messages)) as Message[],
 			events: JSON.parse(String(row.events)) as ExecutionEvent[],
 			artifacts: artifacts.list(id),
@@ -282,6 +287,7 @@ export function createFleetJobs(
 			JSON.stringify(job.events ?? []),
 			job.id,
 		);
+		assessCase?.(job);
 	}
 	function interruptPending() {
 		const pending = db.prepare("SELECT id FROM jobs WHERE status IN ('queued','running')").all();
@@ -561,6 +567,9 @@ export function createFleetJobs(
 		}
 	}
 	const jobs = {
+		copyForRecovery(destination: string) {
+			db.prepare("VACUUM INTO ?").run(destination);
+		},
 		list,
 		memorySource(project: string) {
 			if (!projects.has(project)) throw new FleetJobError(404, "Unknown project.");
@@ -589,6 +598,7 @@ export function createFleetJobs(
 				if (Number(row?.count) >= 256) throw new FleetJobError(503, "Host chat capacity reached.");
 				const job: FleetJob = {
 					id: randomUUID(),
+					sourceHost: options.host,
 					project,
 					agent,
 					title: message.text.replace(/\s+/g, " ").slice(0, 100),
@@ -600,7 +610,7 @@ export function createFleetJobs(
 				};
 				prepareTurn(job, message.text);
 				db.prepare(
-					"INSERT INTO jobs(id,project,agent,title,status,updatedAt,messages,events) VALUES (?,?,?,?,?,?,?,?)",
+					"INSERT INTO jobs(id,project,agent,title,status,updatedAt,messages,events,sourceHost) VALUES (?,?,?,?,?,?,?,?,?)",
 				).run(
 					job.id,
 					project,
@@ -610,6 +620,7 @@ export function createFleetJobs(
 					job.updatedAt,
 					JSON.stringify(job.messages),
 					JSON.stringify(job.events ?? []),
+					job.sourceHost ?? null,
 				);
 				return job;
 			});
@@ -652,10 +663,17 @@ export function createFleetJobs(
 			try {
 				cancelFleetProcessTree(active);
 				interruptPending();
+				if (recall && "close" in recall && typeof recall.close === "function") recall.close();
 			} finally {
 				db.close();
 			}
 		},
 	};
-	return jobs;
+	const { assess, ...factory } = createFleetFactory(db, {
+		project: (p) => projects.has(p),
+		get,
+		submit: (receipt, p, agent, input) => jobs.submitExternalTurn(receipt, p, agent, input),
+	});
+	assessCase = assess;
+	return { ...jobs, factory };
 }

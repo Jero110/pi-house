@@ -1,0 +1,285 @@
+#open-memory {
+	margin-bottom: 5px;
+}
+#open-factory {
+	background: transparent;
+	border: 1px solid var(--line);
+	border-radius: 8px;
+	color: var(--muted);
+	margin: 0 0 22px;
+	padding: 9px 13px;
+	text-align: left;
+}
+#open-factory:hover,
+#open-factory:focus-visible {
+	background: var(--raised);
+	color: var(--ink);
+}
+#factory-dialog {
+	background: var(--base);
+	color: var(--ink);
+	border: 1px solid var(--line);
+	padding: 0;
+	border-radius: 15px;
+	width: min(920px, 95vw);
+	max-width: 100vw;
+	max-height: min(86dvh, 850px);
+	overscroll-behavior: contain;
+}
+#factory-dialog::backdrop {
+	background: #080b09ac;
+}
+.factory-head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	padding: 14px 22px;
+	background: var(--side);
+	border-bottom: 1px solid var(--line);
+}
+.factory-head h2 {
+	margin: 0;
+	font-size: 21px;
+	letter-spacing: -0.045em;
+}
+.factory-head .icon-button {
+	display: grid;
+	place-items: center;
+	width: 38px;
+	height: 38px;
+}
+.factory-layout {
+	display: grid;
+	grid-template-columns: minmax(160px, 24%) minmax(0, 1fr);
+}
+.factory-library {
+	padding: 20px 16px;
+	border-right: 1px solid var(--line);
+	background: var(--side);
+	min-width: 0;
+}
+.factory-library h3,
+.factory-work h4,
+#factory-history > summary {
+	font-size: 15px;
+	margin: 20px 0 8px;
+	font-weight: 650;
+}
+.factory-work {
+	padding: 19px 24px 26px;
+	min-width: 0;
+}
+.factory-work h3 {
+	margin: 0 0 16px;
+	font-size: 21px;
+	letter-spacing: -0.035em;
+	overflow-wrap: anywhere;
+}
+#factory-list {
+	display: grid;
+	gap: 4px;
+	margin-top: 9px;
+}
+#factory-list button {
+	text-align: left;
+	width: 100%;
+	border-color: transparent;
+	background: transparent;
+}
+#factory-list strong,
+#factory-list small {
+	display: block;
+	overflow-wrap: anywhere;
+}
+#factory-list small {
+	font-size: 12px;
+	color: var(--muted);
+}
+#factory-list button[aria-current] {
+	border-color: #49553d;
+	background: #2b3328;
+}
+#factory-dialog label {
+	color: var(--muted);
+	font-size: 13px;
+	font-weight: 550;
+}
+#factory-dialog input,
+#factory-dialog textarea,
+#factory-dialog select {
+	box-sizing: border-box;
+	font: inherit;
+	width: 100%;
+	border: 1px solid var(--line);
+	color: var(--ink);
+	border-radius: 7px;
+	padding: 8px 10px;
+	background: var(--side);
+	min-height: 40px;
+	margin: 4px 0 8px;
+}
+#factory-dialog textarea {
+	resize: vertical;
+	display: block;
+	line-height: 1.45;
+}
+#factory-dialog button:not(.icon-button) {
+	border: 1px solid var(--line);
+	border-radius: 7px;
+	padding: 7px 11px;
+	min-height: 38px;
+	color: var(--ink);
+	background: var(--raised);
+	font-size: 13px;
+}
+#factory-dialog button.factory-primary {
+	background: var(--accent);
+	border-color: var(--accent);
+	color: #202719;
+	font-weight: 650;
+}
+#factory-dialog button:disabled {
+	opacity: 0.45;
+}
+#factory-dialog button:not(:disabled):hover {
+	border-color: var(--faint);
+}
+#factory-dialog fieldset {
+	min-width: 0;
+}
+#factory-fields {
+	padding: 0;
+	border: 0;
+	margin: 0;
+}
+#factory-fields > label,
+#factory-production > label,
+#factory-dialog .factory-case > label {
+	display: block;
+}
+#factory-status {
+	margin: 0 0 10px;
+	color: var(--accent);
+	font-size: 13px;
+	overflow-wrap: anywhere;
+}
+#factory-status:empty {
+	display: none;
+}
+.factory-help,
+#factory-eval-info,
+#factory-list p,
+#factory-records p {
+	font-size: 13px;
+	color: var(--muted);
+	margin: 0 0 10px;
+}
+.factory-case {
+	padding: 8px 12px 12px;
+	border: 1px solid var(--line);
+	border-radius: 9px;
+	margin: 0 0 12px;
+}
+.factory-case legend {
+	font: 12px var(--mono);
+	padding: 0 5px;
+	color: var(--muted);
+}
+.factory-actions {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 7px;
+}
+#factory-validation,
+#factory-production,
+#factory-history {
+	margin-top: 20px;
+	padding-top: 14px;
+	border-top: 1px solid var(--line);
+}
+#factory-validation h4,
+#factory-production h4,
+#factory-history > summary {
+	margin-top: 0;
+}
+#factory-dialog details summary {
+	cursor: pointer;
+}
+#factory-results details,
+#factory-records details {
+	padding: 8px 0;
+	overflow-wrap: anywhere;
+}
+#factory-results details + details,
+#factory-records details + details {
+	border-top: 1px solid var(--line);
+}
+#factory-results strong {
+	display: block;
+	color: var(--muted);
+	font-size: 13px;
+	margin-top: 8px;
+}
+#factory-dialog pre {
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+	font: 13px / 1.45 var(--mono);
+	margin: 4px 0 9px;
+}
+#factory-dialog a {
+	color: var(--accent);
+}
+#factory-records a {
+	display: block;
+	margin: 5px 0;
+}
+#factory-output {
+	margin-inline-start: 12px;
+}
+@media (max-width: 650px) {
+	#factory-dialog {
+		width: 100%;
+		max-height: 96dvh;
+		border-radius: 13px 13px 0 0;
+		margin: auto 0 0;
+		padding-bottom: env(safe-area-inset-bottom);
+	}
+	.factory-head {
+		padding: 10px 15px;
+	}
+	.factory-layout {
+		display: block;
+	}
+	.factory-library {
+		border: 0;
+		border-bottom: 1px solid var(--line);
+		padding: 12px 15px;
+		display: grid;
+		grid-template-columns: 1fr auto;
+		align-items: center;
+		gap: 0 9px;
+	}
+	.factory-library label,
+	.factory-library select {
+		grid-column: 1 / -1;
+	}
+	.factory-library h3 {
+		margin: 6px 0;
+	}
+	#factory-list {
+		grid-column: 1 / -1;
+		max-height: 140px;
+		overflow-y: auto;
+	}
+	#factory-list button {
+		min-height: 42px;
+	}
+	.factory-work {
+		padding: 15px;
+	}
+	#factory-dialog input,
+	#factory-dialog textarea,
+	#factory-dialog select {
+		font-size: 16px;
+	}
+}

@@ -7,7 +7,9 @@
   <meta name="referrer" content="no-referrer">
   <title>Fleet chat · pi-house</title>
   <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/factory.css">
   <script src="/app.js" defer></script>
+  <script src="/factory.js" defer></script>
 </head>
 <body>
   <div id="shell">
@@ -20,6 +22,7 @@
         </div>
         <button id="new-chat" type="button"><span aria-hidden="true">+</span>New chat</button>
         <button id="open-memory" type="button" aria-haspopup="dialog" disabled>Project memory</button>
+        <button id="open-factory" type="button" aria-haspopup="dialog">Factory</button>
         <h2 class="section-label">Recent chats</h2>
         <nav id="recents" aria-label="Recent chats"></nav>
         <div class="sidebar-foot"><span class="host-icon" aria-hidden="true"></span><span id="sidebar-host">Connecting…</span></div>
@@ -77,7 +80,7 @@
       </form>
       <details id="memory-controls"><summary>Memory controls</summary>
         <div class="memory-actions"><label class="visually-hidden" for="memory-command">Command</label>
-          <select id="memory-command"><option value="save">Save a fact</option><option value="link">Link entities</option><option value="feedback">Record search feedback</option><option value="status">Check learning status</option><option value="tune">Evaluate search profiles</option><option value="revert">Revert search profile</option></select>
+          <select id="memory-command"><option value="save">Save a fact</option><option value="link">Link entities</option><option value="feedback">Record search feedback</option><option value="status">Check learning status</option><option value="tune">Evaluate search profiles</option><option value="promote">Promote a trial profile</option><option value="revert">Revert search profile</option></select>
           <button id="prepare-command" type="button">Prepare in chat</button></div>
         <p id="command-hint">Enter a fact as key = value, then send it in the composer.</p>
         <p id="command-error" role="status" hidden></p>
