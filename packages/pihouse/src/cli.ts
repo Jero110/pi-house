@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 // pihouse: the pihouse agent. `pih setup --backend cmux|tmux` is what install.sh runs once the code is in place.
 import { homedir } from "node:os";
-import { runPihouse } from "./launcher.ts";
+import { shellQuote } from "agent-link-core";
+import { fleetMain } from "./fleet.ts";
+import { runInTerminal, runPihouse } from "./launcher.ts";
 import { PIHOUSE_VERSION, pihousePaths } from "./paths.ts";
 import { runRoute } from "./route.ts";
 import { setup, teardown } from "./setup.ts";
@@ -10,6 +12,10 @@ export const KEEPER_RETIRED =
 	"pih keeper was retired. Use /workflow proposals, /workflow approve <id> and /workflow reject <id> [reason] in a pihouse session; /workflow review looks back at saved runs.";
 
 export const USAGE = `usage: pih [pi options] [message]       start pihouse (all pi options work)
+       pih fleet serve|pair|open <config.json>  serve the private chat UI, issue a code or open it on this Mac
+       pih --tmux-session <name>        start or reattach to a named pihouse session on this host
+       pih --remote <[user@]host> <name> [project-dir]
+                                        start or reattach on an SSH host (relative paths use its home)
        pih setup --backend cmux|tmux [--claude-bridge] [--books-env-file <path>] [--no-books]
                                         register pihouse's MCP servers (cmux, books) and profile (install.sh runs this);
                                         --claude-bridge also adds the Claude models on your Claude Code login;
@@ -21,6 +27,10 @@ export const USAGE = `usage: pih [pi options] [message]       start pihouse (all
                                         3 paused (checkpoint written), 4 nothing authorized, 2 usage;
                                         --agent names the worker a decision is recorded for
        pih --version`;
+
+function validSession(name: string | undefined): name is string {
+	return !!name && !/[^A-Za-z0-9_-]/.test(name);
+}
 
 export async function main(argv: readonly string[], env: NodeJS.ProcessEnv = process.env): Promise<number> {
 	const out = (l: string) => process.stdout.write(`${l}\n`);
@@ -34,6 +44,46 @@ export async function main(argv: readonly string[], env: NodeJS.ProcessEnv = pro
 	if (cmd === "help" || cmd === "--help" || cmd === "-h") {
 		out(USAGE);
 		return 0;
+	}
+	if (cmd === "fleet") return fleetMain(rest);
+	if (cmd === "--remote") {
+		const [host, name, project = "."] = rest;
+		if (
+			!host ||
+			!/^(?:[a-zA-Z0-9_][a-zA-Z0-9_.-]*@)?[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(host) ||
+			!validSession(name) ||
+			!project ||
+			rest.length > 3
+		) {
+			err("usage: pih --remote <[user@]host> <name> [project-dir]");
+			return 2;
+		}
+		const relative = project === "~" ? "." : project.replace(/^~\//, "");
+		const directory = project.startsWith("/") ? shellQuote(project) : `"$HOME"/${shellQuote(relative)}`;
+		// macOS installers often add pih and Node to .zshrc. Load the host's interactive login environment.
+		const script = `cd -- ${directory} && exec pih --tmux-session ${shellQuote(name)}`;
+		return runInTerminal({
+			argv: ["ssh", "-t", "-a", "--", host, `exec "$SHELL" -lic ${shellQuote(script)}`],
+			env: env as Record<string, string>,
+			cwd: process.cwd(),
+		});
+	}
+	if (cmd === "--tmux-session") {
+		const [name] = rest;
+		if (rest.length !== 1 || !validSession(name)) {
+			err("pih: --tmux-session takes one name using letters, digits, hyphens or underscores");
+			return 2;
+		}
+		if (env.TMUX) {
+			err("pih: detach from tmux before opening a named session");
+			return 2;
+		}
+		// Two reconnecting clients can race. Let the tmux server create or attach in one request.
+		return runInTerminal({
+			argv: ["tmux", "new-session", "-A", "-s", `pih-${name}`, process.execPath, import.meta.filename],
+			env: env as Record<string, string>,
+			cwd: process.cwd(),
+		});
 	}
 	if (cmd === "setup") {
 		const i = rest.indexOf("--backend");

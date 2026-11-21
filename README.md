@@ -113,6 +113,31 @@ pih
 
 The vault lives in `~/.pihouse/memory/`: `conversations/` (full copies, temporary), `workflow/` (compacts, reviews, proposal backups; permanent) and `ask/` (ideas and consulted sources). `/workflow report`, `save`, `digest` and `self-learning` are retired and only print what replaces them. Limits: there is no lock between two reviews, a run whose agent-link records are gone is not offered, and a review reads at most 60,000 characters of compacts and defers the rest to the next one. See the [self-learning guide](docs/self-learning.md).
 
+## Reconnect to a Mac over Tailscale
+
+On each Mac that will run jobs, install pi-house with the tmux backend, enable Remote Login for your macOS user, and sign in to the harnesses you plan to use on that Mac. Both devices must be on your tailnet with SSH access allowed.
+
+With this version of pi-house on both ends, use a Tailscale MagicDNS name, tailnet IPv4 address or an SSH alias pointing to one. For example, these two projects run independently:
+
+```sh
+pih --remote dev@mini-m4 backend projects/backend
+pih --remote dev@mini-m6 frontend projects/frontend
+```
+
+The third argument is a directory on the selected Mac. Relative paths start in that user's home. Each checkout must already exist. The remote login shell (zsh or bash) needs `pih`, Node and tmux on its PATH. After a connection drops, repeat the command to reattach. If pi-house is installed only on the host, connect manually:
+
+```sh
+ssh your-user@your-mac-mini
+cd ~/projects/my-app
+pih --tmux-session my-app
+```
+
+The first call starts pi-house in the current project. To leave the task running, press `Ctrl-b`, then `d`. After a disconnect, SSH back into the same Mac as the same user and repeat `pih --tmux-session my-app` from any directory. You rejoin the running conversation and its worker panes. Use `tmux ls` on that Mac to find session names (`my-app` appears as `pih-my-app`).
+
+Give each project on a host its own session name. Each Mac runs its own hub and uses its own checkouts and logins. SSH carries terminal input and output. The host must stay awake to keep working, and a reboot ends its tmux sessions.
+
+For a browser chat with named agents, persistent turns and artifact previews, see [Fleet chat on macOS](docs/fleet.md).
+
 ## How it is built
 
 All diagrams use the same legend: blue = code/policy, purple = LLM processing, green = stored data, yellow = human action.

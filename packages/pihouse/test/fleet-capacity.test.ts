@@ -1,0 +1,33 @@
+import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { test } from "node:test";
+import { createFleetJobs } from "../src/fleet-jobs.ts";
+
+test("at 256 chats and 80 user turns, the public jobs service rejects overflow and restores every accepted record", (t) => {
+	const root = realpathSync(mkdtempSync(join(tmpdir(), "fleet-limit-eval-")));
+	t.after(() => rmSync(root, { recursive: true, force: true }));
+	const project = join(root, "project");
+	execFileSync("git", ["init", "--quiet", project]);
+	const options = { stateDir: join(root, "state"), projects: { demo: project } };
+	const jobs = createFleetJobs(options);
+	t.after(() => jobs.close());
+	const first = jobs.create("demo", "pi", "memory help first");
+	for (let i = 1; i < 80; i++) jobs.reply(first.id, `memory help turn ${i}`);
+	const before = jobs.get(first.id);
+	assert.equal(before?.messages.filter((m) => m.role === "user").length, 80);
+	assert.throws(() => jobs.reply(first.id, "memory help eighty-first"), /turn limit reached/);
+	assert.deepEqual(jobs.get(first.id), before);
+	for (let i = 1; i < 256; i++) jobs.create("demo", "codex", `memory help chat ${i}`);
+	const all = jobs.list();
+	assert.equal(all.length, 256);
+	assert.throws(() => jobs.create("demo", "pi", "memory help two hundred fifty-seventh"), /capacity reached/);
+	assert.deepEqual(jobs.list(), all);
+	jobs.close();
+	const restored = createFleetJobs(options);
+	t.after(() => restored.close());
+	assert.deepEqual(restored.list(), all);
+	assert.deepEqual(restored.get(first.id), before);
+});

@@ -80,6 +80,10 @@ The router does not imply universal quota visibility. In-place switching is limi
 
 `packages/pihouse/src/extensions/workflow.ts` exposes the public command family. Supporting modules under `packages/pihouse/src/workflow/` divide reporting, capture/evidence, migration, storage, search, compact and review runs, the deletion gate, proposals and routing; `vault-paths.ts` is the only module that knows the vault layout. Canonical documents remain readable; the local SQLite store owns operational state and derived FTS. `migrateLegacyStore` is an explicit migration operation, not an automatic startup migration. See the [self-learning guide](self-learning.md), [module specifications](specs/self-learning/common.md), [ADR-001](decisions/ADR-001-workflow-memory.md), [ADR-002](decisions/ADR-002-self-learning.md), and [ADR-004](decisions/ADR-004-vault-review.md), which defines the current loop and the [vault-review specification](specs/self-learning/vault-review.md).
 
+## Fleet chat
+
+Each host owns its checkouts and durable chat store. HTTPS binds to its tailnet addresses. An authenticated, paired browser can submit turns and read immutable artifact snapshots. The optional SSH planner advises the primary through a restricted entry point. See [Fleet chat on macOS](fleet.md) for the trust boundaries and deployment.
+
 ## Other components
 
 - **pihouse:** `packages/pihouse` runs pinned pi with extensions for identity/title, status, compact tools, workflow commands, account usage, startup model choice, and login integration. Fresh interactive startup can choose another authenticated, confirmed-available subscription model without changing the saved default. Its configuration is isolated under `~/.pihouse/agent`; plain pi is untouched.
